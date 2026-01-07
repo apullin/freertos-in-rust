@@ -47,7 +47,7 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | xTimerCreateStatic | ✅ | |
 | Timer Daemon Task | ✅ | |
 | **Event Groups** | | |
-| Event Groups | ⚠️ | Skeleton only, not complete |
+| Event Groups | ✅ | |
 | **Stream/Message Buffers** | | |
 | Stream Buffers | ✅ | Requires `stream-buffers` feature |
 | Message Buffers | ✅ | Requires `stream-buffers` feature |

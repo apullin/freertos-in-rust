@@ -36,6 +36,8 @@
 #![allow(static_mut_refs)]
 
 use core::ffi::c_void;
+#[cfg(all(feature = "pend-function-call", feature = "timers"))]
+use core::ptr;
 
 use crate::config::*;
 use crate::kernel::list::*;

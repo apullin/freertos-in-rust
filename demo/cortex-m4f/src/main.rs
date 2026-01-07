@@ -62,6 +62,10 @@ use freertos_in_rust::kernel::stream_buffer::{
     xStreamBufferSpacesAvailable, xStreamBufferBytesAvailable,
     StreamBufferHandle_t,
 };
+use freertos_in_rust::kernel::event_groups::{
+    xEventGroupCreate, xEventGroupSetBits, xEventGroupWaitBits,
+    EventBits_t,
+};
 use freertos_in_rust::types::*;
 
 // =============================================================================
@@ -79,6 +83,9 @@ static mut TIMER_HANDLE: TimerHandle_t = ptr::null_mut();
 
 /// Stream buffer handle - for producer/consumer demo
 static mut STREAM_BUFFER_HANDLE: StreamBufferHandle_t = ptr::null_mut();
+
+/// Event group handle - for task synchronization demo
+static mut EVENT_GROUP_HANDLE: EventGroupHandle_t = ptr::null_mut();
 
 /// Shared counter protected by mutex
 static SHARED_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -119,6 +126,12 @@ static mut PRODUCER_TASK_TCB: StaticTask_t = StaticTask_t::new();
 static mut CONSUMER_TASK_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
 static mut CONSUMER_TASK_TCB: StaticTask_t = StaticTask_t::new();
 
+static mut EVENT_SENDER_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
+static mut EVENT_SENDER_TCB: StaticTask_t = StaticTask_t::new();
+
+static mut EVENT_WAITER_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
+static mut EVENT_WAITER_TCB: StaticTask_t = StaticTask_t::new();
+
 // =============================================================================
 // Entry Point
 // =============================================================================
@@ -144,6 +157,9 @@ fn main() -> ! {
 
     // Create stream buffer for producer/consumer demo
     create_stream_buffer();
+
+    // Create event group for synchronization demo
+    create_event_group();
 
     // Create tasks
     create_tasks();
@@ -203,6 +219,19 @@ fn create_stream_buffer() {
             hprintln!("[Init] ERROR: Failed to create stream buffer!");
         } else {
             hprintln!("[Init] Stream buffer created successfully");
+        }
+    }
+}
+
+fn create_event_group() {
+    hprintln!("[Init] Creating event group...");
+
+    unsafe {
+        EVENT_GROUP_HANDLE = xEventGroupCreate();
+        if EVENT_GROUP_HANDLE.is_null() {
+            hprintln!("[Init] ERROR: Failed to create event group!");
+        } else {
+            hprintln!("[Init] Event group created successfully");
         }
     }
 }
@@ -305,6 +334,38 @@ fn create_tasks() {
             hprintln!("[Init] ERROR: Failed to create consumer task!");
         } else {
             hprintln!("[Init] Stream consumer task created (priority {})", PRIORITY_MEDIUM);
+        }
+
+        // Event group sender task - sets event bits
+        let result = xTaskCreateStatic(
+            task_event_sender,
+            b"EvtSend\0".as_ptr(),
+            STACK_SIZE,
+            ptr::null_mut(),
+            PRIORITY_LOW,
+            EVENT_SENDER_STACK.as_mut_ptr(),
+            &mut EVENT_SENDER_TCB as *mut StaticTask_t,
+        );
+        if result.is_null() {
+            hprintln!("[Init] ERROR: Failed to create event sender task!");
+        } else {
+            hprintln!("[Init] Event sender task created (priority {})", PRIORITY_LOW);
+        }
+
+        // Event group waiter task - waits for event bits
+        let result = xTaskCreateStatic(
+            task_event_waiter,
+            b"EvtWait\0".as_ptr(),
+            STACK_SIZE,
+            ptr::null_mut(),
+            PRIORITY_MEDIUM,
+            EVENT_WAITER_STACK.as_mut_ptr(),
+            &mut EVENT_WAITER_TCB as *mut StaticTask_t,
+        );
+        if result.is_null() {
+            hprintln!("[Init] ERROR: Failed to create event waiter task!");
+        } else {
+            hprintln!("[Init] Event waiter task created (priority {})", PRIORITY_MEDIUM);
         }
     }
 }
@@ -574,6 +635,98 @@ extern "C" fn task_stream_consumer(_pvParameters: *mut c_void) {
 
         // Small delay before next receive
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+// =============================================================================
+// Event Group Constants
+// =============================================================================
+
+/// Event bit 0: Data is ready
+const EVENT_BIT_DATA_READY: EventBits_t = 1 << 0;
+/// Event bit 1: Processing complete / acknowledgment
+const EVENT_BIT_ACK: EventBits_t = 1 << 1;
+
+/// Event group sender task
+///
+/// Periodically sets event bits to signal the waiter task.
+/// Demonstrates xEventGroupSetBits functionality.
+extern "C" fn task_event_sender(_pvParameters: *mut c_void) {
+    let mut iteration: u32 = 0;
+
+    // Initial delay to let waiter task start first
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    loop {
+        iteration += 1;
+
+        unsafe {
+            // Set the "data ready" bit
+            hprintln!("[EvtSend #{}] Setting DATA_READY bit", iteration);
+            let bits_before = xEventGroupSetBits(EVENT_GROUP_HANDLE, EVENT_BIT_DATA_READY);
+            hprintln!("[EvtSend #{}] Bits after set: 0x{:02X}", iteration, bits_before);
+
+            // Wait for acknowledgment (waiter will set ACK bit)
+            hprintln!("[EvtSend #{}] Waiting for ACK bit...", iteration);
+            let bits = xEventGroupWaitBits(
+                EVENT_GROUP_HANDLE,
+                EVENT_BIT_ACK,
+                pdTRUE,  // Clear ACK bit on exit
+                pdFALSE, // Wait for ANY bit (OR)
+                pdMS_TO_TICKS(2000),
+            );
+
+            if (bits & EVENT_BIT_ACK) != 0 {
+                hprintln!("[EvtSend #{}] ACK received! bits=0x{:02X}", iteration, bits);
+            } else {
+                hprintln!("[EvtSend #{}] Timeout waiting for ACK", iteration);
+            }
+        }
+
+        // Wait before next cycle
+        vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+}
+
+/// Event group waiter task
+///
+/// Waits for event bits and responds with acknowledgment.
+/// Demonstrates xEventGroupWaitBits with clear-on-exit.
+extern "C" fn task_event_waiter(_pvParameters: *mut c_void) {
+    let mut iteration: u32 = 0;
+
+    loop {
+        iteration += 1;
+
+        unsafe {
+            hprintln!("[EvtWait #{}] Waiting for DATA_READY bit...", iteration);
+
+            // Wait for data ready bit (clear it on exit)
+            let bits = xEventGroupWaitBits(
+                EVENT_GROUP_HANDLE,
+                EVENT_BIT_DATA_READY,
+                pdTRUE,  // Clear DATA_READY on exit
+                pdFALSE, // Wait for ANY bit (OR)
+                pdMS_TO_TICKS(3000),
+            );
+
+            if (bits & EVENT_BIT_DATA_READY) != 0 {
+                hprintln!("[EvtWait #{}] DATA_READY received! bits=0x{:02X}", iteration, bits);
+
+                // Simulate processing
+                hprintln!("[EvtWait #{}] Processing...", iteration);
+                vTaskDelay(pdMS_TO_TICKS(100));
+
+                // Send acknowledgment
+                hprintln!("[EvtWait #{}] Sending ACK", iteration);
+                let _ = xEventGroupSetBits(EVENT_GROUP_HANDLE, EVENT_BIT_ACK);
+            } else {
+                hprintln!("[EvtWait #{}] Timeout - no data ready", iteration);
+            }
+        }
+
+        // Small delay
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 

@@ -30,14 +30,17 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | **Queues & Semaphores** | | |
 | xQueueCreate (dynamic) | ✅ | Requires `alloc` feature |
 | xQueueCreateStatic | ✅ | |
-| xQueueSend / Receive | ✅ | All variants (ToFront, ToBack, FromISR) |
+| xQueueSend / Receive / Peek | ✅ | All variants (ToFront, ToBack, FromISR) |
+| xQueueGiveFromISR | ✅ | Optimized semaphore give from ISR |
+| vQueueDelete | ✅ | Requires `alloc` feature |
 | Binary Semaphores | ✅ | |
-| Counting Semaphores | ✅ | |
+| Counting Semaphores | ✅ | xQueueCreateCountingSemaphore/Static |
 | Mutexes | ✅ | Requires `use-mutexes` feature |
 | Recursive Mutexes | ✅ | Requires `use-mutexes` feature |
 | Priority Inheritance | ✅ | |
 | Queue Sets | ✅ | Requires `queue-sets` feature |
-| Queue Registry | ❌ | Not yet implemented |
+| Queue Registry | ✅ | Requires `queue-registry` feature |
+| Queue Trace Functions | ✅ | Requires `trace-facility` feature |
 | **Timers** | | |
 | Software Timers | ✅ | Requires `timers` feature |
 | xTimerCreate (dynamic) | ✅ | |

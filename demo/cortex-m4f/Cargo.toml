@@ -30,6 +30,7 @@ freertos-in-rust = { path = "../..", features = [
     "task-priority-set",
     "abort-delay",
     "queue-sets",
+    "queue-registry",
     "trace-facility",
     "stats-formatting",
 ] }

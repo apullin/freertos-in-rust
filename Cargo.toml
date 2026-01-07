@@ -57,6 +57,7 @@ use-mutexes = []              # configUSE_MUTEXES
 timers = []                   # configUSE_TIMERS
 stream-buffers = []           # configUSE_STREAM_BUFFERS
 queue-sets = []               # configUSE_QUEUE_SETS
+queue-registry = []           # configQUEUE_REGISTRY_SIZE > 0
 posix-errno = []              # configUSE_POSIX_ERRNO
 pend-function-call = []       # INCLUDE_xTimerPendFunctionCall
 application-task-tag = []     # configUSE_APPLICATION_TASK_TAG

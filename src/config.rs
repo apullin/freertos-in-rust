@@ -102,6 +102,12 @@ pub const configUSE_COUNTING_SEMAPHORES: BaseType_t = 1;
 /// Use queue sets
 pub const configUSE_QUEUE_SETS: BaseType_t = 0;
 
+/// Queue registry size (for kernel-aware debugging)
+/// Set to the maximum number of queues and semaphores that can be registered.
+/// A value of 0 disables the registry (handled via Cargo feature `queue-registry`).
+#[cfg(feature = "queue-registry")]
+pub const configQUEUE_REGISTRY_SIZE: usize = 8;
+
 /// Use task notifications
 pub const configUSE_TASK_NOTIFICATIONS: BaseType_t = 1;
 

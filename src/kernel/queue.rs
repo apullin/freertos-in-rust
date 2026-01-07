@@ -204,11 +204,13 @@ pub struct xQUEUE {
     #[cfg(feature = "queue-sets")]
     pub pxQueueSetContainer: *mut xQUEUE,
 
-    // TODO: Trace facility support
-    // #[cfg(feature = "trace-facility")]
-    // pub uxQueueNumber: UBaseType_t,
-    // #[cfg(feature = "trace-facility")]
-    // pub ucQueueType: u8,
+    /// Queue number for trace facility (kernel-aware debugging)
+    #[cfg(feature = "trace-facility")]
+    pub uxQueueNumber: UBaseType_t,
+
+    /// Queue type for trace facility (kernel-aware debugging)
+    #[cfg(feature = "trace-facility")]
+    pub ucQueueType: u8,
 }
 
 /// Typedef for Queue_t
@@ -347,11 +349,9 @@ unsafe fn prvInitialiseNewQueue(
     uxQueueLength: UBaseType_t,
     uxItemSize: UBaseType_t,
     pucQueueStorage: *mut u8,
-    ucQueueType: u8,
+    #[allow(unused_variables)] ucQueueType: u8,
     pxNewQueue: *mut Queue_t,
 ) {
-    /* Remove compiler warnings about unused parameters */
-    let _ = ucQueueType;
 
     if uxItemSize == 0 {
         /* No RAM was allocated for the queue storage area, but PC head cannot
@@ -370,8 +370,10 @@ unsafe fn prvInitialiseNewQueue(
     (*pxNewQueue).uxItemSize = uxItemSize;
     xQueueGenericReset(pxNewQueue, pdTRUE);
 
-    // TODO: Trace facility
-    // (*pxNewQueue).ucQueueType = ucQueueType;
+    #[cfg(feature = "trace-facility")]
+    {
+        (*pxNewQueue).ucQueueType = ucQueueType;
+    }
 
     // Initialize queue set container pointer
     #[cfg(feature = "queue-sets")]
@@ -446,6 +448,66 @@ pub unsafe fn xQueueGenericCreateStatic(
     traceRETURN_xQueueGenericCreateStatic(pxNewQueue as *mut c_void);
 
     pxNewQueue
+}
+
+/// Retrieve the static buffers used by a statically allocated queue.
+///
+/// Returns pdTRUE if the queue was created statically, pdFALSE otherwise.
+///
+/// # Safety
+///
+/// - xQueue must be a valid queue handle
+/// - ppucQueueStorage and ppxStaticQueue must be valid pointers (or null)
+///
+/// [ORIGINAL C] BaseType_t xQueueGenericGetStaticBuffers( QueueHandle_t xQueue,
+///                                                        uint8_t ** ppucQueueStorage,
+///                                                        StaticQueue_t ** ppxStaticQueue )
+pub unsafe fn xQueueGenericGetStaticBuffers(
+    xQueue: QueueHandle_t,
+    ppucQueueStorage: *mut *mut u8,
+    ppxStaticQueue: *mut *mut StaticQueue_t,
+) -> BaseType_t {
+    let xReturn: BaseType_t;
+    let pxQueue = xQueue as *const Queue_t;
+
+    traceENTER_xQueueGenericGetStaticBuffers(
+        xQueue,
+        ppucQueueStorage as *mut c_void,
+        ppxStaticQueue as *mut c_void,
+    );
+
+    configASSERT(!pxQueue.is_null());
+    configASSERT(!ppxStaticQueue.is_null());
+
+    #[cfg(any(feature = "alloc", feature = "heap-4"))]
+    {
+        // Check if the queue was statically allocated.
+        if (*pxQueue).ucStaticallyAllocated == pdTRUE as u8 {
+            if !ppucQueueStorage.is_null() {
+                *ppucQueueStorage = (*pxQueue).pcHead as *mut u8;
+            }
+
+            *ppxStaticQueue = pxQueue as *mut StaticQueue_t;
+            xReturn = pdTRUE;
+        } else {
+            xReturn = pdFALSE;
+        }
+    }
+
+    #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+    {
+        // Queue must have been statically allocated.
+        if !ppucQueueStorage.is_null() {
+            *ppucQueueStorage = (*pxQueue).pcHead as *mut u8;
+        }
+
+        *ppxStaticQueue = pxQueue as *mut StaticQueue_t;
+        xReturn = pdTRUE;
+    }
+
+    traceRETURN_xQueueGenericGetStaticBuffers(xReturn);
+
+    xReturn
 }
 
 // =============================================================================
@@ -924,6 +986,196 @@ pub unsafe fn xQueueReceive(
     }
 }
 
+/// Peek at the front of a queue without removing the item.
+///
+/// This function returns a copy of the item at the front of the queue without
+/// removing it from the queue. The item remains in the queue.
+///
+/// [ORIGINAL C] BaseType_t xQueuePeek( QueueHandle_t xQueue,
+///                                     void * const pvBuffer,
+///                                     TickType_t xTicksToWait )
+pub unsafe fn xQueuePeek(
+    xQueue: QueueHandle_t,
+    pvBuffer: *mut c_void,
+    xTicksToWait: TickType_t,
+) -> BaseType_t {
+    let mut xEntryTimeSet: BaseType_t = pdFALSE;
+    let mut xTimeOut = TimeOut_t::new();
+    let pxQueue: *mut Queue_t = xQueue;
+
+    traceENTER_xQueuePeek(pxQueue as *mut c_void, pvBuffer, xTicksToWait);
+
+    configASSERT(!pxQueue.is_null());
+    configASSERT(!(pvBuffer.is_null() && (*pxQueue).uxItemSize != 0));
+
+    loop {
+        taskENTER_CRITICAL();
+        {
+            let uxMessagesWaiting = (*pxQueue).uxMessagesWaiting;
+
+            if uxMessagesWaiting > 0 {
+                // Data available - copy WITHOUT removing
+                // For peek, we read from pcReadFrom but don't update it
+                let pcOriginalReadPosition = (*pxQueue).u.xQueue.pcReadFrom;
+
+                prvCopyDataFromQueue(pxQueue, pvBuffer);
+
+                // Restore read position - this is the key difference from Receive
+                (*pxQueue).u.xQueue.pcReadFrom = pcOriginalReadPosition;
+
+                traceQUEUE_PEEK(pxQueue as *mut c_void);
+
+                // If there was a task waiting to receive, unblock it
+                // (another task might also want to peek)
+                if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
+                    if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+                        queueYIELD_IF_USING_PREEMPTION();
+                    }
+                }
+
+                taskEXIT_CRITICAL();
+                traceRETURN_xQueuePeek(pdPASS);
+                return pdPASS;
+            } else {
+                if xTicksToWait == 0 {
+                    // Queue empty and no block time
+                    taskEXIT_CRITICAL();
+                    traceQUEUE_PEEK_FAILED(pxQueue as *mut c_void);
+                    traceRETURN_xQueuePeek(errQUEUE_EMPTY);
+                    return errQUEUE_EMPTY;
+                } else if xEntryTimeSet == pdFALSE {
+                    vTaskSetTimeOutState(&mut xTimeOut);
+                    xEntryTimeSet = pdTRUE;
+                }
+            }
+        }
+        taskEXIT_CRITICAL();
+
+        vTaskSuspendAll();
+        prvLockQueue(pxQueue);
+
+        if xTaskCheckForTimeOut(&mut xTimeOut, &mut (xTicksToWait as TickType_t)) == pdFALSE {
+            if prvIsQueueEmpty(pxQueue) != pdFALSE {
+                traceBLOCKING_ON_QUEUE_PEEK(pxQueue as *mut c_void);
+                vTaskPlaceOnEventList(&mut (*pxQueue).xTasksWaitingToReceive, xTicksToWait);
+                prvUnlockQueue(pxQueue);
+
+                if xTaskResumeAll() == pdFALSE {
+                    portYIELD_WITHIN_API();
+                }
+            } else {
+                prvUnlockQueue(pxQueue);
+                xTaskResumeAll();
+            }
+        } else {
+            prvUnlockQueue(pxQueue);
+            xTaskResumeAll();
+
+            traceQUEUE_PEEK_FAILED(pxQueue as *mut c_void);
+            traceRETURN_xQueuePeek(errQUEUE_EMPTY);
+            return errQUEUE_EMPTY;
+        }
+    }
+}
+
+/// Receive an item from a queue from an ISR.
+///
+/// It is safe to use this function from within an interrupt service routine.
+///
+/// [ORIGINAL C] BaseType_t xQueueReceiveFromISR( QueueHandle_t xQueue,
+///                                               void * const pvBuffer,
+///                                               BaseType_t * const pxHigherPriorityTaskWoken )
+pub unsafe fn xQueueReceiveFromISR(
+    xQueue: QueueHandle_t,
+    pvBuffer: *mut c_void,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> BaseType_t {
+    let xReturn: BaseType_t;
+    let pxQueue = xQueue as *mut Queue_t;
+
+    traceENTER_xQueueReceiveFromISR(xQueue, pvBuffer, pxHigherPriorityTaskWoken);
+
+    configASSERT(!pxQueue.is_null());
+    configASSERT(!(pvBuffer.is_null() && (*pxQueue).uxItemSize != 0));
+
+    let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+    {
+        let uxMessagesWaiting = (*pxQueue).uxMessagesWaiting;
+
+        if uxMessagesWaiting > 0 {
+            let cRxLock = (*pxQueue).cRxLock;
+
+            traceQUEUE_RECEIVE_FROM_ISR(pxQueue as *mut c_void);
+
+            prvCopyDataFromQueue(pxQueue, pvBuffer);
+            (*pxQueue).uxMessagesWaiting = uxMessagesWaiting - 1;
+
+            // If the queue was locked, increment lock count
+            if cRxLock == queueUNLOCKED {
+                if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToSend) == pdFALSE {
+                    if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToSend) != pdFALSE {
+                        if !pxHigherPriorityTaskWoken.is_null() {
+                            *pxHigherPriorityTaskWoken = pdTRUE;
+                        }
+                    }
+                }
+            } else {
+                configASSERT(cRxLock != queueINT8_MAX);
+                (*pxQueue).cRxLock = cRxLock + 1;
+            }
+
+            xReturn = pdPASS;
+        } else {
+            traceQUEUE_RECEIVE_FROM_ISR_FAILED(pxQueue as *mut c_void);
+            xReturn = pdFAIL;
+        }
+    }
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+
+    traceRETURN_xQueueReceiveFromISR(xReturn);
+
+    xReturn
+}
+
+/// Peek at the front of a queue from an ISR without removing the item.
+///
+/// It is safe to use this function from within an interrupt service routine.
+///
+/// [ORIGINAL C] BaseType_t xQueuePeekFromISR( QueueHandle_t xQueue,
+///                                            void * const pvBuffer )
+pub unsafe fn xQueuePeekFromISR(xQueue: QueueHandle_t, pvBuffer: *mut c_void) -> BaseType_t {
+    let xReturn: BaseType_t;
+    let pxQueue = xQueue as *mut Queue_t;
+
+    traceENTER_xQueuePeekFromISR(xQueue, pvBuffer);
+
+    configASSERT(!pxQueue.is_null());
+    configASSERT(!pvBuffer.is_null());
+    configASSERT((*pxQueue).uxItemSize != 0); // Can't peek from semaphore
+
+    let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+    {
+        if (*pxQueue).uxMessagesWaiting > 0 {
+            traceQUEUE_PEEK_FROM_ISR(pxQueue as *mut c_void);
+
+            // Copy data without removing - store and restore read position
+            let pcOriginalReadPosition = (*pxQueue).u.xQueue.pcReadFrom;
+            prvCopyDataFromQueue(pxQueue, pvBuffer);
+            (*pxQueue).u.xQueue.pcReadFrom = pcOriginalReadPosition;
+
+            xReturn = pdPASS;
+        } else {
+            traceQUEUE_PEEK_FROM_ISR_FAILED(pxQueue as *mut c_void);
+            xReturn = pdFAIL;
+        }
+    }
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+
+    traceRETURN_xQueuePeekFromISR(xReturn);
+
+    xReturn
+}
+
 // =============================================================================
 // Queue Unlock
 // =============================================================================
@@ -995,6 +1247,172 @@ pub unsafe fn uxQueueSpacesAvailable(xQueue: QueueHandle_t) -> UBaseType_t {
     uxReturn
 }
 
+/// Get the number of messages waiting in a queue (ISR safe).
+///
+/// This function can be called from an ISR.
+///
+/// [ORIGINAL C] UBaseType_t uxQueueMessagesWaitingFromISR( const QueueHandle_t xQueue )
+pub unsafe fn uxQueueMessagesWaitingFromISR(xQueue: QueueHandle_t) -> UBaseType_t {
+    let uxReturn: UBaseType_t;
+
+    traceENTER_uxQueueMessagesWaitingFromISR(xQueue);
+
+    configASSERT(!xQueue.is_null());
+
+    // No critical section needed - single read is atomic
+    uxReturn = (*xQueue).uxMessagesWaiting;
+
+    traceRETURN_uxQueueMessagesWaitingFromISR(uxReturn);
+
+    uxReturn
+}
+
+/// Delete a queue.
+///
+/// This function frees all memory allocated for storing the queue structure
+/// and the items placed in the queue. If the queue was created with static
+/// memory, only resets the queue.
+///
+/// [ORIGINAL C] void vQueueDelete( QueueHandle_t xQueue )
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
+pub unsafe fn vQueueDelete(xQueue: QueueHandle_t) {
+    let pxQueue = xQueue as *mut Queue_t;
+
+    traceENTER_vQueueDelete(xQueue);
+
+    configASSERT(!pxQueue.is_null());
+
+    traceQUEUE_DELETE(pxQueue as *mut c_void);
+
+    #[cfg(feature = "queue-registry")]
+    {
+        // Remove from registry if registered
+        vQueueUnregisterQueue(xQueue);
+    }
+
+    // Check if dynamically allocated
+    if (*pxQueue).ucStaticallyAllocated == pdFALSE as u8 {
+        // Free the queue memory
+        vPortFree(pxQueue as *mut c_void);
+    } else {
+        // Static queue - just reset it
+        mtCOVERAGE_TEST_MARKER();
+    }
+
+    traceRETURN_vQueueDelete();
+}
+
+/// Get the item size of a queue.
+///
+/// [ORIGINAL C] UBaseType_t uxQueueGetQueueItemSize( QueueHandle_t xQueue )
+pub unsafe fn uxQueueGetQueueItemSize(xQueue: QueueHandle_t) -> UBaseType_t {
+    configASSERT(!xQueue.is_null());
+    (*xQueue).uxItemSize
+}
+
+/// Get the length (capacity) of a queue.
+///
+/// [ORIGINAL C] UBaseType_t uxQueueGetQueueLength( QueueHandle_t xQueue )
+pub unsafe fn uxQueueGetQueueLength(xQueue: QueueHandle_t) -> UBaseType_t {
+    configASSERT(!xQueue.is_null());
+    (*xQueue).uxLength
+}
+
+/// Check if a queue is empty (ISR safe).
+///
+/// [ORIGINAL C] BaseType_t xQueueIsQueueEmptyFromISR( const QueueHandle_t xQueue )
+pub unsafe fn xQueueIsQueueEmptyFromISR(xQueue: QueueHandle_t) -> BaseType_t {
+    let xReturn: BaseType_t;
+
+    traceENTER_xQueueIsQueueEmptyFromISR(xQueue);
+
+    configASSERT(!xQueue.is_null());
+
+    if (*xQueue).uxMessagesWaiting == 0 {
+        xReturn = pdTRUE;
+    } else {
+        xReturn = pdFALSE;
+    }
+
+    traceRETURN_xQueueIsQueueEmptyFromISR(xReturn);
+
+    xReturn
+}
+
+/// Check if a queue is full (ISR safe).
+///
+/// [ORIGINAL C] BaseType_t xQueueIsQueueFullFromISR( const QueueHandle_t xQueue )
+pub unsafe fn xQueueIsQueueFullFromISR(xQueue: QueueHandle_t) -> BaseType_t {
+    let xReturn: BaseType_t;
+
+    traceENTER_xQueueIsQueueFullFromISR(xQueue);
+
+    configASSERT(!xQueue.is_null());
+
+    if (*xQueue).uxMessagesWaiting == (*xQueue).uxLength {
+        xReturn = pdTRUE;
+    } else {
+        xReturn = pdFALSE;
+    }
+
+    traceRETURN_xQueueIsQueueFullFromISR(xReturn);
+
+    xReturn
+}
+
+// =============================================================================
+// Trace Facility Functions
+// =============================================================================
+
+/// Get the queue number (for kernel-aware debugging).
+///
+/// The queue number is a value that can be used by a trace tool to identify
+/// this queue. It is assigned using vQueueSetQueueNumber().
+///
+/// [ORIGINAL C] UBaseType_t uxQueueGetQueueNumber( QueueHandle_t xQueue )
+#[cfg(feature = "trace-facility")]
+pub unsafe fn uxQueueGetQueueNumber(xQueue: QueueHandle_t) -> UBaseType_t {
+    traceENTER_uxQueueGetQueueNumber(xQueue);
+
+    let uxReturn = (*xQueue).uxQueueNumber;
+
+    traceRETURN_uxQueueGetQueueNumber(uxReturn);
+
+    uxReturn
+}
+
+/// Set the queue number (for kernel-aware debugging).
+///
+/// The queue number is a value that can be used by a trace tool to identify
+/// this queue.
+///
+/// [ORIGINAL C] void vQueueSetQueueNumber( QueueHandle_t xQueue,
+///                                         UBaseType_t uxQueueNumber )
+#[cfg(feature = "trace-facility")]
+pub unsafe fn vQueueSetQueueNumber(xQueue: QueueHandle_t, uxQueueNumber: UBaseType_t) {
+    traceENTER_vQueueSetQueueNumber(xQueue, uxQueueNumber);
+
+    (*xQueue).uxQueueNumber = uxQueueNumber;
+
+    traceRETURN_vQueueSetQueueNumber();
+}
+
+/// Get the queue type (for kernel-aware debugging).
+///
+/// Returns the type of the queue (base queue, mutex, counting semaphore, etc.).
+///
+/// [ORIGINAL C] uint8_t ucQueueGetQueueType( QueueHandle_t xQueue )
+#[cfg(feature = "trace-facility")]
+pub unsafe fn ucQueueGetQueueType(xQueue: QueueHandle_t) -> u8 {
+    traceENTER_ucQueueGetQueueType(xQueue);
+
+    let ucReturn = (*xQueue).ucQueueType;
+
+    traceRETURN_ucQueueGetQueueType(ucReturn);
+
+    ucReturn
+}
+
 // =============================================================================
 // Additional Trace Functions (stubs)
 // =============================================================================
@@ -1017,6 +1435,17 @@ fn traceENTER_xQueueGenericCreateStatic(
 
 #[inline(always)]
 fn traceRETURN_xQueueGenericCreateStatic(_pxNewQueue: *mut c_void) {}
+
+#[inline(always)]
+fn traceENTER_xQueueGenericGetStaticBuffers(
+    _xQueue: QueueHandle_t,
+    _ppucQueueStorage: *mut c_void,
+    _ppxStaticQueue: *mut c_void,
+) {
+}
+
+#[inline(always)]
+fn traceRETURN_xQueueGenericGetStaticBuffers(_xReturn: BaseType_t) {}
 
 #[inline(always)]
 fn traceENTER_xQueueGenericCreate(
@@ -1051,6 +1480,213 @@ fn traceENTER_xQueueReceive(
 
 #[inline(always)]
 fn traceRETURN_xQueueReceive(_xReturn: BaseType_t) {}
+
+// Mutex trace stubs
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceENTER_xQueueCreateMutexStatic(_ucQueueType: u8, _pxStaticQueue: *mut StaticQueue_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceRETURN_xQueueCreateMutexStatic(_xNewQueue: QueueHandle_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceCREATE_MUTEX(_pxNewQueue: *mut c_void) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceCREATE_MUTEX_FAILED() {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceENTER_xQueueGetMutexHolder(_xSemaphore: QueueHandle_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceRETURN_xQueueGetMutexHolder(_pxReturn: TaskHandle_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceENTER_xQueueGetMutexHolderFromISR(_xSemaphore: QueueHandle_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceRETURN_xQueueGetMutexHolderFromISR(_pxReturn: TaskHandle_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceENTER_xQueueGiveMutexRecursive(_xMutex: QueueHandle_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceRETURN_xQueueGiveMutexRecursive(_xReturn: BaseType_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceGIVE_MUTEX_RECURSIVE(_pxMutex: *mut c_void) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceGIVE_MUTEX_RECURSIVE_FAILED(_pxMutex: *mut c_void) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceENTER_xQueueTakeMutexRecursive(_xMutex: QueueHandle_t, _xTicksToWait: TickType_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceRETURN_xQueueTakeMutexRecursive(_xReturn: BaseType_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceTAKE_MUTEX_RECURSIVE(_pxMutex: *mut c_void) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceTAKE_MUTEX_RECURSIVE_FAILED(_pxMutex: *mut c_void) {}
+
+// Counting semaphore trace stubs
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[inline(always)]
+fn traceENTER_xQueueCreateCountingSemaphore(_uxMaxCount: UBaseType_t, _uxInitialCount: UBaseType_t) {}
+
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[inline(always)]
+fn traceRETURN_xQueueCreateCountingSemaphore(_xHandle: QueueHandle_t) {}
+
+#[inline(always)]
+fn traceENTER_xQueueCreateCountingSemaphoreStatic(
+    _uxMaxCount: UBaseType_t,
+    _uxInitialCount: UBaseType_t,
+    _pxStaticQueue: *mut StaticQueue_t,
+) {
+}
+
+#[inline(always)]
+fn traceRETURN_xQueueCreateCountingSemaphoreStatic(_xHandle: QueueHandle_t) {}
+
+#[inline(always)]
+fn traceCREATE_COUNTING_SEMAPHORE() {}
+
+#[inline(always)]
+fn traceCREATE_COUNTING_SEMAPHORE_FAILED() {}
+
+// ISR trace stubs
+#[inline(always)]
+fn traceENTER_xQueueGiveFromISR(_xQueue: QueueHandle_t, _pxHigherPriorityTaskWoken: *mut BaseType_t) {}
+
+#[inline(always)]
+fn traceRETURN_xQueueGiveFromISR(_xReturn: BaseType_t) {}
+
+#[inline(always)]
+fn traceQUEUE_SEND_FROM_ISR(_pxQueue: *mut c_void) {}
+
+#[inline(always)]
+fn traceQUEUE_SEND_FROM_ISR_FAILED(_pxQueue: *mut c_void) {}
+
+// Peek trace stubs
+#[inline(always)]
+fn traceENTER_xQueuePeek(_pxQueue: *mut c_void, _pvBuffer: *mut c_void, _xTicksToWait: TickType_t) {}
+
+#[inline(always)]
+fn traceRETURN_xQueuePeek(_xReturn: BaseType_t) {}
+
+#[inline(always)]
+fn traceQUEUE_PEEK(_pxQueue: *mut c_void) {}
+
+#[inline(always)]
+fn traceQUEUE_PEEK_FAILED(_pxQueue: *mut c_void) {}
+
+#[inline(always)]
+fn traceBLOCKING_ON_QUEUE_PEEK(_pxQueue: *mut c_void) {}
+
+// Receive from ISR trace stubs
+#[inline(always)]
+fn traceENTER_xQueueReceiveFromISR(
+    _xQueue: QueueHandle_t,
+    _pvBuffer: *mut c_void,
+    _pxHigherPriorityTaskWoken: *mut BaseType_t,
+) {
+}
+
+#[inline(always)]
+fn traceRETURN_xQueueReceiveFromISR(_xReturn: BaseType_t) {}
+
+#[inline(always)]
+fn traceQUEUE_RECEIVE_FROM_ISR(_pxQueue: *mut c_void) {}
+
+#[inline(always)]
+fn traceQUEUE_RECEIVE_FROM_ISR_FAILED(_pxQueue: *mut c_void) {}
+
+// Peek from ISR trace stubs
+#[inline(always)]
+fn traceENTER_xQueuePeekFromISR(_xQueue: QueueHandle_t, _pvBuffer: *mut c_void) {}
+
+#[inline(always)]
+fn traceRETURN_xQueuePeekFromISR(_xReturn: BaseType_t) {}
+
+#[inline(always)]
+fn traceQUEUE_PEEK_FROM_ISR(_pxQueue: *mut c_void) {}
+
+#[inline(always)]
+fn traceQUEUE_PEEK_FROM_ISR_FAILED(_pxQueue: *mut c_void) {}
+
+// Utility function trace stubs
+#[inline(always)]
+fn traceENTER_uxQueueMessagesWaitingFromISR(_xQueue: QueueHandle_t) {}
+
+#[inline(always)]
+fn traceRETURN_uxQueueMessagesWaitingFromISR(_uxReturn: UBaseType_t) {}
+
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[inline(always)]
+fn traceENTER_vQueueDelete(_xQueue: QueueHandle_t) {}
+
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[inline(always)]
+fn traceRETURN_vQueueDelete() {}
+
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[inline(always)]
+fn traceQUEUE_DELETE(_pxQueue: *mut c_void) {}
+
+#[inline(always)]
+fn traceENTER_xQueueIsQueueEmptyFromISR(_xQueue: QueueHandle_t) {}
+
+#[inline(always)]
+fn traceRETURN_xQueueIsQueueEmptyFromISR(_xReturn: BaseType_t) {}
+
+#[inline(always)]
+fn traceENTER_xQueueIsQueueFullFromISR(_xQueue: QueueHandle_t) {}
+
+#[inline(always)]
+fn traceRETURN_xQueueIsQueueFullFromISR(_xReturn: BaseType_t) {}
+
+// Trace facility function stubs
+#[cfg(feature = "trace-facility")]
+#[inline(always)]
+fn traceENTER_uxQueueGetQueueNumber(_xQueue: QueueHandle_t) {}
+
+#[cfg(feature = "trace-facility")]
+#[inline(always)]
+fn traceRETURN_uxQueueGetQueueNumber(_uxReturn: UBaseType_t) {}
+
+#[cfg(feature = "trace-facility")]
+#[inline(always)]
+fn traceENTER_vQueueSetQueueNumber(_xQueue: QueueHandle_t, _uxQueueNumber: UBaseType_t) {}
+
+#[cfg(feature = "trace-facility")]
+#[inline(always)]
+fn traceRETURN_vQueueSetQueueNumber() {}
+
+#[cfg(feature = "trace-facility")]
+#[inline(always)]
+fn traceENTER_ucQueueGetQueueType(_xQueue: QueueHandle_t) {}
+
+#[cfg(feature = "trace-facility")]
+#[inline(always)]
+fn traceRETURN_ucQueueGetQueueType(_ucReturn: u8) {}
 
 // =============================================================================
 // Queue Wrapper Functions
@@ -1196,6 +1832,102 @@ pub unsafe fn xQueueGenericSendFromISR(
     xReturn
 }
 
+/// Give a semaphore from an ISR.
+///
+/// This is an optimized version of xQueueGenericSendFromISR for semaphores.
+/// Semaphores have an item size of 0, so no data copy is needed.
+///
+/// [ORIGINAL C] BaseType_t xQueueGiveFromISR(
+///                  QueueHandle_t xQueue,
+///                  BaseType_t * const pxHigherPriorityTaskWoken )
+pub unsafe fn xQueueGiveFromISR(
+    xQueue: QueueHandle_t,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> BaseType_t {
+    let mut xReturn: BaseType_t;
+    let pxQueue = xQueue as *mut Queue_t;
+
+    // Unlike xQueueGenericSendFromISR() this function does not require an
+    // interrupt safe version of the prvCopyDataToQueue() function because
+    // the semaphore has no data.
+
+    traceENTER_xQueueGiveFromISR(xQueue, pxHigherPriorityTaskWoken);
+
+    configASSERT(!pxQueue.is_null());
+    // Check it really is a semaphore (item size 0)
+    configASSERT((*pxQueue).uxItemSize == 0);
+    // Can't use priority inheritance from ISR - pcHead must not be NULL
+    configASSERT(!(*pxQueue).pcHead.is_null() || (*pxQueue).u.xSemaphore.xMutexHolder.is_null());
+
+    let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+    {
+        let uxMessagesWaiting = (*pxQueue).uxMessagesWaiting;
+
+        // Check there is room for the semaphore
+        if uxMessagesWaiting < (*pxQueue).uxLength {
+            let cTxLock = (*pxQueue).cTxLock;
+
+            traceQUEUE_SEND_FROM_ISR(pxQueue as *mut c_void);
+
+            // Just increment the count - no data to copy
+            (*pxQueue).uxMessagesWaiting = uxMessagesWaiting + 1;
+
+            // Handle queue set membership
+            #[cfg(feature = "queue-sets")]
+            {
+                if !(*pxQueue).pxQueueSetContainer.is_null() {
+                    if prvNotifyQueueSetContainer(pxQueue) != pdFALSE {
+                        if !pxHigherPriorityTaskWoken.is_null() {
+                            *pxHigherPriorityTaskWoken = pdTRUE;
+                        }
+                    }
+                } else {
+                    if cTxLock == queueUNLOCKED {
+                        if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
+                            if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive)
+                                != pdFALSE
+                            {
+                                if !pxHigherPriorityTaskWoken.is_null() {
+                                    *pxHigherPriorityTaskWoken = pdTRUE;
+                                }
+                            }
+                        }
+                    } else {
+                        configASSERT(cTxLock != queueINT8_MAX);
+                        (*pxQueue).cTxLock = cTxLock + 1;
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "queue-sets"))]
+            {
+                if cTxLock == queueUNLOCKED {
+                    if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
+                        if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+                            if !pxHigherPriorityTaskWoken.is_null() {
+                                *pxHigherPriorityTaskWoken = pdTRUE;
+                            }
+                        }
+                    }
+                } else {
+                    configASSERT(cTxLock != queueINT8_MAX);
+                    (*pxQueue).cTxLock = cTxLock + 1;
+                }
+            }
+
+            xReturn = pdPASS;
+        } else {
+            traceQUEUE_SEND_FROM_ISR_FAILED(pxQueue as *mut c_void);
+            xReturn = errQUEUE_FULL;
+        }
+    }
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+
+    traceRETURN_xQueueGiveFromISR(xReturn);
+
+    xReturn
+}
+
 /// Wait for a message to arrive on a queue with restricted wake
 ///
 /// This function is used by the timer task to wait for timer commands.
@@ -1258,6 +1990,160 @@ pub unsafe fn xQueueCreateMutex(ucQueueType: u8) -> QueueHandle_t {
     xNewQueue
 }
 
+/// Create a mutex using static allocation
+///
+/// Mutexes support priority inheritance - if a high priority task blocks
+/// on a mutex held by a low priority task, the low priority task inherits
+/// the high priority until it releases the mutex.
+///
+/// [ORIGINAL C] QueueHandle_t xQueueCreateMutexStatic( const uint8_t ucQueueType,
+///                                                     StaticQueue_t * pxStaticQueue )
+#[cfg(feature = "use-mutexes")]
+pub unsafe fn xQueueCreateMutexStatic(
+    ucQueueType: u8,
+    pxStaticQueue: *mut StaticQueue_t,
+) -> QueueHandle_t {
+    traceENTER_xQueueCreateMutexStatic(ucQueueType, pxStaticQueue);
+
+    // Mutexes have length 1 and item size 0
+    let xNewQueue = xQueueGenericCreateStatic(1, 0, ptr::null_mut(), pxStaticQueue, ucQueueType);
+
+    if !xNewQueue.is_null() {
+        prvInitialiseMutex(xNewQueue as *mut Queue_t);
+    }
+
+    traceRETURN_xQueueCreateMutexStatic(xNewQueue);
+
+    xNewQueue
+}
+
+/// Initialize a mutex (shared by xQueueCreateMutex and xQueueCreateMutexStatic)
+///
+/// [ORIGINAL C] static void prvInitialiseMutex( Queue_t * pxNewQueue )
+#[cfg(feature = "use-mutexes")]
+unsafe fn prvInitialiseMutex(pxNewQueue: *mut Queue_t) {
+    if !pxNewQueue.is_null() {
+        // Initialize mutex-specific fields
+        (*pxNewQueue).u.xSemaphore.xMutexHolder = ptr::null_mut();
+        (*pxNewQueue).u.xSemaphore.uxRecursiveCallCount = 0;
+
+        // Set pcHead to NULL to indicate this is a mutex
+        // (This is how FreeRTOS distinguishes mutexes from queues)
+        (*pxNewQueue).pcHead = ptr::null_mut();
+
+        // Give the mutex initially (it starts available)
+        xQueueGenericSend(pxNewQueue as QueueHandle_t, ptr::null(), 0, queueSEND_TO_BACK);
+
+        traceCREATE_MUTEX(pxNewQueue as *mut c_void);
+    } else {
+        traceCREATE_MUTEX_FAILED();
+    }
+}
+
+/// Get the task handle of the task that holds the mutex.
+///
+/// Returns the handle of the task that currently holds the mutex, or NULL
+/// if the mutex is not held.
+///
+/// [ORIGINAL C] TaskHandle_t xQueueGetMutexHolder( QueueHandle_t xSemaphore )
+#[cfg(feature = "use-mutexes")]
+pub unsafe fn xQueueGetMutexHolder(xSemaphore: QueueHandle_t) -> TaskHandle_t {
+    let mut pxReturn: TaskHandle_t = ptr::null_mut();
+    let pxSemaphore = xSemaphore as *mut Queue_t;
+
+    traceENTER_xQueueGetMutexHolder(xSemaphore);
+
+    configASSERT(!xSemaphore.is_null());
+
+    // This function is called by xSemaphoreGetMutexHolder(), and should not
+    // be called directly. Note: This is a good way of determining if the
+    // calling task is the mutex holder, but not a good way of determining the
+    // identity of the mutex holder, as the holder may change between the
+    // following critical section exiting and the function returning.
+    taskENTER_CRITICAL();
+    {
+        // Check if this is a mutex (pcHead == NULL indicates mutex)
+        if (*pxSemaphore).pcHead.is_null() {
+            pxReturn = (*pxSemaphore).u.xSemaphore.xMutexHolder;
+        }
+    }
+    taskEXIT_CRITICAL();
+
+    traceRETURN_xQueueGetMutexHolder(pxReturn);
+
+    pxReturn
+}
+
+/// Get the task handle of the task that holds the mutex (ISR safe).
+///
+/// [ORIGINAL C] TaskHandle_t xQueueGetMutexHolderFromISR( QueueHandle_t xSemaphore )
+#[cfg(feature = "use-mutexes")]
+pub unsafe fn xQueueGetMutexHolderFromISR(xSemaphore: QueueHandle_t) -> TaskHandle_t {
+    let pxReturn: TaskHandle_t;
+
+    traceENTER_xQueueGetMutexHolderFromISR(xSemaphore);
+
+    configASSERT(!xSemaphore.is_null());
+
+    // Mutexes cannot be used in interrupt service routines, so the mutex
+    // holder should not change in an ISR, and therefore a critical section is
+    // not required here.
+    // Check if this is a mutex (pcHead == NULL indicates mutex)
+    if (*(xSemaphore as *mut Queue_t)).pcHead.is_null() {
+        pxReturn = (*(xSemaphore as *mut Queue_t)).u.xSemaphore.xMutexHolder;
+    } else {
+        pxReturn = ptr::null_mut();
+    }
+
+    traceRETURN_xQueueGetMutexHolderFromISR(pxReturn);
+
+    pxReturn
+}
+
+/// Give (release) a recursive mutex.
+///
+/// A recursive mutex can be 'taken' repeatedly by the same task. The mutex
+/// is only made available when the holder has called xQueueGiveMutexRecursive()
+/// for each successful take.
+///
+/// [ORIGINAL C] BaseType_t xQueueGiveMutexRecursive( QueueHandle_t xMutex )
+#[cfg(feature = "use-mutexes")]
+pub unsafe fn xQueueGiveMutexRecursive(xMutex: QueueHandle_t) -> BaseType_t {
+    let xReturn: BaseType_t;
+    let pxMutex = xMutex as *mut Queue_t;
+
+    traceENTER_xQueueGiveMutexRecursive(xMutex);
+
+    configASSERT(!pxMutex.is_null());
+
+    // If this is the task that holds the mutex then xMutexHolder will not
+    // change outside of this task.
+    if (*pxMutex).u.xSemaphore.xMutexHolder == xTaskGetCurrentTaskHandle() {
+        traceGIVE_MUTEX_RECURSIVE(pxMutex as *mut c_void);
+
+        // uxRecursiveCallCount cannot be zero if xMutexHolder is equal to
+        // the task handle, therefore no underflow check is required.
+        (*pxMutex).u.xSemaphore.uxRecursiveCallCount -= 1;
+
+        // Has the recursive call count unwound to 0?
+        if (*pxMutex).u.xSemaphore.uxRecursiveCallCount == 0 {
+            // Return the mutex. This will automatically unblock any other
+            // task that might be waiting to access the mutex.
+            xQueueGenericSend(pxMutex as QueueHandle_t, ptr::null(), 0, queueSEND_TO_BACK);
+        }
+
+        xReturn = pdPASS;
+    } else {
+        // The mutex cannot be given because the calling task is not the holder.
+        xReturn = pdFAIL;
+        traceGIVE_MUTEX_RECURSIVE_FAILED(pxMutex as *mut c_void);
+    }
+
+    traceRETURN_xQueueGiveMutexRecursive(xReturn);
+
+    xReturn
+}
+
 /// Take a semaphore (or mutex)
 ///
 /// This wraps xQueueReceive with mutex-specific handling for priority inheritance.
@@ -1281,35 +2167,135 @@ pub unsafe fn xQueueSemaphoreTake(
     xQueueReceive(xQueue, ptr::null_mut(), xTicksToWait)
 }
 
-/// Take a mutex with priority inheritance support
+/// Take a recursive mutex.
+///
+/// A recursive mutex can be 'taken' repeatedly by the same task. The mutex
+/// is only made unavailable when the holder has called xQueueTakeMutexRecursive()
+/// more times than xQueueGiveMutexRecursive().
+///
+/// [ORIGINAL C] BaseType_t xQueueTakeMutexRecursive( QueueHandle_t xMutex,
+///                                                   TickType_t xTicksToWait )
 #[cfg(feature = "use-mutexes")]
-unsafe fn xQueueTakeMutexRecursive(
+pub unsafe fn xQueueTakeMutexRecursive(
     xMutex: QueueHandle_t,
     xTicksToWait: TickType_t,
 ) -> BaseType_t {
     use crate::kernel::tasks::{xTaskGetCurrentTaskHandle, pvTaskIncrementMutexHeldCount};
 
-    let pxQueue = xMutex as *mut Queue_t;
+    let xReturn: BaseType_t;
+    let pxMutex = xMutex as *mut Queue_t;
+
+    traceENTER_xQueueTakeMutexRecursive(xMutex, xTicksToWait);
+
+    configASSERT(!pxMutex.is_null());
+
+    // Check if we already hold this mutex. If xMutexHolder is equal to the
+    // task handle then xMutexHolder won't change as the calling task is
+    // still running.
     let xCurrentTaskHandle = xTaskGetCurrentTaskHandle();
 
-    // Check if we already hold this mutex
-    if (*pxQueue).u.xSemaphore.xMutexHolder == xCurrentTaskHandle {
-        // Already hold it, increment count
-        (*pxQueue).u.xSemaphore.uxRecursiveCallCount += 1;
-        return pdPASS;
+    if (*pxMutex).u.xSemaphore.xMutexHolder == xCurrentTaskHandle {
+        // Already hold it, increment recursive call count
+        (*pxMutex).u.xSemaphore.uxRecursiveCallCount += 1;
+        xReturn = pdPASS;
+        traceTAKE_MUTEX_RECURSIVE(pxMutex as *mut c_void);
+    } else {
+        // Could not take the mutex, try to receive from queue
+        xReturn = xQueueReceive(xMutex, ptr::null_mut(), xTicksToWait);
+
+        // If pdPASS was returned, then the task successfully obtained the mutex
+        if xReturn == pdPASS {
+            // We got it - record ownership
+            (*pxMutex).u.xSemaphore.uxRecursiveCallCount = 1;
+            pvTaskIncrementMutexHeldCount();
+            traceTAKE_MUTEX_RECURSIVE(pxMutex as *mut c_void);
+        } else {
+            traceTAKE_MUTEX_RECURSIVE_FAILED(pxMutex as *mut c_void);
+        }
     }
 
-    // Try to take the mutex
-    let xReturn = xQueueReceive(xMutex, ptr::null_mut(), xTicksToWait);
-
-    if xReturn == pdPASS {
-        // We got it - record ownership
-        (*pxQueue).u.xSemaphore.xMutexHolder = xCurrentTaskHandle;
-        (*pxQueue).u.xSemaphore.uxRecursiveCallCount = 1;
-        pvTaskIncrementMutexHeldCount();
-    }
+    traceRETURN_xQueueTakeMutexRecursive(xReturn);
 
     xReturn
+}
+
+// =============================================================================
+// Counting Semaphores
+// =============================================================================
+
+/// Create a counting semaphore using dynamic allocation.
+///
+/// A counting semaphore can be 'given' multiple times (up to uxMaxCount).
+/// Each 'take' decrements the count. A task blocks when trying to take
+/// from a semaphore with count 0.
+///
+/// [ORIGINAL C] QueueHandle_t xQueueCreateCountingSemaphore(
+///                  const UBaseType_t uxMaxCount,
+///                  const UBaseType_t uxInitialCount )
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
+pub unsafe fn xQueueCreateCountingSemaphore(
+    uxMaxCount: UBaseType_t,
+    uxInitialCount: UBaseType_t,
+) -> QueueHandle_t {
+    let xHandle: QueueHandle_t;
+
+    traceENTER_xQueueCreateCountingSemaphore(uxMaxCount, uxInitialCount);
+
+    configASSERT(uxMaxCount != 0);
+    configASSERT(uxInitialCount <= uxMaxCount);
+
+    xHandle = xQueueGenericCreate(uxMaxCount, queueSEMAPHORE_QUEUE_ITEM_LENGTH, queueQUEUE_TYPE_COUNTING_SEMAPHORE);
+
+    if !xHandle.is_null() {
+        let pxQueue = xHandle as *mut Queue_t;
+        (*pxQueue).uxMessagesWaiting = uxInitialCount;
+        traceCREATE_COUNTING_SEMAPHORE();
+    } else {
+        traceCREATE_COUNTING_SEMAPHORE_FAILED();
+    }
+
+    traceRETURN_xQueueCreateCountingSemaphore(xHandle);
+
+    xHandle
+}
+
+/// Create a counting semaphore using static allocation.
+///
+/// [ORIGINAL C] QueueHandle_t xQueueCreateCountingSemaphoreStatic(
+///                  const UBaseType_t uxMaxCount,
+///                  const UBaseType_t uxInitialCount,
+///                  StaticQueue_t * pxStaticQueue )
+pub unsafe fn xQueueCreateCountingSemaphoreStatic(
+    uxMaxCount: UBaseType_t,
+    uxInitialCount: UBaseType_t,
+    pxStaticQueue: *mut StaticQueue_t,
+) -> QueueHandle_t {
+    let xHandle: QueueHandle_t;
+
+    traceENTER_xQueueCreateCountingSemaphoreStatic(uxMaxCount, uxInitialCount, pxStaticQueue);
+
+    configASSERT(uxMaxCount != 0);
+    configASSERT(uxInitialCount <= uxMaxCount);
+
+    xHandle = xQueueGenericCreateStatic(
+        uxMaxCount,
+        queueSEMAPHORE_QUEUE_ITEM_LENGTH,
+        ptr::null_mut(),
+        pxStaticQueue,
+        queueQUEUE_TYPE_COUNTING_SEMAPHORE,
+    );
+
+    if !xHandle.is_null() {
+        let pxQueue = xHandle as *mut Queue_t;
+        (*pxQueue).uxMessagesWaiting = uxInitialCount;
+        traceCREATE_COUNTING_SEMAPHORE();
+    } else {
+        traceCREATE_COUNTING_SEMAPHORE_FAILED();
+    }
+
+    traceRETURN_xQueueCreateCountingSemaphoreStatic(xHandle);
+
+    xHandle
 }
 
 // =============================================================================
@@ -1595,3 +2581,174 @@ pub unsafe fn xQueueSelectFromSetFromISR(xQueueSet: QueueSetHandle_t) -> QueueSe
 #[cfg(feature = "queue-sets")]
 #[inline(always)]
 fn traceQUEUE_SET_SEND(_pxQueue: *mut c_void) {}
+
+// =============================================================================
+// Queue Registry (for kernel-aware debugging)
+// =============================================================================
+
+#[cfg(feature = "queue-registry")]
+mod queue_registry {
+    use super::*;
+    use crate::config::configQUEUE_REGISTRY_SIZE;
+
+    /// Queue registry item - associates a name with a queue handle
+    ///
+    /// [ORIGINAL C]
+    /// typedef struct QUEUE_REGISTRY_ITEM
+    /// {
+    ///     const char * pcQueueName;
+    ///     QueueHandle_t xHandle;
+    /// } xQueueRegistryItem;
+    #[repr(C)]
+    struct QueueRegistryItem {
+        /// Name of the queue (pointer to string, not owned)
+        pcQueueName: *const u8,
+        /// Handle to the queue
+        xHandle: QueueHandle_t,
+    }
+
+    impl QueueRegistryItem {
+        const fn new() -> Self {
+            QueueRegistryItem {
+                pcQueueName: ptr::null(),
+                xHandle: ptr::null_mut(),
+            }
+        }
+    }
+
+    /// The queue registry array
+    ///
+    /// [ORIGINAL C]
+    /// PRIVILEGED_DATA QueueRegistryItem_t xQueueRegistry[ configQUEUE_REGISTRY_SIZE ];
+    static mut QUEUE_REGISTRY: [QueueRegistryItem; configQUEUE_REGISTRY_SIZE] =
+        [const { QueueRegistryItem::new() }; configQUEUE_REGISTRY_SIZE];
+
+    /// Add a queue to the registry for kernel-aware debugging.
+    ///
+    /// Associates a textual name with a queue handle for display in
+    /// kernel-aware debuggers. If the queue is already in the registry,
+    /// the name is updated.
+    ///
+    /// # Safety
+    ///
+    /// - xQueue must be a valid queue handle
+    /// - pcQueueName must be a valid null-terminated string that outlives the registration
+    ///
+    /// [ORIGINAL C] void vQueueAddToRegistry( QueueHandle_t xQueue, const char * pcQueueName )
+    pub unsafe fn vQueueAddToRegistry(xQueue: QueueHandle_t, pcQueueName: *const u8) {
+        traceENTER_vQueueAddToRegistry(xQueue, pcQueueName);
+
+        configASSERT(!xQueue.is_null());
+
+        if !pcQueueName.is_null() {
+            let mut pxEntryToWrite: Option<usize> = None;
+
+            // See if there is an empty space in the registry. A NULL name denotes
+            // a free slot.
+            for ux in 0..configQUEUE_REGISTRY_SIZE {
+                // Replace an existing entry if the queue is already in the registry.
+                if xQueue == QUEUE_REGISTRY[ux].xHandle {
+                    pxEntryToWrite = Some(ux);
+                    break;
+                }
+                // Otherwise, store in the next empty location
+                else if pxEntryToWrite.is_none() && QUEUE_REGISTRY[ux].pcQueueName.is_null() {
+                    pxEntryToWrite = Some(ux);
+                }
+            }
+
+            if let Some(ux) = pxEntryToWrite {
+                // Store the information on this queue.
+                QUEUE_REGISTRY[ux].pcQueueName = pcQueueName;
+                QUEUE_REGISTRY[ux].xHandle = xQueue;
+
+                traceQUEUE_REGISTRY_ADD(xQueue, pcQueueName);
+            }
+        }
+
+        traceRETURN_vQueueAddToRegistry();
+    }
+
+    /// Get the name of a queue from the registry.
+    ///
+    /// Returns the name associated with a queue handle, or NULL if the
+    /// queue is not in the registry.
+    ///
+    /// # Safety
+    ///
+    /// - xQueue must be a valid queue handle
+    ///
+    /// [ORIGINAL C] const char * pcQueueGetName( QueueHandle_t xQueue )
+    pub unsafe fn pcQueueGetName(xQueue: QueueHandle_t) -> *const u8 {
+        traceENTER_pcQueueGetName(xQueue);
+
+        configASSERT(!xQueue.is_null());
+
+        let mut pcReturn: *const u8 = ptr::null();
+
+        // Note there is nothing here to protect against another task adding or
+        // removing entries from the registry while it is being searched.
+        for ux in 0..configQUEUE_REGISTRY_SIZE {
+            if QUEUE_REGISTRY[ux].xHandle == xQueue {
+                pcReturn = QUEUE_REGISTRY[ux].pcQueueName;
+                break;
+            }
+        }
+
+        traceRETURN_pcQueueGetName(pcReturn);
+
+        pcReturn
+    }
+
+    /// Remove a queue from the registry.
+    ///
+    /// Removes a queue from the registry, freeing its slot for reuse.
+    /// Should be called when a queue is deleted.
+    ///
+    /// # Safety
+    ///
+    /// - xQueue must be a valid queue handle
+    ///
+    /// [ORIGINAL C] void vQueueUnregisterQueue( QueueHandle_t xQueue )
+    pub unsafe fn vQueueUnregisterQueue(xQueue: QueueHandle_t) {
+        traceENTER_vQueueUnregisterQueue(xQueue);
+
+        configASSERT(!xQueue.is_null());
+
+        // See if the handle of the queue being unregistered is actually in the
+        // registry.
+        for ux in 0..configQUEUE_REGISTRY_SIZE {
+            if QUEUE_REGISTRY[ux].xHandle == xQueue {
+                // Set the name to NULL to show that this slot is free again.
+                QUEUE_REGISTRY[ux].pcQueueName = ptr::null();
+
+                // Set the handle to NULL to ensure the same queue handle cannot
+                // appear in the registry twice if it is added, removed, then
+                // added again.
+                QUEUE_REGISTRY[ux].xHandle = ptr::null_mut();
+                break;
+            }
+        }
+
+        traceRETURN_vQueueUnregisterQueue();
+    }
+
+    // Trace hooks (no-op by default)
+    #[inline(always)]
+    fn traceENTER_vQueueAddToRegistry(_xQueue: QueueHandle_t, _pcQueueName: *const u8) {}
+    #[inline(always)]
+    fn traceRETURN_vQueueAddToRegistry() {}
+    #[inline(always)]
+    fn traceQUEUE_REGISTRY_ADD(_xQueue: QueueHandle_t, _pcQueueName: *const u8) {}
+    #[inline(always)]
+    fn traceENTER_pcQueueGetName(_xQueue: QueueHandle_t) {}
+    #[inline(always)]
+    fn traceRETURN_pcQueueGetName(_pcReturn: *const u8) {}
+    #[inline(always)]
+    fn traceENTER_vQueueUnregisterQueue(_xQueue: QueueHandle_t) {}
+    #[inline(always)]
+    fn traceRETURN_vQueueUnregisterQueue() {}
+}
+
+#[cfg(feature = "queue-registry")]
+pub use queue_registry::*;

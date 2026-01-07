@@ -49,8 +49,8 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | **Event Groups** | | |
 | Event Groups | ⚠️ | Skeleton only, not complete |
 | **Stream/Message Buffers** | | |
-| Stream Buffers | ❌ | Not yet implemented |
-| Message Buffers | ❌ | Not yet implemented |
+| Stream Buffers | ✅ | Requires `stream-buffers` feature |
+| Message Buffers | ✅ | Requires `stream-buffers` feature |
 | **Memory Management** | | |
 | pvPortMalloc / vPortFree | ✅ | Wraps Rust's `#[global_allocator]` |
 | Static Allocation | ✅ | |
@@ -237,7 +237,6 @@ This is currently a monolithic single-crate repository. Future work includes:
 
 ### Missing Features
 
-- Stream buffers and message buffers
 - Event groups (complete implementation)
 - Additional ports (Cortex-M0/M3/M7, RISC-V)
 - Tickless idle mode

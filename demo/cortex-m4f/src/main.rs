@@ -57,6 +57,11 @@ use freertos_in_rust::kernel::tasks::{
     xTaskCreateStatic, vTaskStartScheduler, vTaskDelay, StaticTask_t,
 };
 use freertos_in_rust::kernel::timers::*;
+use freertos_in_rust::kernel::stream_buffer::{
+    xStreamBufferCreate, xStreamBufferSend, xStreamBufferReceive,
+    xStreamBufferSpacesAvailable, xStreamBufferBytesAvailable,
+    StreamBufferHandle_t,
+};
 use freertos_in_rust::types::*;
 
 // =============================================================================
@@ -71,6 +76,9 @@ static mut SEMAPHORE_HANDLE: QueueHandle_t = ptr::null_mut();
 
 /// Timer handle - periodic timer
 static mut TIMER_HANDLE: TimerHandle_t = ptr::null_mut();
+
+/// Stream buffer handle - for producer/consumer demo
+static mut STREAM_BUFFER_HANDLE: StreamBufferHandle_t = ptr::null_mut();
 
 /// Shared counter protected by mutex
 static SHARED_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -105,6 +113,12 @@ static mut HIGH_TASK_TCB: StaticTask_t = StaticTask_t::new();
 static mut SEM_WAITER_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
 static mut SEM_WAITER_TCB: StaticTask_t = StaticTask_t::new();
 
+static mut PRODUCER_TASK_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
+static mut PRODUCER_TASK_TCB: StaticTask_t = StaticTask_t::new();
+
+static mut CONSUMER_TASK_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
+static mut CONSUMER_TASK_TCB: StaticTask_t = StaticTask_t::new();
+
 // =============================================================================
 // Entry Point
 // =============================================================================
@@ -127,6 +141,9 @@ fn main() -> ! {
 
     // Create synchronization primitives
     create_sync_primitives();
+
+    // Create stream buffer for producer/consumer demo
+    create_stream_buffer();
 
     // Create tasks
     create_tasks();
@@ -171,6 +188,21 @@ fn create_sync_primitives() {
             hprintln!("[Init] ERROR: Failed to create semaphore!");
         } else {
             hprintln!("[Init] Semaphore created successfully");
+        }
+    }
+}
+
+fn create_stream_buffer() {
+    hprintln!("[Init] Creating stream buffer (128 bytes, trigger=1)...");
+
+    unsafe {
+        // Create a stream buffer: 128 bytes capacity, trigger level 1
+        // Trigger level 1 means receiver unblocks as soon as any data arrives
+        STREAM_BUFFER_HANDLE = xStreamBufferCreate(128, 1);
+        if STREAM_BUFFER_HANDLE.is_null() {
+            hprintln!("[Init] ERROR: Failed to create stream buffer!");
+        } else {
+            hprintln!("[Init] Stream buffer created successfully");
         }
     }
 }
@@ -241,6 +273,38 @@ fn create_tasks() {
             hprintln!("[Init] ERROR: Failed to create semaphore waiter task!");
         } else {
             hprintln!("[Init] Semaphore waiter task created (priority {})", PRIORITY_MEDIUM);
+        }
+
+        // Stream buffer producer task - sends data to stream buffer
+        let result = xTaskCreateStatic(
+            task_stream_producer,
+            b"Producer\0".as_ptr(),
+            STACK_SIZE,
+            ptr::null_mut(),
+            PRIORITY_LOW,
+            PRODUCER_TASK_STACK.as_mut_ptr(),
+            &mut PRODUCER_TASK_TCB as *mut StaticTask_t,
+        );
+        if result.is_null() {
+            hprintln!("[Init] ERROR: Failed to create producer task!");
+        } else {
+            hprintln!("[Init] Stream producer task created (priority {})", PRIORITY_LOW);
+        }
+
+        // Stream buffer consumer task - receives data from stream buffer
+        let result = xTaskCreateStatic(
+            task_stream_consumer,
+            b"Consumer\0".as_ptr(),
+            STACK_SIZE,
+            ptr::null_mut(),
+            PRIORITY_MEDIUM,
+            CONSUMER_TASK_STACK.as_mut_ptr(),
+            &mut CONSUMER_TASK_TCB as *mut StaticTask_t,
+        );
+        if result.is_null() {
+            hprintln!("[Init] ERROR: Failed to create consumer task!");
+        } else {
+            hprintln!("[Init] Stream consumer task created (priority {})", PRIORITY_MEDIUM);
         }
     }
 }
@@ -413,6 +477,103 @@ extern "C" fn task_semaphore_waiter(_pvParameters: *mut c_void) {
                 hprintln!("[SemWait] Current counter value: {}", count);
             }
         }
+    }
+}
+
+/// Stream buffer producer task
+///
+/// Sends incrementing byte patterns to the stream buffer every 750ms.
+/// Demonstrates stream buffer send functionality.
+extern "C" fn task_stream_producer(_pvParameters: *mut c_void) {
+    let mut sequence: u8 = 0;
+    let mut iteration: u32 = 0;
+
+    // Initial delay to let other tasks start
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    loop {
+        iteration += 1;
+
+        // Create a small message to send (8 bytes)
+        let message: [u8; 8] = [
+            sequence,
+            sequence.wrapping_add(1),
+            sequence.wrapping_add(2),
+            sequence.wrapping_add(3),
+            sequence.wrapping_add(4),
+            sequence.wrapping_add(5),
+            sequence.wrapping_add(6),
+            sequence.wrapping_add(7),
+        ];
+
+        unsafe {
+            let space = xStreamBufferSpacesAvailable(STREAM_BUFFER_HANDLE);
+            hprintln!("[Producer #{}] Sending 8 bytes (seq={}), space={}", iteration, sequence, space);
+
+            let sent = xStreamBufferSend(
+                STREAM_BUFFER_HANDLE,
+                message.as_ptr() as *const c_void,
+                message.len(),
+                pdMS_TO_TICKS(100), // Short timeout
+            );
+
+            if sent == message.len() {
+                hprintln!("[Producer #{}] Sent {} bytes successfully", iteration, sent);
+            } else {
+                hprintln!("[Producer #{}] Only sent {} of {} bytes (buffer full?)", iteration, sent, message.len());
+            }
+        }
+
+        sequence = sequence.wrapping_add(8);
+
+        // Wait before sending next message
+        vTaskDelay(pdMS_TO_TICKS(750));
+    }
+}
+
+/// Stream buffer consumer task
+///
+/// Receives data from the stream buffer and validates the byte pattern.
+/// Demonstrates stream buffer receive functionality.
+extern "C" fn task_stream_consumer(_pvParameters: *mut c_void) {
+    let mut total_received: u32 = 0;
+    let mut iteration: u32 = 0;
+    let mut buffer: [u8; 32] = [0u8; 32];
+
+    // Initial delay
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    loop {
+        iteration += 1;
+
+        unsafe {
+            let available = xStreamBufferBytesAvailable(STREAM_BUFFER_HANDLE);
+            hprintln!("[Consumer #{}] Waiting for data, available={}", iteration, available);
+
+            // Receive with timeout
+            let received = xStreamBufferReceive(
+                STREAM_BUFFER_HANDLE,
+                buffer.as_mut_ptr() as *mut c_void,
+                buffer.len(),
+                pdMS_TO_TICKS(2000), // Wait up to 2 seconds
+            );
+
+            if received > 0 {
+                total_received += received as u32;
+                hprintln!("[Consumer #{}] Received {} bytes, total={}", iteration, received, total_received);
+
+                // Print first few bytes received
+                if received >= 4 {
+                    hprintln!("[Consumer #{}] Data: [{}, {}, {}, {}, ...]",
+                        iteration, buffer[0], buffer[1], buffer[2], buffer[3]);
+                }
+            } else {
+                hprintln!("[Consumer #{}] Timeout - no data received", iteration);
+            }
+        }
+
+        // Small delay before next receive
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 

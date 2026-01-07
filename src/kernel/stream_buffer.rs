@@ -1126,3 +1126,88 @@ unsafe fn sbRECEIVE_COMPLETED_FROM_ISR(
 /// Notification action: no action (just wake task)
 const eNoAction: u32 = 0;
 
+// =============================================================================
+// Static Buffer Query Function
+// =============================================================================
+
+/// Get pointers to the static buffers used by a statically allocated stream buffer
+///
+/// Returns pdTRUE if the stream buffer was statically allocated, pdFALSE otherwise.
+/// If statically allocated, the pointers to the storage area and static structure
+/// are returned via the output parameters.
+///
+/// # Safety
+///
+/// The caller must ensure the output pointers are valid.
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
+pub unsafe fn xStreamBufferGetStaticBuffers(
+    xStreamBuffer: StreamBufferHandle_t,
+    ppucStreamBufferStorageArea: *mut *mut u8,
+    ppxStaticStreamBuffer: *mut *mut StaticStreamBuffer_t,
+) -> BaseType_t {
+    configASSERT(!xStreamBuffer.is_null());
+
+    let pxStreamBuffer = xStreamBuffer as *mut StreamBuffer_t;
+    let xReturn: BaseType_t;
+
+    if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_STATICALLY_ALLOCATED) != 0 {
+        xReturn = pdTRUE;
+
+        // Return the storage area pointer
+        if !ppucStreamBufferStorageArea.is_null() {
+            *ppucStreamBufferStorageArea = (*pxStreamBuffer).pucBuffer;
+        }
+
+        // Return the static structure pointer (same as the handle for static allocation)
+        if !ppxStaticStreamBuffer.is_null() {
+            *ppxStaticStreamBuffer = pxStreamBuffer as *mut StaticStreamBuffer_t;
+        }
+    } else {
+        xReturn = pdFALSE;
+    }
+
+    xReturn
+}
+
+// =============================================================================
+// Trace Facility Functions
+// =============================================================================
+
+/// Get the stream buffer number (for trace facility)
+///
+/// Returns the number assigned to this stream buffer, which can be used
+/// for trace and debugging purposes.
+#[cfg(feature = "trace-facility")]
+pub unsafe fn uxStreamBufferGetStreamBufferNumber(
+    xStreamBuffer: StreamBufferHandle_t,
+) -> UBaseType_t {
+    configASSERT(!xStreamBuffer.is_null());
+    let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
+    (*pxStreamBuffer).uxStreamBufferNumber
+}
+
+/// Set the stream buffer number (for trace facility)
+///
+/// Assigns a number to this stream buffer for trace and debugging purposes.
+#[cfg(feature = "trace-facility")]
+pub unsafe fn vStreamBufferSetStreamBufferNumber(
+    xStreamBuffer: StreamBufferHandle_t,
+    uxStreamBufferNumber: UBaseType_t,
+) {
+    configASSERT(!xStreamBuffer.is_null());
+    let pxStreamBuffer = xStreamBuffer as *mut StreamBuffer_t;
+    (*pxStreamBuffer).uxStreamBufferNumber = uxStreamBufferNumber;
+}
+
+/// Get the stream buffer type (for trace facility)
+///
+/// Returns non-zero if this is a message buffer, zero if it's a stream buffer.
+#[cfg(feature = "trace-facility")]
+pub unsafe fn ucStreamBufferGetStreamBufferType(
+    xStreamBuffer: StreamBufferHandle_t,
+) -> u8 {
+    configASSERT(!xStreamBuffer.is_null());
+    let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
+    (*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER
+}
+

@@ -1844,7 +1844,7 @@ pub unsafe fn xQueueGiveFromISR(
     xQueue: QueueHandle_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) -> BaseType_t {
-    let mut xReturn: BaseType_t;
+    let xReturn: BaseType_t;
     let pxQueue = xQueue as *mut Queue_t;
 
     // Unlike xQueueGenericSendFromISR() this function does not require an

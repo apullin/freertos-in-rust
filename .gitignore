@@ -1,0 +1,32 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo.lock for libraries (keep for binaries/demos)
+# Cargo.lock
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debugging
+*.pdb
+*.dSYM/
+
+# Embedded/ARM build artifacts
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.a
+
+# Upstream FreeRTOS C source (reference only, not part of the port)
+FreeRTOS-Kernel/
+
+# Claude Code session data
+.claude/

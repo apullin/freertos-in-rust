@@ -1,0 +1,81 @@
+# FreeRusTOS - FreeRTOS Kernel ported to Rust
+#
+# SPDX-License-Identifier: MIT
+#
+# This is a line-by-line translation of the FreeRTOS kernel from C to Rust.
+# See AGENTS.md for project principles and guidelines.
+
+[package]
+name = "freertos-in-rust"
+version = "0.1.0"
+edition = "2021"
+authors = ["FreeRusTOS Contributors"]
+description = "FreeRTOS kernel ported to Rust - no_std, no C FFI"
+license = "MIT"
+repository = "https://github.com/anthropics/FreeRTOS-in-rust"
+keywords = ["rtos", "embedded", "no-std", "freertos"]
+categories = ["embedded", "no-std", "concurrency"]
+
+[features]
+default = ["port-dummy", "tick-32bit", "arch-32bit"]
+
+# Port selection (exactly one should be enabled)
+port-dummy = []
+port-cortex-m4f = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
+
+# Architecture width for BaseType_t, UBaseType_t, StackType_t
+arch-32bit = []
+arch-64bit = []
+
+# Tick counter width for TickType_t
+tick-16bit = []
+tick-32bit = []
+tick-64bit = []
+
+# Memory allocation
+alloc = []  # Enable alloc crate for pvPortMalloc/vPortFree
+
+# Testing support (enables std for host tests)
+std = ["alloc"]
+
+# Debug/diagnostic features
+list-data-integrity-check = []  # configUSE_LIST_DATA_INTEGRITY_CHECK_BYTES
+trace-facility = []             # configUSE_TRACE_FACILITY
+stack-overflow-check = []       # configCHECK_FOR_STACK_OVERFLOW
+record-stack-high-address = []  # configRECORD_STACK_HIGH_ADDRESS
+
+# Task features (INCLUDE_* flags)
+task-delete = []      # INCLUDE_vTaskDelete
+task-suspend = []     # INCLUDE_vTaskSuspend
+abort-delay = []      # INCLUDE_xTaskAbortDelay
+
+# Kernel features
+use-mutexes = []              # configUSE_MUTEXES
+timers = []                   # configUSE_TIMERS
+stream-buffers = []           # configUSE_STREAM_BUFFERS
+posix-errno = []              # configUSE_POSIX_ERRNO
+pend-function-call = []       # INCLUDE_xTimerPendFunctionCall
+application-task-tag = []     # configUSE_APPLICATION_TASK_TAG
+critical-nesting-in-tcb = []  # portCRITICAL_NESTING_IN_TCB
+idle-yield = []               # Yield in idle task
+
+# TODO: Future features
+# smp = []  # Multi-core support (configNUMBER_OF_CORES > 1)
+# mini-list-item = []  # configUSE_MINI_LIST_ITEM optimization
+
+[dependencies]
+# Cortex-M support (optional, for port-cortex-m4f)
+cortex-m = { version = "0.7", optional = true }
+cortex-m-rt = { version = "0.7", optional = true }
+
+[dev-dependencies]
+
+# Exclude the upstream C source from published crate
+[package.metadata.docs.rs]
+all-features = true
+
+# Exclude upstream reference sources from package
+exclude = [
+    "FreeRTOS-Kernel/",
+    "upstream/",
+]

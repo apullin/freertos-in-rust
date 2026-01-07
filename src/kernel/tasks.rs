@@ -949,9 +949,9 @@ pub unsafe fn xTaskCreateStatic(
         // Calculate top of stack.
         let pxTopOfStack: *mut StackType_t;
         if portSTACK_GROWTH < 0 {
-            pxTopOfStack = puxStackBuffer.add(uxStackDepth - 1);
-            let aligned = (pxTopOfStack as usize) & !(portBYTE_ALIGNMENT - 1);
-            let pxTopOfStack = aligned as *mut StackType_t;
+            let pxTop = puxStackBuffer.add(uxStackDepth - 1);
+            let aligned = (pxTop as usize) & !(portBYTE_ALIGNMENT - 1);
+            pxTopOfStack = aligned as *mut StackType_t;
 
             #[cfg(any(not(feature = "arch-32bit"), feature = "record-stack-high-address"))]
             {
@@ -1011,7 +1011,7 @@ pub fn vTaskStartScheduler() {
             // Create the timer task if timers are enabled.
             #[cfg(feature = "timers")]
             {
-                // TODO: xTimerCreateTimerTask
+                crate::kernel::timers::xTimerCreateTimerTask();
             }
 
             // Disable interrupts to ensure a tick doesn't occur before the first

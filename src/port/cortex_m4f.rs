@@ -232,7 +232,6 @@ pub fn pxPortInitialiseStack(
 
         // EXC_RETURN - indicates return to thread mode using PSP, no FPU
         *pxStack = portINITIAL_EXC_RETURN;
-        pxStack = pxStack.sub(1);
 
         // R11, R10, R9, R8, R7, R6, R5, R4 - skip initialization
         pxStack = pxStack.sub(8);
@@ -512,3 +511,32 @@ pub fn portMEMORY_BARRIER() {
 
 /// Architecture name string for this port
 pub const portARCH_NAME: &str = "ARM Cortex-M4F";
+
+// =============================================================================
+// Exception Handler Aliases for cortex-m-rt
+// =============================================================================
+
+// cortex-m-rt expects exception handlers named SVCall, PendSV, SysTick.
+// FreeRTOS names them vPortSVCHandler, xPortPendSVHandler, xPortSysTickHandler.
+// Create aliases via assembly to maintain FreeRTOS naming in the port code.
+use core::arch::global_asm;
+
+global_asm!(
+    ".thumb_func",
+    ".global SVCall",
+    ".type SVCall, %function",
+    "SVCall:",
+    "b vPortSVCHandler",
+
+    ".thumb_func",
+    ".global PendSV",
+    ".type PendSV, %function",
+    "PendSV:",
+    "b xPortPendSVHandler",
+
+    ".thumb_func",
+    ".global SysTick",
+    ".type SysTick, %function",
+    "SysTick:",
+    "b xPortSysTickHandler",
+);

@@ -1,19 +1,19 @@
-/* Generic memory layout for Cortex-M4F
+/* Memory layout for QEMU ARM targets
  *
- * Adjust these values for your specific MCU:
- * - STM32F407: FLASH 1024K, RAM 128K (CCM) + 112K (SRAM)
- * - STM32L476: FLASH 1024K, RAM 96K + 32K
- * - TM4C123:   FLASH 256K,  RAM 32K
- * - nRF52840:  FLASH 1024K, RAM 256K
+ * Works with:
+ * - mps2-an386 (ARM MPS2, Cortex-M4) - recommended for Cortex-M4F code
+ * - lm3s6965evb (TI Stellaris, Cortex-M3)
  *
- * This default is conservative and should work on most parts.
+ * Run with:
+ *   qemu-system-arm -machine mps2-an386 -nographic \
+ *     -semihosting-config enable=on,target=native \
+ *     -kernel target/thumbv7em-none-eabihf/debug/demo
  */
 
 MEMORY
 {
-    /* Adjust these for your specific MCU */
-    FLASH : ORIGIN = 0x08000000, LENGTH = 256K
-    RAM   : ORIGIN = 0x20000000, LENGTH = 32K
+    FLASH : ORIGIN = 0x00000000, LENGTH = 256K
+    RAM   : ORIGIN = 0x20000000, LENGTH = 64K
 }
 
 /* Stack size - adjust based on your needs and available RAM */

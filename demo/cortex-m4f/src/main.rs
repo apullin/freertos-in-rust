@@ -22,6 +22,19 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use cortex_m_rt::entry;
 use cortex_m_semihosting::hprintln;
 
+// Import the port's exception handlers to ensure they're linked.
+// The port provides SVCall, PendSV, and SysTick handlers that cortex-m-rt
+// will use in the vector table.
+use freertos_in_rust::port::{vPortSVCHandler, xPortPendSVHandler, xPortSysTickHandler};
+
+// Force the linker to include the exception handlers.
+#[used]
+static HANDLERS: [unsafe extern "C" fn(); 3] = [
+    vPortSVCHandler,
+    xPortPendSVHandler,
+    xPortSysTickHandler,
+];
+
 use embedded_alloc::LlffHeap as Heap;
 
 // Import FreeRTOS types and functions

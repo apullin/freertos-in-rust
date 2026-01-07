@@ -9,11 +9,17 @@ description = "Demo application for FreeRusTOS on Cortex-M4F"
 name = "demo"
 path = "src/main.rs"
 
+[features]
+default = ["use-heap-4"]
+# Use FreeRTOS heap_4 (first-fit with coalescing) - recommended
+use-heap-4 = ["freertos-in-rust/heap-4"]
+# Use external allocator (embedded-alloc)
+use-embedded-alloc = ["freertos-in-rust/alloc", "dep:embedded-alloc"]
+
 [dependencies]
 # The FreeRTOS kernel
 freertos-in-rust = { path = "../..", features = [
     "port-cortex-m4f",
-    "alloc",
     "use-mutexes",
     "timers",
     "task-delete",
@@ -28,6 +34,9 @@ freertos-in-rust = { path = "../..", features = [
     "stats-formatting",
 ] }
 
+# External allocator (optional, for use-embedded-alloc feature)
+embedded-alloc = { version = "0.6", optional = true }
+
 # Cortex-M support
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
@@ -37,9 +46,6 @@ cortex-m-semihosting = "0.5"
 
 # Panic handler - outputs panic message via semihosting
 panic-semihosting = { version = "0.6", features = ["exit"] }
-
-# For heap allocation
-embedded-alloc = "0.6"
 
 [profile.dev]
 opt-level = "s"      # Optimize for size even in dev (embedded)

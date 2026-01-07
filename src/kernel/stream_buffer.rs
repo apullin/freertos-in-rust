@@ -43,9 +43,9 @@ use crate::kernel::tasks::*;
 use crate::port::*;
 use crate::types::*;
 
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 extern crate alloc;
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 use alloc::alloc::{alloc, dealloc, Layout};
 
 // =============================================================================
@@ -165,7 +165,7 @@ impl StaticStreamBuffer_t {
 /// # Returns
 ///
 /// Handle to the created stream buffer, or NULL on failure
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 pub unsafe fn xStreamBufferGenericCreate(
     xBufferSizeBytes: usize,
     mut xTriggerLevelBytes: usize,
@@ -287,7 +287,7 @@ pub unsafe fn xStreamBufferGenericCreateStatic(
 }
 
 /// Convenience wrapper: create a stream buffer
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 #[inline(always)]
 pub unsafe fn xStreamBufferCreate(
     xBufferSizeBytes: usize,
@@ -303,14 +303,14 @@ pub unsafe fn xStreamBufferCreate(
 }
 
 /// Convenience wrapper: create a message buffer
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 #[inline(always)]
 pub unsafe fn xMessageBufferCreate(xBufferSizeBytes: usize) -> StreamBufferHandle_t {
     xStreamBufferGenericCreate(xBufferSizeBytes, 1, sbTYPE_MESSAGE_BUFFER, None, None)
 }
 
 /// Convenience wrapper: create a batching buffer
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 #[inline(always)]
 pub unsafe fn xStreamBatchingBufferCreate(
     xBufferSizeBytes: usize,
@@ -338,7 +338,7 @@ pub unsafe fn vStreamBufferDelete(xStreamBuffer: StreamBufferHandle_t) {
     let pxStreamBuffer = xStreamBuffer as *mut StreamBuffer_t;
 
     if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_STATICALLY_ALLOCATED) == 0 {
-        #[cfg(feature = "alloc")]
+        #[cfg(any(feature = "alloc", feature = "heap-4"))]
         {
             // Both structure and buffer were allocated together
             let total_size = core::mem::size_of::<StreamBuffer_t>() + (*pxStreamBuffer).xLength;

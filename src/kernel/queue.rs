@@ -197,9 +197,7 @@ pub struct xQUEUE {
     pub cTxLock: i8,
 
     /// Set to pdTRUE if statically allocated
-    #[cfg(all(
-        feature = "alloc", // configSUPPORT_DYNAMIC_ALLOCATION
-    ))]
+    #[cfg(any(feature = "alloc", feature = "heap-4"))]
     pub ucStaticallyAllocated: u8,
 
     /// Pointer to the queue set this queue/semaphore belongs to (if any)
@@ -425,7 +423,7 @@ pub unsafe fn xQueueGenericCreateStatic(
         /* The address of a statically allocated queue was passed in, use it. */
         pxNewQueue = pxStaticQueue as *mut Queue_t;
 
-        #[cfg(feature = "alloc")]
+        #[cfg(any(feature = "alloc", feature = "heap-4"))]
         {
             /* Queues can be allocated either statically or dynamically, so
              * note this queue was allocated statically in case the queue is
@@ -459,7 +457,7 @@ pub unsafe fn xQueueGenericCreateStatic(
 /// # Safety
 ///
 /// Requires the `alloc` feature for dynamic allocation
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 pub unsafe fn xQueueGenericCreate(
     uxQueueLength: UBaseType_t,
     uxItemSize: UBaseType_t,
@@ -519,7 +517,7 @@ pub unsafe fn xQueueGenericCreate(
 // =============================================================================
 
 /// Create a queue (wrapper for xQueueGenericCreate)
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 #[inline(always)]
 pub unsafe fn xQueueCreate(uxQueueLength: UBaseType_t, uxItemSize: UBaseType_t) -> QueueHandle_t {
     xQueueGenericCreate(uxQueueLength, uxItemSize, queueQUEUE_TYPE_BASE)
@@ -559,7 +557,7 @@ unsafe fn prvCopyDataToQueue(
 
     if (*pxQueue).uxItemSize == 0 {
         /* This is a mutex - handle priority inheritance */
-        #[cfg(feature = "alloc")] // configUSE_MUTEXES
+        #[cfg(any(feature = "alloc", feature = "heap-4"))] // configUSE_MUTEXES
         {
             if (*pxQueue).pcHead.is_null() {
                 /* Queue is being used as a mutex */
@@ -1239,7 +1237,7 @@ pub unsafe fn vQueueWaitForMessageRestricted(
 /// Mutexes support priority inheritance - if a high priority task blocks
 /// on a mutex held by a low priority task, the low priority task inherits
 /// the high priority until it releases the mutex.
-#[cfg(all(feature = "alloc", feature = "use-mutexes"))]
+#[cfg(all(any(feature = "alloc", feature = "heap-4"), feature = "use-mutexes"))]
 pub unsafe fn xQueueCreateMutex(ucQueueType: u8) -> QueueHandle_t {
     let xNewQueue = xQueueGenericCreate(1, 0, ucQueueType);
 

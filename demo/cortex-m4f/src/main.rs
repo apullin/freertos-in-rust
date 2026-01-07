@@ -35,7 +35,18 @@ static HANDLERS: [unsafe extern "C" fn(); 3] = [
     xPortSysTickHandler,
 ];
 
+// Allocator selection via Cargo features
+#[cfg(feature = "use-heap-4")]
+use freertos_in_rust::memory::FreeRtosAllocator;
+#[cfg(feature = "use-heap-4")]
+#[global_allocator]
+static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
+
+#[cfg(feature = "use-embedded-alloc")]
 use embedded_alloc::LlffHeap as Heap;
+#[cfg(feature = "use-embedded-alloc")]
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
 
 // Import FreeRTOS types and functions
 use freertos_in_rust::kernel::queue::{
@@ -47,17 +58,6 @@ use freertos_in_rust::kernel::tasks::{
 };
 use freertos_in_rust::kernel::timers::*;
 use freertos_in_rust::types::*;
-
-// =============================================================================
-// Heap Allocator Setup
-// =============================================================================
-
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
-
-// Heap memory region
-const HEAP_SIZE: usize = 4096;
-static mut HEAP_MEM: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
 // =============================================================================
 // Shared Resources
@@ -111,9 +111,13 @@ static mut SEM_WAITER_TCB: StaticTask_t = StaticTask_t::new();
 
 #[entry]
 fn main() -> ! {
-    // Initialize heap allocator
-    unsafe {
-        HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE);
+    // Initialize allocator (only needed for embedded-alloc)
+    #[cfg(feature = "use-embedded-alloc")]
+    {
+        use core::mem::MaybeUninit;
+        const HEAP_SIZE: usize = 16384;
+        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
     }
 
     hprintln!("========================================");

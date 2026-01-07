@@ -114,15 +114,57 @@ Press `Ctrl-A X` to exit QEMU.
 
 ## Memory Allocator
 
-The kernel's `pvPortMalloc` / `vPortFree` functions wrap Rust's `#[global_allocator]` trait. This means:
+FreeRusTOS supports dynamic memory allocation via Cargo feature flags. This is a project-level configuration—select the allocator that fits your needs.
 
-- **The kernel is allocator-agnostic** - it uses whatever allocator your application provides
-- **No built-in heap implementations** - unlike C FreeRTOS which has heap_1 through heap_5
-- **The demo uses `embedded-alloc`** - a linked-list allocator with coalescing, suitable for embedded systems
+### Option 1: `heap-4` — Ported FreeRTOS Allocator
 
-If you need deterministic allocation timing, you can provide your own `#[global_allocator]` implementation (e.g., a pool allocator or bump allocator).
+FreeRTOS's `heap_4.c` is one of the most commonly used allocators in embedded FreeRTOS projects. We've ported it to Rust:
 
-For fully static allocation (no heap), use only the `*Static` API variants (e.g., `xTaskCreateStatic`, `xQueueCreateStatic`) and disable the `alloc` feature.
+- **First-fit allocation** with block splitting
+- **Coalescing on free** — merges adjacent free blocks to reduce fragmentation
+- **Fixed heap size** — configured via `configTOTAL_HEAP_SIZE` in `config.rs`
+- **Deterministic timing** — important for real-time systems
+
+```toml
+freertos-in-rust = { version = "0.1", features = ["heap-4"] }
+```
+
+```rust
+use freertos_in_rust::memory::FreeRtosAllocator;
+
+#[global_allocator]
+static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
+```
+
+### Option 2: `alloc` — Rust-Native Allocator
+
+If you prefer a simpler Rust-native solution, use the `alloc` feature with an external allocator like [`embedded-alloc`](https://crates.io/crates/embedded-alloc). This is a well-maintained linked-list allocator from the embedded Rust ecosystem:
+
+```toml
+freertos-in-rust = { version = "0.1", features = ["alloc"] }
+
+[dependencies]
+embedded-alloc = "0.6"
+```
+
+```rust
+use embedded_alloc::LlffHeap as Heap;
+
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
+
+fn main() {
+    // Initialize heap (required for embedded-alloc)
+    static mut HEAP_MEM: [MaybeUninit<u8>; 16384] = [MaybeUninit::uninit(); 16384];
+    unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, 16384) }
+}
+```
+
+### Static-only (No heap)
+
+For fully static allocation, don't enable any heap feature:
+- Use only `*Static` API variants (e.g., `xTaskCreateStatic`, `xQueueCreateStatic`)
+- `pvPortMalloc` will panic if called
 
 ## Project Structure
 
@@ -148,21 +190,34 @@ src/
 
 ## Configuration
 
-Configuration is done via Cargo features rather than `FreeRTOSConfig.h`:
+Rust doesn't have header files, so `FreeRTOSConfig.h` is replaced by two mechanisms:
+
+**Boolean flags** (e.g., `#define configUSE_MUTEXES 1`) become Cargo features:
 
 ```toml
 [dependencies]
 freertos-in-rust = { version = "0.1", features = [
     "port-cortex-m4f",    # Select your port
-    "alloc",              # Enable dynamic allocation
-    "use-mutexes",        # Enable mutex support
-    "timers",             # Enable software timers
-    "task-delete",        # Enable vTaskDelete
-    "task-suspend",       # Enable vTaskSuspend/Resume
+    "heap-4",             # Allocator: ported heap_4 (or "alloc" for external)
+    "use-mutexes",        # configUSE_MUTEXES
+    "timers",             # configUSE_TIMERS
+    "task-delete",        # INCLUDE_vTaskDelete
+    "task-suspend",       # INCLUDE_vTaskSuspend
 ] }
 ```
 
-Numeric configuration values (tick rate, max priorities, etc.) are constants in `src/config.rs`.
+See [Memory Allocator](#memory-allocator) for choosing between `heap-4` and `alloc`.
+
+**Numeric constants** (e.g., `#define configTOTAL_HEAP_SIZE 10240`) live in `src/config.rs` and are referenced as `crate::config::configTOTAL_HEAP_SIZE`:
+
+```rust
+// src/config.rs
+pub const configMAX_PRIORITIES: UBaseType_t = 5;
+pub const configTICK_RATE_HZ: TickType_t = 1000;
+pub const configTOTAL_HEAP_SIZE: usize = 10240;
+pub const configTIMER_TASK_PRIORITY: UBaseType_t = 2;
+// ... etc
+```
 
 ## TODOs
 

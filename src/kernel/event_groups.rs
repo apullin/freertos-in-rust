@@ -113,7 +113,7 @@ pub struct EventGroupDef_t {
     pub uxEventGroupNumber: UBaseType_t,
 
     /// Whether statically allocated
-    #[cfg(feature = "alloc")]
+    #[cfg(any(feature = "alloc", feature = "heap-4"))]
     pub ucStaticallyAllocated: u8,
 }
 
@@ -135,7 +135,7 @@ pub struct StaticEventGroup_t {
     #[cfg(feature = "trace-facility")]
     pub uxDummy3: UBaseType_t,
     /// Placeholder - static flag
-    #[cfg(feature = "alloc")]
+    #[cfg(any(feature = "alloc", feature = "heap-4"))]
     pub ucDummy4: u8,
 }
 
@@ -158,7 +158,7 @@ fn mtCOVERAGE_TEST_MARKER() {}
 // =============================================================================
 
 /// Create an event group (dynamic allocation)
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "heap-4"))]
 pub fn xEventGroupCreate() -> EventGroupHandle_t {
     traceENTER_xEventGroupCreate();
 
@@ -203,7 +203,7 @@ pub fn xEventGroupCreateStatic(pxEventGroupBuffer: *mut StaticEventGroup_t) -> E
             (*pxEventBits).uxEventBits = 0;
             vListInitialise(&mut (*pxEventBits).xTasksWaitingForBits);
 
-            #[cfg(feature = "alloc")]
+            #[cfg(any(feature = "alloc", feature = "heap-4"))]
             {
                 (*pxEventBits).ucStaticallyAllocated = pdTRUE as u8;
             }
@@ -574,7 +574,7 @@ pub fn vEventGroupDelete(xEventGroup: EventGroupHandle_t) {
 
     let _ = xTaskResumeAll();
 
-    #[cfg(feature = "alloc")]
+    #[cfg(any(feature = "alloc", feature = "heap-4"))]
     unsafe {
         if (*pxEventBits).ucStaticallyAllocated == pdFALSE as u8 {
             vPortFree(pxEventBits as *mut c_void);
@@ -601,20 +601,24 @@ pub fn xEventGroupGetStaticBuffer(
     configASSERT(!pxEventBits.is_null());
     configASSERT(!ppxEventGroupBuffer.is_null());
 
-    #[cfg(feature = "alloc")]
-    unsafe {
-        if (*pxEventBits).ucStaticallyAllocated == pdTRUE as u8 {
-            *ppxEventGroupBuffer = pxEventBits as *mut StaticEventGroup_t;
-            xReturn = pdTRUE;
-        } else {
-            xReturn = pdFALSE;
-        }
+    #[cfg(any(feature = "alloc", feature = "heap-4"))]
+    {
+        xReturn = unsafe {
+            if (*pxEventBits).ucStaticallyAllocated == pdTRUE as u8 {
+                *ppxEventGroupBuffer = pxEventBits as *mut StaticEventGroup_t;
+                pdTRUE
+            } else {
+                pdFALSE
+            }
+        };
     }
 
-    #[cfg(not(feature = "alloc"))]
-    unsafe {
-        *ppxEventGroupBuffer = pxEventBits as *mut StaticEventGroup_t;
-        xReturn = pdTRUE;
+    #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+    {
+        xReturn = unsafe {
+            *ppxEventGroupBuffer = pxEventBits as *mut StaticEventGroup_t;
+            pdTRUE
+        };
     }
 
     traceRETURN_xEventGroupGetStaticBuffer(xReturn);

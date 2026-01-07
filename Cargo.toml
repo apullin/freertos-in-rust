@@ -32,8 +32,9 @@ tick-16bit = []
 tick-32bit = []
 tick-64bit = []
 
-# Memory allocation
-alloc = []  # Enable alloc crate for pvPortMalloc/vPortFree
+# Memory allocation (choose one)
+heap-4 = []  # FreeRTOS heap_4: first-fit with coalescing (recommended)
+alloc = []   # Wrap Rust's #[global_allocator] instead
 
 # Testing support (enables std for host tests)
 std = ["alloc"]

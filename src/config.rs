@@ -221,6 +221,9 @@ pub const configGENERATE_RUN_TIME_STATS: BaseType_t = 0;
 pub const configUSE_APPLICATION_TASK_TAG: BaseType_t = 0;
 
 /// Number of thread local storage pointers
+#[cfg(feature = "thread-local-storage")]
+pub const configNUM_THREAD_LOCAL_STORAGE_POINTERS: usize = 5;
+#[cfg(not(feature = "thread-local-storage"))]
 pub const configNUM_THREAD_LOCAL_STORAGE_POINTERS: usize = 0;
 
 /// Enable POSIX errno support
@@ -301,3 +304,8 @@ pub const tskSET_NEW_STACKS_TO_KNOWN_VALUE: BaseType_t =
     } else {
         0
     };
+
+/// Byte value used to fill task stacks for high water mark detection.
+/// Stacks are filled with this value and then scanned to determine
+/// how much has been used.
+pub const tskSTACK_FILL_BYTE: u8 = 0xA5;

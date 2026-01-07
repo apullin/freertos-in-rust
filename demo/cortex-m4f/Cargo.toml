@@ -18,6 +18,14 @@ freertos-in-rust = { path = "../..", features = [
     "timers",
     "task-delete",
     "task-suspend",
+    "thread-local-storage",
+    "application-task-tag",
+    "stack-high-water-mark",
+    "task-priority-set",
+    "abort-delay",
+    "queue-sets",
+    "trace-facility",
+    "stats-formatting",
 ] }
 
 # Cortex-M support

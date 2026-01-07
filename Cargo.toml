@@ -45,19 +45,24 @@ stack-overflow-check = []       # configCHECK_FOR_STACK_OVERFLOW
 record-stack-high-address = []  # configRECORD_STACK_HIGH_ADDRESS
 
 # Task features (INCLUDE_* flags)
-task-delete = []      # INCLUDE_vTaskDelete
-task-suspend = []     # INCLUDE_vTaskSuspend
-abort-delay = []      # INCLUDE_xTaskAbortDelay
+task-delete = []          # INCLUDE_vTaskDelete
+task-suspend = []         # INCLUDE_vTaskSuspend
+abort-delay = []          # INCLUDE_xTaskAbortDelay
+task-priority-set = []    # INCLUDE_vTaskPrioritySet
+stack-high-water-mark = [] # INCLUDE_uxTaskGetStackHighWaterMark
 
 # Kernel features
 use-mutexes = []              # configUSE_MUTEXES
 timers = []                   # configUSE_TIMERS
 stream-buffers = []           # configUSE_STREAM_BUFFERS
+queue-sets = []               # configUSE_QUEUE_SETS
 posix-errno = []              # configUSE_POSIX_ERRNO
 pend-function-call = []       # INCLUDE_xTimerPendFunctionCall
 application-task-tag = []     # configUSE_APPLICATION_TASK_TAG
+thread-local-storage = []     # configNUM_THREAD_LOCAL_STORAGE_POINTERS
 critical-nesting-in-tcb = []  # portCRITICAL_NESTING_IN_TCB
 idle-yield = []               # Yield in idle task
+stats-formatting = []         # configUSE_STATS_FORMATTING_FUNCTIONS
 
 # TODO: Future features
 # smp = []  # Multi-core support (configNUMBER_OF_CORES > 1)

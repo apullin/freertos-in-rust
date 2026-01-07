@@ -215,3 +215,57 @@ pub type MessageBufferHandle_t = StreamBufferHandle_t;
 
 /// Null handle value
 pub const NULL_HANDLE: *mut core::ffi::c_void = core::ptr::null_mut();
+
+// =============================================================================
+// Task Status Structure (for vTaskGetInfo / uxTaskGetSystemState)
+// =============================================================================
+
+// Forward declare eTaskState - the actual enum is in tasks.rs
+// We re-export it here for the TaskStatus_t struct
+// [AMENDMENT] In C, eTaskState is defined in task.h. In Rust, the enum
+// is in tasks.rs, so TaskStatus_t references it via the kernel module.
+
+/// Task status information structure
+///
+/// Used by `vTaskGetInfo` and `uxTaskGetSystemState` to return detailed
+/// information about a task.
+#[repr(C)]
+#[derive(Clone)]
+pub struct TaskStatus_t {
+    /// Handle of the task to which the rest of the information relates
+    pub xHandle: TaskHandle_t,
+    /// Pointer to the task's name (null-terminated)
+    pub pcTaskName: *const u8,
+    /// Task number assigned to the task (for trace tools)
+    pub xTaskNumber: UBaseType_t,
+    /// Current state of the task
+    pub eCurrentState: u8, // Actually eTaskState, but using u8 for C compatibility
+    /// Priority at which the task was running when the structure was populated
+    pub uxCurrentPriority: UBaseType_t,
+    /// Base priority of the task (priority before any inheritance)
+    pub uxBasePriority: UBaseType_t,
+    /// Total run time allocated to the task so far (if configured)
+    pub ulRunTimeCounter: u32,
+    /// Pointer to the start of the stack (lowest address)
+    pub pxStackBase: *mut StackType_t,
+    /// Minimum free stack space since the task was created (high water mark)
+    /// Closer to zero = closer to overflow
+    pub usStackHighWaterMark: u16,
+}
+
+impl TaskStatus_t {
+    /// Create a zeroed TaskStatus_t
+    pub const fn new() -> Self {
+        TaskStatus_t {
+            xHandle: core::ptr::null_mut(),
+            pcTaskName: core::ptr::null(),
+            xTaskNumber: 0,
+            eCurrentState: 0,
+            uxCurrentPriority: 0,
+            uxBasePriority: 0,
+            ulRunTimeCounter: 0,
+            pxStackBase: core::ptr::null_mut(),
+            usStackHighWaterMark: 0,
+        }
+    }
+}

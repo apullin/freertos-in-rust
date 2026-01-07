@@ -244,6 +244,10 @@ pub struct tskTaskControlBlock {
     /// POSIX errno for this task.
     #[cfg(feature = "posix-errno")]
     pub iTaskErrno: i32,
+
+    /// Thread local storage pointers array.
+    #[cfg(feature = "thread-local-storage")]
+    pub pvThreadLocalStoragePointers: [*mut c_void; configNUM_THREAD_LOCAL_STORAGE_POINTERS],
 }
 
 /// Type alias for TCB pointer
@@ -293,6 +297,9 @@ impl tskTaskControlBlock {
 
             #[cfg(feature = "posix-errno")]
             iTaskErrno: 0,
+
+            #[cfg(feature = "thread-local-storage")]
+            pvThreadLocalStoragePointers: [ptr::null_mut(); configNUM_THREAD_LOCAL_STORAGE_POINTERS],
         }
     }
 }
@@ -1785,6 +1792,103 @@ pub fn vTaskYieldWithinAPI() {
 }
 
 // =============================================================================
+// Task Deletion (if enabled)
+// =============================================================================
+
+/// Delete a task.
+///
+/// The task being deleted will be removed from all ready, blocked, suspended,
+/// and event lists. If the task is deleting itself, the actual freeing of the
+/// TCB and stack memory is deferred to the idle task via `xTasksWaitingTermination`.
+///
+/// # Safety
+/// - xTaskToDelete must be a valid task handle, or null to delete the calling task
+/// - If deleting another task, ensure that task is not in a state where it could
+///   become runnable (e.g., waiting on a semaphore that could be given)
+///
+/// # Parameters
+/// - xTaskToDelete: Handle of the task to delete, or null to delete the calling task
+#[cfg(feature = "task-delete")]
+pub fn vTaskDelete(xTaskToDelete: TaskHandle_t) {
+    unsafe {
+        let mut xDeleteTCBInIdleTask: BaseType_t = pdFALSE;
+
+        taskENTER_CRITICAL();
+        {
+            // If null is passed in here then it is the calling task that is being deleted.
+            let pxTCB = prvGetTCBFromHandle(xTaskToDelete);
+            configASSERT(!pxTCB.is_null());
+
+            // Remove task from the ready/delayed list.
+            if uxListRemove(&mut (*pxTCB).xStateListItem) == 0 {
+                taskRESET_READY_PRIORITY((*pxTCB).uxPriority);
+            }
+
+            // Is the task waiting on an event also?
+            if !listLIST_ITEM_CONTAINER(&(*pxTCB).xEventListItem).is_null() {
+                uxListRemove(&mut (*pxTCB).xEventListItem);
+            }
+
+            // Increment the uxTaskNumber so kernel aware debuggers can detect
+            // that the task lists need re-generating.
+            uxTaskNumber += 1;
+
+            // Check if the task is running (or is the current task).
+            // For single-core: task is running if it's pxCurrentTCB.
+            let xTaskIsRunning = pxTCB == pxCurrentTCB;
+
+            // If the task is running, we must add it to the termination list
+            // so that the idle task can delete it when it is no longer running.
+            if xSchedulerRunning != pdFALSE && xTaskIsRunning {
+                // A running task is being deleted. This cannot complete when
+                // the task is still running, as a context switch is required.
+                // Place the task in the termination list. The idle task will
+                // free up any memory allocated for the TCB and stack.
+                vListInsertEnd(&mut xTasksWaitingTermination, &mut (*pxTCB).xStateListItem);
+
+                // Increment the counter so the idle task knows there is a task
+                // that has been deleted.
+                uxDeletedTasksWaitingCleanUp += 1;
+
+                crate::trace::traceTASK_DELETE(pxTCB as *mut c_void);
+
+                // Delete the task TCB in idle task.
+                xDeleteTCBInIdleTask = pdTRUE;
+
+                // Pend a yield since the current task is being deleted.
+                xYieldPendings[0] = pdTRUE;
+            } else {
+                // Task is not running, we can delete it immediately.
+                uxCurrentNumberOfTasks -= 1;
+                crate::trace::traceTASK_DELETE(pxTCB as *mut c_void);
+
+                // Reset the next expected unblock time in case it referred to
+                // the task that has just been deleted.
+                prvResetNextTaskUnblockTime();
+            }
+        }
+        taskEXIT_CRITICAL();
+
+        // If the task is not deleting itself, call prvDeleteTCB from outside
+        // of critical section. If a task deletes itself, prvDeleteTCB is called
+        // from prvCheckTasksWaitingTermination which is called from the idle task.
+        if xDeleteTCBInIdleTask != pdTRUE {
+            prvDeleteTCB(prvGetTCBFromHandle(xTaskToDelete));
+        }
+
+        // Force a reschedule if it is the currently running task that has just
+        // been deleted.
+        if xSchedulerRunning != pdFALSE {
+            let pxTCB = prvGetTCBFromHandle(xTaskToDelete);
+            if pxTCB == pxCurrentTCB {
+                configASSERT(uxSchedulerSuspended == 0);
+                portYIELD_WITHIN_API();
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Task Suspend/Resume (if enabled)
 // =============================================================================
 
@@ -2219,4 +2323,1010 @@ pub unsafe fn xTaskGenericNotifyFromISR(
     portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
 
     xReturn
+}
+
+// =============================================================================
+// Thread Local Storage (configNUM_THREAD_LOCAL_STORAGE_POINTERS)
+// =============================================================================
+
+/// Set a thread local storage pointer for a task.
+///
+/// Thread local storage allows storing task-specific data without global variables.
+/// Each task has configNUM_THREAD_LOCAL_STORAGE_POINTERS slots available.
+///
+/// # Arguments
+///
+/// * `xTaskToSet` - Handle of the task, or NULL for the calling task
+/// * `xIndex` - Index into the TLS array (0 to configNUM_THREAD_LOCAL_STORAGE_POINTERS-1)
+/// * `pvValue` - Value to store
+#[cfg(feature = "thread-local-storage")]
+pub unsafe fn vTaskSetThreadLocalStoragePointer(
+    xTaskToSet: TaskHandle_t,
+    xIndex: BaseType_t,
+    pvValue: *mut c_void,
+) {
+    let pxTCB = prvGetTCBFromHandle(xTaskToSet);
+
+    if xIndex >= 0 && (xIndex as usize) < configNUM_THREAD_LOCAL_STORAGE_POINTERS {
+        (*pxTCB).pvThreadLocalStoragePointers[xIndex as usize] = pvValue;
+    }
+}
+
+/// Get a thread local storage pointer from a task.
+///
+/// # Arguments
+///
+/// * `xTaskToQuery` - Handle of the task, or NULL for the calling task
+/// * `xIndex` - Index into the TLS array (0 to configNUM_THREAD_LOCAL_STORAGE_POINTERS-1)
+///
+/// # Returns
+///
+/// The stored pointer value, or NULL if index is out of range.
+#[cfg(feature = "thread-local-storage")]
+pub unsafe fn pvTaskGetThreadLocalStoragePointer(
+    xTaskToQuery: TaskHandle_t,
+    xIndex: BaseType_t,
+) -> *mut c_void {
+    let mut pvReturn: *mut c_void = ptr::null_mut();
+    let pxTCB = prvGetTCBFromHandle(xTaskToQuery);
+
+    if xIndex >= 0 && (xIndex as usize) < configNUM_THREAD_LOCAL_STORAGE_POINTERS {
+        pvReturn = (*pxTCB).pvThreadLocalStoragePointers[xIndex as usize];
+    }
+
+    pvReturn
+}
+
+// =============================================================================
+// Application Task Tag (configUSE_APPLICATION_TASK_TAG)
+// =============================================================================
+
+/// Task hook function type for application task tags.
+/// Returns a BaseType_t and takes a single void pointer parameter.
+#[cfg(feature = "application-task-tag")]
+pub type TaskHookFunction_t = Option<extern "C" fn(*mut c_void) -> BaseType_t>;
+
+/// Set the application task tag for a task.
+///
+/// Task tags allow storing an application-defined hook function pointer
+/// in each task's TCB. This can be used for tracing, debugging, or
+/// implementing custom task-specific behavior.
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task, or NULL for the calling task
+/// * `pxHookFunction` - Function pointer to store, or None to clear
+#[cfg(feature = "application-task-tag")]
+pub unsafe fn vTaskSetApplicationTaskTag(
+    xTask: TaskHandle_t,
+    pxHookFunction: TaskHookFunction_t,
+) {
+    let pxTCB: *mut TCB_t;
+
+    // If xTask is null, use the current task.
+    if xTask.is_null() {
+        pxTCB = pxCurrentTCB;
+    } else {
+        pxTCB = xTask as *mut TCB_t;
+    }
+
+    taskENTER_CRITICAL();
+    (*pxTCB).pxTaskTag = pxHookFunction;
+    taskEXIT_CRITICAL();
+}
+
+/// Get the application task tag from a task.
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task, or NULL for the calling task
+///
+/// # Returns
+///
+/// The stored hook function pointer, or None if not set.
+#[cfg(feature = "application-task-tag")]
+pub unsafe fn xTaskGetApplicationTaskTag(xTask: TaskHandle_t) -> TaskHookFunction_t {
+    let pxTCB: *mut TCB_t;
+    let xReturn: TaskHookFunction_t;
+
+    // If xTask is null, use the current task.
+    if xTask.is_null() {
+        pxTCB = pxCurrentTCB;
+    } else {
+        pxTCB = xTask as *mut TCB_t;
+    }
+
+    taskENTER_CRITICAL();
+    xReturn = (*pxTCB).pxTaskTag;
+    taskEXIT_CRITICAL();
+
+    xReturn
+}
+
+/// Get the application task tag from a task (ISR-safe version).
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task, or NULL for the calling task
+///
+/// # Returns
+///
+/// The stored hook function pointer, or None if not set.
+#[cfg(feature = "application-task-tag")]
+pub unsafe fn xTaskGetApplicationTaskTagFromISR(xTask: TaskHandle_t) -> TaskHookFunction_t {
+    let pxTCB: *mut TCB_t;
+    let xReturn: TaskHookFunction_t;
+
+    // If xTask is null, use the current task.
+    if xTask.is_null() {
+        pxTCB = pxCurrentTCB;
+    } else {
+        pxTCB = xTask as *mut TCB_t;
+    }
+
+    let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+    xReturn = (*pxTCB).pxTaskTag;
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+
+    xReturn
+}
+
+/// Call the application task hook function.
+///
+/// Calls the hook function stored in the task's tag with the provided parameter.
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task whose hook to call, or NULL for the calling task
+/// * `pvParameter` - Parameter to pass to the hook function
+///
+/// # Returns
+///
+/// The return value from the hook function, or pdFAIL if no hook is set.
+#[cfg(feature = "application-task-tag")]
+pub unsafe fn xTaskCallApplicationTaskHook(
+    xTask: TaskHandle_t,
+    pvParameter: *mut c_void,
+) -> BaseType_t {
+    let pxTCB: *mut TCB_t;
+    let xReturn: BaseType_t;
+
+    // If xTask is null, use the current task.
+    if xTask.is_null() {
+        pxTCB = pxCurrentTCB;
+    } else {
+        pxTCB = xTask as *mut TCB_t;
+    }
+
+    if let Some(hook) = (*pxTCB).pxTaskTag {
+        xReturn = hook(pvParameter);
+    } else {
+        xReturn = pdFAIL;
+    }
+
+    xReturn
+}
+
+// =============================================================================
+// Stack High Water Mark (INCLUDE_uxTaskGetStackHighWaterMark)
+// =============================================================================
+
+/// Check how much free stack space remains by scanning for the fill byte.
+///
+/// This function scans from the bottom of the stack upwards looking for
+/// bytes that are still set to the initial fill value (tskSTACK_FILL_BYTE).
+///
+/// # Safety
+///
+/// The stack pointer must be valid and point to a properly initialized stack.
+///
+/// # Arguments
+///
+/// * `pxStack` - Pointer to the bottom of the stack (lowest address)
+///
+/// # Returns
+///
+/// The number of bytes that appear to be unused (still contain fill byte).
+#[cfg(feature = "stack-high-water-mark")]
+unsafe fn prvTaskCheckFreeStackSpace(pxStack: *const u8) -> UBaseType_t {
+    let mut pucStackByte = pxStack;
+    let mut ulCount: UBaseType_t = 0;
+
+    // Count consecutive fill bytes from stack bottom.
+    while *pucStackByte == tskSTACK_FILL_BYTE {
+        pucStackByte = pucStackByte.add(1);
+        ulCount += 1;
+    }
+
+    // Return count in stack words, not bytes.
+    ulCount /= core::mem::size_of::<StackType_t>() as UBaseType_t;
+
+    ulCount
+}
+
+/// Get the high water mark for a task's stack.
+///
+/// Returns the minimum amount of remaining stack space that was available
+/// to the task since the task started executing. This is the amount of
+/// stack that remained unused when the task stack was at its greatest
+/// (deepest) value.
+///
+/// The value is in words (StackType_t units), not bytes.
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task, or NULL for the calling task
+///
+/// # Returns
+///
+/// The minimum free stack space (in words) since the task started.
+#[cfg(feature = "stack-high-water-mark")]
+pub unsafe fn uxTaskGetStackHighWaterMark(xTask: TaskHandle_t) -> UBaseType_t {
+    let pxTCB = prvGetTCBFromHandle(xTask);
+    let pucStackByte: *const u8;
+
+    // The stack grows down, so the "bottom" (unused area) is at pxStack.
+    // On platforms where the stack grows up, we'd use pxEndOfStack instead.
+    #[cfg(feature = "arch-32bit")]
+    {
+        // portSTACK_GROWTH < 0: stack grows down, bottom is at pxStack
+        pucStackByte = (*pxTCB).pxStack as *const u8;
+    }
+
+    #[cfg(not(feature = "arch-32bit"))]
+    {
+        // portSTACK_GROWTH > 0: stack grows up, check pxEndOfStack
+        // [AMENDMENT] This path requires record-stack-high-address feature.
+        pucStackByte = (*pxTCB).pxStack as *const u8;
+    }
+
+    prvTaskCheckFreeStackSpace(pucStackByte)
+}
+
+/// Get the high water mark for a task's stack (returning configSTACK_DEPTH_TYPE).
+///
+/// Same as uxTaskGetStackHighWaterMark but returns configSTACK_DEPTH_TYPE
+/// instead of UBaseType_t, for compatibility with configSTACK_DEPTH_TYPE
+/// configurations that use larger types.
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task, or NULL for the calling task
+///
+/// # Returns
+///
+/// The minimum free stack space (in words) since the task started.
+#[cfg(feature = "stack-high-water-mark")]
+pub unsafe fn uxTaskGetStackHighWaterMark2(xTask: TaskHandle_t) -> configSTACK_DEPTH_TYPE {
+    uxTaskGetStackHighWaterMark(xTask) as configSTACK_DEPTH_TYPE
+}
+
+// =============================================================================
+// Task Priority Get/Set (INCLUDE_vTaskPrioritySet, INCLUDE_uxTaskPriorityGet)
+// =============================================================================
+
+/// Get the priority of a task.
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task, or NULL for the calling task
+///
+/// # Returns
+///
+/// The priority of the task.
+#[cfg(feature = "task-priority-set")]
+pub unsafe fn uxTaskPriorityGet(xTask: TaskHandle_t) -> UBaseType_t {
+    let pxTCB = prvGetTCBFromHandle(xTask);
+    (*pxTCB).uxPriority
+}
+
+/// Get the priority of a task (ISR-safe version).
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task, or NULL for the calling task
+///
+/// # Returns
+///
+/// The priority of the task.
+#[cfg(feature = "task-priority-set")]
+pub unsafe fn uxTaskPriorityGetFromISR(xTask: TaskHandle_t) -> UBaseType_t {
+    let pxTCB = prvGetTCBFromHandle(xTask);
+    let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+    let uxReturn = (*pxTCB).uxPriority;
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+    uxReturn
+}
+
+/// Set the priority of a task.
+///
+/// A context switch will occur if the priority being set is higher than the
+/// currently executing task and preemption is enabled.
+///
+/// # Arguments
+///
+/// * `xTask` - Handle of the task, or NULL for the calling task
+/// * `uxNewPriority` - The new priority (0 to configMAX_PRIORITIES-1)
+#[cfg(feature = "task-priority-set")]
+pub unsafe fn vTaskPrioritySet(xTask: TaskHandle_t, uxNewPriority: UBaseType_t) {
+    let pxTCB: *mut TCB_t;
+    let uxCurrentBasePriority: UBaseType_t;
+    let uxPriorityUsedOnEntry: UBaseType_t;
+    let mut xYieldRequired: BaseType_t = pdFALSE;
+
+    // Clamp priority to valid range.
+    let uxNewPriority = if uxNewPriority >= configMAX_PRIORITIES {
+        configMAX_PRIORITIES - 1
+    } else {
+        uxNewPriority
+    };
+
+    taskENTER_CRITICAL();
+    {
+        pxTCB = prvGetTCBFromHandle(xTask);
+        configASSERT(!pxTCB.is_null());
+
+        // Get current base priority (considering mutex inheritance).
+        #[cfg(feature = "use-mutexes")]
+        {
+            uxCurrentBasePriority = (*pxTCB).uxBasePriority;
+        }
+        #[cfg(not(feature = "use-mutexes"))]
+        {
+            uxCurrentBasePriority = (*pxTCB).uxPriority;
+        }
+
+        if uxCurrentBasePriority != uxNewPriority {
+            // Check if we need to yield after changing priority.
+            if uxNewPriority > uxCurrentBasePriority {
+                // Priority is being raised.
+                if pxTCB != pxCurrentTCB {
+                    // Another task's priority is being raised.
+                    if uxNewPriority > (*pxCurrentTCB).uxPriority {
+                        xYieldRequired = pdTRUE;
+                    }
+                }
+                // If raising current task's priority, no yield needed.
+            } else if pxTCB == pxCurrentTCB {
+                // Lowering the running task's priority - may need to yield.
+                xYieldRequired = pdTRUE;
+            }
+
+            // Remember old priority for list manipulation.
+            uxPriorityUsedOnEntry = (*pxTCB).uxPriority;
+
+            // Update priority.
+            #[cfg(feature = "use-mutexes")]
+            {
+                // Only change effective priority if not using inherited priority
+                // or if new priority is higher than inherited.
+                if (*pxTCB).uxBasePriority == (*pxTCB).uxPriority
+                    || uxNewPriority > (*pxTCB).uxPriority
+                {
+                    (*pxTCB).uxPriority = uxNewPriority;
+                }
+                // Base priority always gets updated.
+                (*pxTCB).uxBasePriority = uxNewPriority;
+            }
+            #[cfg(not(feature = "use-mutexes"))]
+            {
+                (*pxTCB).uxPriority = uxNewPriority;
+            }
+
+            // Update event list item value if not in use for something else.
+            let xItemValue = listGET_LIST_ITEM_VALUE(&(*pxTCB).xEventListItem);
+            if (xItemValue & taskEVENT_LIST_ITEM_VALUE_IN_USE) == 0 {
+                listSET_LIST_ITEM_VALUE(
+                    &mut (*pxTCB).xEventListItem,
+                    (configMAX_PRIORITIES as TickType_t) - (uxNewPriority as TickType_t),
+                );
+            }
+
+            // If task is in a ready list, move it to the correct one.
+            if listIS_CONTAINED_WITHIN(
+                &pxReadyTasksLists[uxPriorityUsedOnEntry as usize],
+                &(*pxTCB).xStateListItem,
+            ) != pdFALSE
+            {
+                // Remove from old ready list.
+                if uxListRemove(&mut (*pxTCB).xStateListItem) == 0 {
+                    // List is now empty, reset the priority bit.
+                    taskRESET_READY_PRIORITY(uxPriorityUsedOnEntry);
+                }
+                // Add to new ready list.
+                prvAddTaskToReadyList(pxTCB);
+            }
+
+            if xYieldRequired != pdFALSE {
+                portYIELD_WITHIN_API();
+            }
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
+// =============================================================================
+// eTaskGetState - Get the state of a task
+// =============================================================================
+
+/// Returns the state of the specified task.
+///
+/// This function is available when `abort-delay` or `trace-facility` features are enabled.
+/// It determines task state by checking which list the task's state list item is in.
+///
+/// # Safety
+/// - xTask must be a valid task handle or null (for current task is not applicable here)
+/// - Must be called from a non-ISR context
+#[cfg(any(feature = "abort-delay", feature = "trace-facility"))]
+pub unsafe fn eTaskGetState(xTask: TaskHandle_t) -> eTaskState {
+    let pxTCB = xTask as *const TCB_t;
+    configASSERT(!pxTCB.is_null());
+
+    // If this is the current task, it must be running.
+    if pxTCB == pxCurrentTCB {
+        return eTaskState::eRunning;
+    }
+
+    // Get the list containers in a critical section.
+    let pxStateList: *const List_t;
+    let pxEventList: *const List_t;
+    let pxDelayedList: *const List_t;
+    let pxOverflowedDelayedList: *const List_t;
+
+    taskENTER_CRITICAL();
+    {
+        pxStateList = listLIST_ITEM_CONTAINER(&(*pxTCB).xStateListItem);
+        pxEventList = listLIST_ITEM_CONTAINER(&(*pxTCB).xEventListItem);
+        pxDelayedList = pxDelayedTaskList;
+        pxOverflowedDelayedList = pxOverflowDelayedTaskList;
+    }
+    taskEXIT_CRITICAL();
+
+    // Check if task is on the pending ready list - if so it's ready.
+    if pxEventList == &xPendingReadyList as *const _ {
+        return eTaskState::eReady;
+    }
+
+    // Check if task is on one of the delayed lists.
+    if pxStateList == pxDelayedList || pxStateList == pxOverflowedDelayedList {
+        return eTaskState::eBlocked;
+    }
+
+    // Check if task is on the suspended list.
+    #[cfg(feature = "task-suspend")]
+    {
+        if pxStateList == &xSuspendedTaskList as *const _ {
+            // Task is on suspended list. Is it genuinely suspended or blocked indefinitely?
+            if listLIST_ITEM_CONTAINER(&(*pxTCB).xEventListItem).is_null() {
+                // Not waiting on an event list. Check if waiting on a notification.
+                let mut is_blocked = false;
+                for i in 0..configTASK_NOTIFICATION_ARRAY_ENTRIES {
+                    if (*pxTCB).ucNotifyState[i] == taskWAITING_NOTIFICATION {
+                        is_blocked = true;
+                        break;
+                    }
+                }
+                if is_blocked {
+                    return eTaskState::eBlocked;
+                } else {
+                    return eTaskState::eSuspended;
+                }
+            } else {
+                // Waiting on an event list while on suspended list means blocked indefinitely.
+                return eTaskState::eBlocked;
+            }
+        }
+    }
+
+    // Check if task is on the deleted list (or has no list).
+    #[cfg(feature = "task-delete")]
+    {
+        if pxStateList == &xTasksWaitingTermination as *const _ || pxStateList.is_null() {
+            return eTaskState::eDeleted;
+        }
+    }
+
+    // If not in any other state, it must be Ready.
+    eTaskState::eReady
+}
+
+// =============================================================================
+// xTaskAbortDelay - Abort a task's delay
+// =============================================================================
+
+/// Forces a task out of the Blocked state and into the Ready state.
+///
+/// A task will enter the Blocked state when it is waiting for an event (such as
+/// a timeout, semaphore, or queue). xTaskAbortDelay() can be used to force the
+/// task out of the Blocked state before the event occurs.
+///
+/// # Returns
+/// - pdPASS if the task was removed from the Blocked state
+/// - pdFAIL if the task was not in the Blocked state
+///
+/// # Safety
+/// - xTask must be a valid task handle
+/// - Must be called from a task context (not ISR)
+#[cfg(feature = "abort-delay")]
+pub unsafe fn xTaskAbortDelay(xTask: TaskHandle_t) -> BaseType_t {
+    let pxTCB = xTask as *mut TCB_t;
+    configASSERT(!pxTCB.is_null());
+
+    let xReturn: BaseType_t;
+
+    vTaskSuspendAll();
+    {
+        // A task can only be prematurely removed from the Blocked state if
+        // it is actually in the Blocked state.
+        if eTaskGetState(xTask) == eTaskState::eBlocked {
+            xReturn = pdPASS;
+
+            // Remove the reference to the task from the blocked list.
+            // An interrupt won't touch the xStateListItem because the scheduler is suspended.
+            uxListRemove(&mut (*pxTCB).xStateListItem);
+
+            // Is the task waiting on an event also? If so remove it from
+            // the event list too. Interrupts can touch the event list item,
+            // even though the scheduler is suspended, so a critical section is used.
+            taskENTER_CRITICAL();
+            {
+                if !listLIST_ITEM_CONTAINER(&(*pxTCB).xEventListItem).is_null() {
+                    uxListRemove(&mut (*pxTCB).xEventListItem);
+
+                    // This lets the task know it was forcibly removed from the
+                    // blocked state so it should not re-evaluate its block time
+                    // and then block again.
+                    (*pxTCB).ucDelayAborted = pdTRUE as u8;
+                }
+            }
+            taskEXIT_CRITICAL();
+
+            // Place the unblocked task into the appropriate ready list.
+            prvAddTaskToReadyList(pxTCB);
+
+            // A task being unblocked cannot cause an immediate context switch
+            // if preemption is turned off.
+            if configUSE_PREEMPTION != 0 {
+                // Preemption is on, but a context switch should only be
+                // performed if the unblocked task has a priority that is
+                // higher than the currently executing task.
+                if (*pxTCB).uxPriority > (*pxCurrentTCB).uxPriority {
+                    // Pend the yield to be performed when the scheduler is unsuspended.
+                    xYieldPendings[0] = pdTRUE;
+                }
+            }
+        } else {
+            xReturn = pdFAIL;
+        }
+    }
+    xTaskResumeAll();
+
+    xReturn
+}
+
+// =============================================================================
+// Task Information APIs (configUSE_TRACE_FACILITY)
+// =============================================================================
+
+/// Get information about a task
+///
+/// Populates a TaskStatus_t structure with information about the task.
+///
+/// # Arguments
+/// * `xTask` - Handle of the task to query, or NULL for the current task
+/// * `pxTaskStatus` - Pointer to TaskStatus_t struct to populate
+/// * `xGetFreeStackSpace` - If pdTRUE, also calculate stack high water mark
+/// * `eState` - The state to use for the task, or eInvalid to query actual state
+///
+/// # Safety
+/// `pxTaskStatus` must point to a valid TaskStatus_t structure.
+#[cfg(feature = "trace-facility")]
+pub unsafe fn vTaskGetInfo(
+    xTask: TaskHandle_t,
+    pxTaskStatus: *mut crate::types::TaskStatus_t,
+    xGetFreeStackSpace: BaseType_t,
+    eState: eTaskState,
+) {
+    // [AMENDMENT] In C, eState can be passed in to avoid recomputing it.
+    // If eInvalid is passed, we query the actual state.
+
+    // Get the TCB from handle or use current task
+    let pxTCB: *mut TCB_t = if xTask.is_null() {
+        pxCurrentTCB
+    } else {
+        xTask as *mut TCB_t
+    };
+
+    if pxTCB.is_null() || pxTaskStatus.is_null() {
+        return;
+    }
+
+    // Fill in the task handle
+    (*pxTaskStatus).xHandle = pxTCB as TaskHandle_t;
+
+    // Copy task name pointer
+    (*pxTaskStatus).pcTaskName = (*pxTCB).pcTaskName.as_ptr();
+
+    // Fill in task number (for tracing)
+    #[cfg(feature = "trace-facility")]
+    {
+        (*pxTaskStatus).xTaskNumber = (*pxTCB).uxTaskNumber;
+    }
+    #[cfg(not(feature = "trace-facility"))]
+    {
+        (*pxTaskStatus).xTaskNumber = 0;
+    }
+
+    // Fill in current priority
+    (*pxTaskStatus).uxCurrentPriority = (*pxTCB).uxPriority;
+
+    // Fill in base priority (if mutexes are in use, otherwise same as current)
+    #[cfg(feature = "use-mutexes")]
+    {
+        (*pxTaskStatus).uxBasePriority = (*pxTCB).uxBasePriority;
+    }
+    #[cfg(not(feature = "use-mutexes"))]
+    {
+        (*pxTaskStatus).uxBasePriority = (*pxTCB).uxPriority;
+    }
+
+    // Run time counter (if run-time stats are enabled)
+    // [AMENDMENT] configGENERATE_RUN_TIME_STATS is not yet implemented as a feature
+    (*pxTaskStatus).ulRunTimeCounter = 0;
+
+    // Stack base pointer
+    (*pxTaskStatus).pxStackBase = (*pxTCB).pxStack;
+
+    // Stack high water mark (if requested)
+    if xGetFreeStackSpace != pdFALSE {
+        #[cfg(feature = "stack-high-water-mark")]
+        {
+            (*pxTaskStatus).usStackHighWaterMark =
+                uxTaskGetStackHighWaterMark(pxTCB as TaskHandle_t) as u16;
+        }
+        #[cfg(not(feature = "stack-high-water-mark"))]
+        {
+            (*pxTaskStatus).usStackHighWaterMark = 0;
+        }
+    } else {
+        (*pxTaskStatus).usStackHighWaterMark = 0;
+    }
+
+    // Task state - use provided state or query actual
+    (*pxTaskStatus).eCurrentState = if eState != eTaskState::eInvalid {
+        eState as u8
+    } else {
+        eTaskGetState(pxTCB as TaskHandle_t) as u8
+    };
+}
+
+/// Helper to add tasks from a list to the status array
+///
+/// Iterates through a list, calling vTaskGetInfo for each task found.
+///
+/// # Returns
+/// Number of tasks added to the array
+#[cfg(feature = "trace-facility")]
+unsafe fn prvListTasksWithinSingleList(
+    pxTaskStatusArray: *mut crate::types::TaskStatus_t,
+    pxList: *mut List_t,
+    eState: eTaskState,
+) -> UBaseType_t {
+    let mut uxTask: UBaseType_t = 0;
+
+    if listCURRENT_LIST_LENGTH(pxList) > 0 {
+        // Get the first item in the list
+        let pxListEnd = listGET_END_MARKER(pxList) as *mut ListItem_t;
+        let mut pxNextListItem = listGET_HEAD_ENTRY(pxList);
+
+        // Iterate through the list
+        while pxNextListItem != pxListEnd {
+            let pxTCB = listGET_LIST_ITEM_OWNER(pxNextListItem) as *mut TCB_t;
+
+            // Fill in task info
+            vTaskGetInfo(
+                pxTCB as TaskHandle_t,
+                pxTaskStatusArray.add(uxTask as usize),
+                pdTRUE,
+                eState,
+            );
+
+            uxTask += 1;
+            pxNextListItem = listGET_NEXT(pxNextListItem);
+        }
+    }
+
+    uxTask
+}
+
+/// Get system state - information about all tasks
+///
+/// Populates an array of TaskStatus_t structures, one for each task in the
+/// system. This function is intended for debugging aid only.
+///
+/// # Arguments
+/// * `pxTaskStatusArray` - Pointer to array of TaskStatus_t structures
+/// * `uxArraySize` - Size of the array (max number of tasks to report)
+/// * `pulTotalRunTime` - If not NULL, filled with total run time (if stats enabled)
+///
+/// # Returns
+/// Number of tasks populated in the array, or 0 if array too small
+///
+/// # Safety
+/// The array must be large enough for `uxArraySize` TaskStatus_t entries.
+#[cfg(feature = "trace-facility")]
+pub unsafe fn uxTaskGetSystemState(
+    pxTaskStatusArray: *mut crate::types::TaskStatus_t,
+    uxArraySize: UBaseType_t,
+    pulTotalRunTime: *mut u32,
+) -> UBaseType_t {
+    let mut uxTask: UBaseType_t = 0;
+    let mut uxQueue: UBaseType_t = configMAX_PRIORITIES;
+
+    vTaskSuspendAll();
+    {
+        // Is there a space in the array for each task in the system?
+        if uxArraySize >= uxCurrentNumberOfTasks {
+            // Fill in a TaskStatus_t structure for each task in the Ready state
+            loop {
+                uxQueue -= 1;
+                uxTask += prvListTasksWithinSingleList(
+                    pxTaskStatusArray.add(uxTask as usize),
+                    &mut pxReadyTasksLists[uxQueue as usize],
+                    eTaskState::eReady,
+                );
+
+                if uxQueue == 0 {
+                    break;
+                }
+            }
+
+            // Fill in a TaskStatus_t structure for each task in the Blocked state
+            uxTask += prvListTasksWithinSingleList(
+                pxTaskStatusArray.add(uxTask as usize),
+                pxDelayedTaskList,
+                eTaskState::eBlocked,
+            );
+
+            uxTask += prvListTasksWithinSingleList(
+                pxTaskStatusArray.add(uxTask as usize),
+                pxOverflowDelayedTaskList,
+                eTaskState::eBlocked,
+            );
+
+            // Fill in a TaskStatus_t structure for each task in the Suspended state
+            #[cfg(feature = "task-suspend")]
+            {
+                uxTask += prvListTasksWithinSingleList(
+                    pxTaskStatusArray.add(uxTask as usize),
+                    &mut xSuspendedTaskList,
+                    eTaskState::eSuspended,
+                );
+            }
+
+            // Fill in a TaskStatus_t structure for each task that has been deleted
+            // but is awaiting cleanup
+            #[cfg(feature = "task-delete")]
+            {
+                uxTask += prvListTasksWithinSingleList(
+                    pxTaskStatusArray.add(uxTask as usize),
+                    &mut xTasksWaitingTermination,
+                    eTaskState::eDeleted,
+                );
+            }
+
+            // Fill in the run time stats if enabled
+            // [AMENDMENT] Run time stats not yet implemented
+            if !pulTotalRunTime.is_null() {
+                *pulTotalRunTime = 0;
+            }
+        } else {
+            // Array not large enough, return 0
+            uxTask = 0;
+        }
+    }
+    xTaskResumeAll();
+
+    uxTask
+}
+
+// =============================================================================
+// Task List Formatting (configUSE_STATS_FORMATTING_FUNCTIONS)
+// =============================================================================
+
+/// Buffer writer for formatting task list output
+///
+/// [AMENDMENT] In C, snprintf is used for formatting. In Rust no_std,
+/// we use core::fmt::Write trait with a buffer wrapper instead.
+/// This avoids heap allocation and works on bare metal.
+#[cfg(feature = "stats-formatting")]
+pub struct BufferWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+#[cfg(feature = "stats-formatting")]
+impl<'a> BufferWriter<'a> {
+    /// Create a new BufferWriter wrapping a byte slice
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        BufferWriter { buf, pos: 0 }
+    }
+
+    /// Returns the number of bytes written
+    pub fn len(&self) -> usize {
+        self.pos
+    }
+
+    /// Returns true if nothing has been written
+    pub fn is_empty(&self) -> bool {
+        self.pos == 0
+    }
+}
+
+#[cfg(feature = "stats-formatting")]
+impl<'a> core::fmt::Write for BufferWriter<'a> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let remaining = &mut self.buf[self.pos..];
+        if bytes.len() <= remaining.len() {
+            remaining[..bytes.len()].copy_from_slice(bytes);
+            self.pos += bytes.len();
+            Ok(())
+        } else {
+            // Buffer full - write as much as we can
+            remaining.copy_from_slice(&bytes[..remaining.len()]);
+            self.pos = self.buf.len();
+            Err(core::fmt::Error)
+        }
+    }
+}
+
+/// Convert task state to a single character for display
+#[cfg(feature = "stats-formatting")]
+fn prvGetTaskStateChar(eState: eTaskState) -> char {
+    match eState {
+        eTaskState::eRunning => 'X',   // eXecuting
+        eTaskState::eReady => 'R',     // Ready
+        eTaskState::eBlocked => 'B',   // Blocked
+        eTaskState::eSuspended => 'S', // Suspended
+        eTaskState::eDeleted => 'D',   // Deleted
+        eTaskState::eInvalid => '?',   // Invalid
+    }
+}
+
+/// Write task list to a buffer
+///
+/// Writes a human-readable table of task information to the provided buffer.
+/// Format: `TaskName        State  Prio  Stack  Num`
+///
+/// # Arguments
+/// * `pcWriteBuffer` - Pointer to buffer to write task list into
+/// * `uxBufferLength` - Length of the buffer in bytes
+///
+/// # Safety
+/// Buffer must be large enough for `uxBufferLength` bytes.
+///
+/// # Note
+/// This function calls uxTaskGetSystemState which requires trace-facility.
+#[cfg(all(feature = "stats-formatting", feature = "trace-facility"))]
+pub unsafe fn vTaskListTasks(pcWriteBuffer: *mut u8, uxBufferLength: usize) {
+    use core::fmt::Write;
+
+    // Create a slice from the raw pointer
+    let buffer = core::slice::from_raw_parts_mut(pcWriteBuffer, uxBufferLength);
+    let mut writer = BufferWriter::new(buffer);
+
+    // Write header
+    let _ = writeln!(
+        writer,
+        "{:<16} {:>5} {:>4} {:>6} {:>4}",
+        "Name", "State", "Prio", "Stack", "Num"
+    );
+
+    // Get the number of tasks
+    let uxArraySize = uxTaskGetNumberOfTasks();
+    if uxArraySize == 0 {
+        return;
+    }
+
+    // Allocate array on stack for small systems, or use alloc if available
+    // [AMENDMENT] In C, malloc is used. Here we use a fixed-size stack array
+    // or alloc if available. For simplicity, we limit to 16 tasks on stack.
+    const MAX_STACK_TASKS: usize = 16;
+
+    #[cfg(feature = "alloc")]
+    {
+        extern crate alloc;
+        use alloc::vec::Vec;
+
+        let mut pxTaskStatusArray: Vec<crate::types::TaskStatus_t> =
+            Vec::with_capacity(uxArraySize as usize);
+        pxTaskStatusArray.resize_with(uxArraySize as usize, crate::types::TaskStatus_t::new);
+
+        let uxTasksReturned = uxTaskGetSystemState(
+            pxTaskStatusArray.as_mut_ptr(),
+            uxArraySize,
+            ptr::null_mut(),
+        );
+
+        // Write each task
+        for i in 0..uxTasksReturned as usize {
+            let pxTaskStatus = &pxTaskStatusArray[i];
+            let name = prvGetTaskNameFromPtr(pxTaskStatus.pcTaskName);
+            let state_char = prvGetTaskStateChar(
+                core::mem::transmute::<u8, eTaskState>(pxTaskStatus.eCurrentState),
+            );
+
+            let _ = writeln!(
+                writer,
+                "{:<16} {:>5} {:>4} {:>6} {:>4}",
+                name,
+                state_char,
+                pxTaskStatus.uxCurrentPriority,
+                pxTaskStatus.usStackHighWaterMark,
+                pxTaskStatus.xTaskNumber
+            );
+        }
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    {
+        // Stack-allocated version for no-alloc builds
+        let mut pxTaskStatusArray: [crate::types::TaskStatus_t; MAX_STACK_TASKS] =
+            [crate::types::TaskStatus_t::new(); MAX_STACK_TASKS];
+
+        let uxArraySizeClamped = if uxArraySize as usize > MAX_STACK_TASKS {
+            MAX_STACK_TASKS as UBaseType_t
+        } else {
+            uxArraySize
+        };
+
+        let uxTasksReturned = uxTaskGetSystemState(
+            pxTaskStatusArray.as_mut_ptr(),
+            uxArraySizeClamped,
+            ptr::null_mut(),
+        );
+
+        // Write each task
+        for i in 0..uxTasksReturned as usize {
+            let pxTaskStatus = &pxTaskStatusArray[i];
+            let name = prvGetTaskNameFromPtr(pxTaskStatus.pcTaskName);
+            let state_char = prvGetTaskStateChar(
+                core::mem::transmute::<u8, eTaskState>(pxTaskStatus.eCurrentState),
+            );
+
+            let _ = writeln!(
+                writer,
+                "{:<16} {:>5} {:>4} {:>6} {:>4}",
+                name,
+                state_char,
+                pxTaskStatus.uxCurrentPriority,
+                pxTaskStatus.usStackHighWaterMark,
+                pxTaskStatus.xTaskNumber
+            );
+        }
+    }
+
+    // Null-terminate the buffer if there's space
+    if writer.pos < uxBufferLength {
+        buffer[writer.pos] = 0;
+    }
+}
+
+/// Helper to convert task name pointer to &str for formatting
+#[cfg(feature = "stats-formatting")]
+fn prvGetTaskNameFromPtr(pcTaskName: *const u8) -> &'static str {
+    if pcTaskName.is_null() {
+        return "<null>";
+    }
+
+    // Find length by scanning for null terminator or max length
+    let mut len = 0;
+    unsafe {
+        while len < configMAX_TASK_NAME_LEN && *pcTaskName.add(len) != 0 {
+            len += 1;
+        }
+        // Safety: we're reading from the task name which is valid for TCB lifetime
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(pcTaskName, len))
+    }
 }

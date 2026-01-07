@@ -201,9 +201,10 @@ pub struct xQUEUE {
         feature = "alloc", // configSUPPORT_DYNAMIC_ALLOCATION
     ))]
     pub ucStaticallyAllocated: u8,
-    // TODO: Queue sets support
-    // #[cfg(feature = "queue-sets")]
-    // pub pxQueueSetContainer: *mut xQUEUE,
+
+    /// Pointer to the queue set this queue/semaphore belongs to (if any)
+    #[cfg(feature = "queue-sets")]
+    pub pxQueueSetContainer: *mut xQUEUE,
 
     // TODO: Trace facility support
     // #[cfg(feature = "trace-facility")]
@@ -217,6 +218,14 @@ pub type Queue_t = xQUEUE;
 
 /// Queue handle type
 pub type QueueHandle_t = *mut Queue_t;
+
+/// Queue set handle type (a queue set is itself a queue)
+#[cfg(feature = "queue-sets")]
+pub type QueueSetHandle_t = *mut Queue_t;
+
+/// Queue set member handle type (a queue or semaphore that belongs to a set)
+#[cfg(feature = "queue-sets")]
+pub type QueueSetMemberHandle_t = *mut Queue_t;
 
 // =============================================================================
 // Static Queue (for static allocation)
@@ -366,8 +375,11 @@ unsafe fn prvInitialiseNewQueue(
     // TODO: Trace facility
     // (*pxNewQueue).ucQueueType = ucQueueType;
 
-    // TODO: Queue sets
-    // (*pxNewQueue).pxQueueSetContainer = ptr::null_mut();
+    // Initialize queue set container pointer
+    #[cfg(feature = "queue-sets")]
+    {
+        (*pxNewQueue).pxQueueSetContainer = ptr::null_mut();
+    }
 
     traceQUEUE_CREATE(pxNewQueue as *mut c_void);
 }
@@ -710,23 +722,58 @@ pub unsafe fn xQueueGenericSend(
             {
                 traceQUEUE_SEND(pxQueue as *mut c_void);
 
+                // Queue set support: track previous message count for overwrite detection
+                #[cfg(feature = "queue-sets")]
+                let uxPreviousMessagesWaiting = (*pxQueue).uxMessagesWaiting;
+
                 xYieldRequired = prvCopyDataToQueue(pxQueue, pvItemToQueue, xCopyPosition);
 
-                /* If there was a task waiting for data to arrive on the
-                 * queue then unblock it now. */
-                if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                    if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
-                        /* The unblocked task has a priority higher than
-                         * our own so yield immediately. */
+                // Queue set handling: if this queue is a member of a set, notify the set
+                #[cfg(feature = "queue-sets")]
+                {
+                    if !(*pxQueue).pxQueueSetContainer.is_null() {
+                        if xCopyPosition == queueOVERWRITE && uxPreviousMessagesWaiting != 0 {
+                            // Do not notify the queue set as an existing item was
+                            // overwritten, so the number of items hasn't changed.
+                            mtCOVERAGE_TEST_MARKER();
+                        } else if prvNotifyQueueSetContainer(pxQueue) != pdFALSE {
+                            // The queue is a member of a queue set, and posting to
+                            // the queue set caused a higher priority task to unblock.
+                            queueYIELD_IF_USING_PREEMPTION();
+                        }
+                    } else {
+                        // Not a member of a queue set - normal unblock logic
+                        if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
+                            if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive)
+                                != pdFALSE
+                            {
+                                queueYIELD_IF_USING_PREEMPTION();
+                            }
+                        } else if xYieldRequired != pdFALSE {
+                            queueYIELD_IF_USING_PREEMPTION();
+                        }
+                    }
+                }
+
+                // Without queue sets, use simpler logic
+                #[cfg(not(feature = "queue-sets"))]
+                {
+                    /* If there was a task waiting for data to arrive on the
+                     * queue then unblock it now. */
+                    if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
+                        if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+                            /* The unblocked task has a priority higher than
+                             * our own so yield immediately. */
+                            queueYIELD_IF_USING_PREEMPTION();
+                        } else {
+                            mtCOVERAGE_TEST_MARKER();
+                        }
+                    } else if xYieldRequired != pdFALSE {
+                        /* This path is a special case for mutex priority inheritance */
                         queueYIELD_IF_USING_PREEMPTION();
                     } else {
                         mtCOVERAGE_TEST_MARKER();
                     }
-                } else if xYieldRequired != pdFALSE {
-                    /* This path is a special case for mutex priority inheritance */
-                    queueYIELD_IF_USING_PREEMPTION();
-                } else {
-                    mtCOVERAGE_TEST_MARKER();
                 }
 
                 taskEXIT_CRITICAL();
@@ -1092,20 +1139,52 @@ pub unsafe fn xQueueGenericSendFromISR(
             // Copy data to queue
             prvCopyDataToQueue(pxQueue, pvItemToQueue, xCopyPosition);
 
-            // If queue was locked, increment lock count instead of waking tasks
-            if cTxLock == queueUNLOCKED {
-                // Queue not locked - can unblock waiting task
-                if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                    if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+            // Queue set handling for ISR context
+            #[cfg(feature = "queue-sets")]
+            {
+                if !(*pxQueue).pxQueueSetContainer.is_null() {
+                    if prvNotifyQueueSetContainer(pxQueue) != pdFALSE {
                         if !pxHigherPriorityTaskWoken.is_null() {
                             *pxHigherPriorityTaskWoken = pdTRUE;
                         }
                     }
+                } else {
+                    // Not a member of a queue set - normal unblock logic
+                    if cTxLock == queueUNLOCKED {
+                        if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
+                            if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive)
+                                != pdFALSE
+                            {
+                                if !pxHigherPriorityTaskWoken.is_null() {
+                                    *pxHigherPriorityTaskWoken = pdTRUE;
+                                }
+                            }
+                        }
+                    } else {
+                        configASSERT(cTxLock != queueINT8_MAX);
+                        (*pxQueue).cTxLock = cTxLock + 1;
+                    }
                 }
-            } else {
-                // Queue is locked - increment tx lock count
-                configASSERT(cTxLock != queueINT8_MAX);
-                (*pxQueue).cTxLock = cTxLock + 1;
+            }
+
+            // Without queue sets, use simpler logic
+            #[cfg(not(feature = "queue-sets"))]
+            {
+                // If queue was locked, increment lock count instead of waking tasks
+                if cTxLock == queueUNLOCKED {
+                    // Queue not locked - can unblock waiting task
+                    if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
+                        if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+                            if !pxHigherPriorityTaskWoken.is_null() {
+                                *pxHigherPriorityTaskWoken = pdTRUE;
+                            }
+                        }
+                    }
+                } else {
+                    // Queue is locked - increment tx lock count
+                    configASSERT(cTxLock != queueINT8_MAX);
+                    (*pxQueue).cTxLock = cTxLock + 1;
+                }
             }
 
             xReturn = pdPASS;
@@ -1234,3 +1313,287 @@ unsafe fn xQueueTakeMutexRecursive(
 
     xReturn
 }
+
+// =============================================================================
+// Queue Sets (if enabled)
+// =============================================================================
+
+/// Notify a queue set container that a member has data.
+///
+/// This is called from within xQueueGenericSend and xQueueGenericSendFromISR
+/// when data is posted to a queue that is a member of a queue set. The queue
+/// set is notified by posting the handle of the queue to the queue set.
+///
+/// # Safety
+/// - Must be called from within a critical section
+/// - pxQueue must be a valid queue handle
+#[cfg(feature = "queue-sets")]
+unsafe fn prvNotifyQueueSetContainer(pxQueue: *const Queue_t) -> BaseType_t {
+    let pxQueueSetContainer = (*pxQueue).pxQueueSetContainer;
+    let mut xReturn: BaseType_t = pdFALSE;
+
+    // This function must be called from a critical section.
+    configASSERT(!pxQueueSetContainer.is_null());
+    configASSERT((*pxQueueSetContainer).uxMessagesWaiting < (*pxQueueSetContainer).uxLength);
+
+    if (*pxQueueSetContainer).uxMessagesWaiting < (*pxQueueSetContainer).uxLength {
+        let cTxLock = (*pxQueueSetContainer).cTxLock;
+
+        traceQUEUE_SET_SEND(pxQueueSetContainer as *mut c_void);
+
+        // The data copied is the handle of the queue that contains data.
+        // A queue set is a queue whose items are queue handles (pointers).
+        xReturn = prvCopyDataToQueue(
+            pxQueueSetContainer,
+            &pxQueue as *const *const Queue_t as *const c_void,
+            queueSEND_TO_BACK,
+        );
+
+        if cTxLock == queueUNLOCKED {
+            if listLIST_IS_EMPTY(&(*pxQueueSetContainer).xTasksWaitingToReceive) == pdFALSE {
+                if xTaskRemoveFromEventList(&(*pxQueueSetContainer).xTasksWaitingToReceive) != pdFALSE
+                {
+                    // The task waiting has a higher priority.
+                    xReturn = pdTRUE;
+                }
+            }
+        } else {
+            // Queue set is locked, increment tx lock count.
+            if cTxLock < queueINT8_MAX {
+                (*pxQueueSetContainer).cTxLock = cTxLock + 1;
+            }
+        }
+    }
+
+    xReturn
+}
+
+/// Create a queue set.
+///
+/// A queue set is a collection of queues and/or semaphores. A task can block
+/// on a queue set to wait for data to become available on any of the queues
+/// or semaphores in the set.
+///
+/// # Parameters
+/// - uxEventQueueLength: The maximum number of events that can be queued at once.
+///   This should be the sum of the lengths of all queues in the set plus the
+///   maximum count of all semaphores in the set.
+///
+/// # Returns
+/// - A handle to the queue set on success
+/// - null on failure
+///
+/// # Safety
+/// - Requires heap allocation (alloc feature)
+#[cfg(all(feature = "queue-sets", feature = "alloc"))]
+pub unsafe fn xQueueCreateSet(uxEventQueueLength: UBaseType_t) -> QueueSetHandle_t {
+    // A queue set is just a queue where each item is a pointer to a queue/semaphore.
+    // [AMENDMENT] In C, this uses sizeof(Queue_t *). In Rust, we use size_of::<*mut Queue_t>().
+    let pxQueue = xQueueGenericCreate(
+        uxEventQueueLength,
+        core::mem::size_of::<*mut Queue_t>() as UBaseType_t,
+        queueQUEUE_TYPE_SET,
+    );
+
+    pxQueue
+}
+
+/// Create a queue set using statically allocated memory.
+///
+/// # Parameters
+/// - uxEventQueueLength: The maximum number of events that can be queued at once.
+/// - pucQueueStorage: Pointer to storage for the queue data. Must be at least
+///   uxEventQueueLength * sizeof(pointer) bytes.
+/// - pxStaticQueue: Pointer to a StaticQueue_t structure for the queue state.
+///
+/// # Returns
+/// - A handle to the queue set on success
+/// - null on failure
+///
+/// # Safety
+/// - pucQueueStorage must point to valid memory of sufficient size
+/// - pxStaticQueue must point to valid memory for StaticQueue_t
+#[cfg(feature = "queue-sets")]
+pub unsafe fn xQueueCreateSetStatic(
+    uxEventQueueLength: UBaseType_t,
+    pucQueueStorage: *mut u8,
+    pxStaticQueue: *mut StaticQueue_t,
+) -> QueueSetHandle_t {
+    // [AMENDMENT] In C, this uses sizeof(Queue_t *). In Rust, we use size_of::<*mut Queue_t>().
+    let pxQueue = xQueueGenericCreateStatic(
+        uxEventQueueLength,
+        core::mem::size_of::<*mut Queue_t>() as UBaseType_t,
+        pucQueueStorage,
+        pxStaticQueue,
+        queueQUEUE_TYPE_SET,
+    );
+
+    pxQueue
+}
+
+/// Add a queue or semaphore to a queue set.
+///
+/// A queue or semaphore can only be a member of one queue set at a time.
+/// The queue/semaphore must be empty when added to a set.
+///
+/// # Parameters
+/// - xQueueOrSemaphore: Handle of the queue or semaphore to add
+/// - xQueueSet: Handle of the queue set to add it to
+///
+/// # Returns
+/// - pdPASS if successfully added
+/// - pdFAIL if already a member of a set or not empty
+///
+/// # Safety
+/// - Both handles must be valid
+#[cfg(feature = "queue-sets")]
+pub unsafe fn xQueueAddToSet(
+    xQueueOrSemaphore: QueueSetMemberHandle_t,
+    xQueueSet: QueueSetHandle_t,
+) -> BaseType_t {
+    let xReturn: BaseType_t;
+
+    taskENTER_CRITICAL();
+    {
+        if !(*xQueueOrSemaphore).pxQueueSetContainer.is_null() {
+            // Cannot add a queue/semaphore to more than one queue set.
+            xReturn = pdFAIL;
+        } else if (*xQueueOrSemaphore).uxMessagesWaiting != 0 {
+            // Cannot add a queue/semaphore to a queue set if there are already
+            // items in the queue/semaphore.
+            xReturn = pdFAIL;
+        } else {
+            (*xQueueOrSemaphore).pxQueueSetContainer = xQueueSet;
+            xReturn = pdPASS;
+        }
+    }
+    taskEXIT_CRITICAL();
+
+    xReturn
+}
+
+/// Remove a queue or semaphore from a queue set.
+///
+/// The queue/semaphore must be empty when removed from a set.
+///
+/// # Parameters
+/// - xQueueOrSemaphore: Handle of the queue or semaphore to remove
+/// - xQueueSet: Handle of the queue set it belongs to
+///
+/// # Returns
+/// - pdPASS if successfully removed
+/// - pdFAIL if not a member of the specified set or not empty
+///
+/// # Safety
+/// - Both handles must be valid
+#[cfg(feature = "queue-sets")]
+pub unsafe fn xQueueRemoveFromSet(
+    xQueueOrSemaphore: QueueSetMemberHandle_t,
+    xQueueSet: QueueSetHandle_t,
+) -> BaseType_t {
+    let xReturn: BaseType_t;
+
+    if (*xQueueOrSemaphore).pxQueueSetContainer != xQueueSet {
+        // The queue was not a member of the set.
+        xReturn = pdFAIL;
+    } else if (*xQueueOrSemaphore).uxMessagesWaiting != 0 {
+        // It is dangerous to remove a queue from a set when the queue is
+        // not empty because the queue set will still hold pending events.
+        xReturn = pdFAIL;
+    } else {
+        taskENTER_CRITICAL();
+        {
+            // The queue is no longer contained in the set.
+            (*xQueueOrSemaphore).pxQueueSetContainer = ptr::null_mut();
+        }
+        taskEXIT_CRITICAL();
+        xReturn = pdPASS;
+    }
+
+    xReturn
+}
+
+/// Select a queue or semaphore from a queue set that has data available.
+///
+/// Blocks until a member of the set has data available or the timeout expires.
+///
+/// # Parameters
+/// - xQueueSet: Handle of the queue set to select from
+/// - xTicksToWait: Maximum time to wait for data to become available
+///
+/// # Returns
+/// - Handle of a queue/semaphore with available data, or null if timeout
+///
+/// # Safety
+/// - xQueueSet must be a valid queue set handle
+#[cfg(feature = "queue-sets")]
+pub unsafe fn xQueueSelectFromSet(
+    xQueueSet: QueueSetHandle_t,
+    xTicksToWait: TickType_t,
+) -> QueueSetMemberHandle_t {
+    let mut xReturn: QueueSetMemberHandle_t = ptr::null_mut();
+
+    // A queue set is a queue containing pointers to other queues.
+    // Receiving from a queue set gives us the handle of a queue with data.
+    xQueueReceive(
+        xQueueSet,
+        &mut xReturn as *mut QueueSetMemberHandle_t as *mut c_void,
+        xTicksToWait,
+    );
+
+    xReturn
+}
+
+/// Select a queue or semaphore from a queue set from ISR context.
+///
+/// Non-blocking version for use in interrupt service routines.
+///
+/// # Parameters
+/// - xQueueSet: Handle of the queue set to select from
+///
+/// # Returns
+/// - Handle of a queue/semaphore with available data, or null if none available
+///
+/// # Safety
+/// - xQueueSet must be a valid queue set handle
+/// - Must be called from an ISR or with interrupts disabled
+#[cfg(feature = "queue-sets")]
+pub unsafe fn xQueueSelectFromSetFromISR(xQueueSet: QueueSetHandle_t) -> QueueSetMemberHandle_t {
+    let mut xReturn: QueueSetMemberHandle_t = ptr::null_mut();
+    let pxQueue = xQueueSet as *mut Queue_t;
+
+    // ISR-safe receive: try to get an item from the queue set without blocking
+    let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+    {
+        if (*pxQueue).uxMessagesWaiting > 0 {
+            // There's data available - copy it out
+            let pcReadFrom = (*pxQueue).u.xQueue.pcReadFrom;
+            let pcNextReadFrom = pcReadFrom.add((*pxQueue).uxItemSize as usize);
+
+            // Wrap if needed
+            let pcActualRead = if pcNextReadFrom >= (*pxQueue).u.xQueue.pcTail {
+                (*pxQueue).pcHead
+            } else {
+                pcNextReadFrom
+            };
+            (*pxQueue).u.xQueue.pcReadFrom = pcActualRead;
+
+            // Copy the queue handle
+            ptr::copy_nonoverlapping(
+                pcActualRead as *const QueueSetMemberHandle_t,
+                &mut xReturn,
+                1,
+            );
+
+            (*pxQueue).uxMessagesWaiting -= 1;
+        }
+    }
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+
+    xReturn
+}
+
+/// Trace hook for queue set send (no-op by default)
+#[cfg(feature = "queue-sets")]
+#[inline(always)]
+fn traceQUEUE_SET_SEND(_pxQueue: *mut c_void) {}

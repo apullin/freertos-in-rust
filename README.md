@@ -68,12 +68,14 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | SMP / Multi-core | ➖ | Will not implement (out of scope) |
 | MPU Support | ➖ | Will not implement (out of scope) |
 | Co-routines | ➖ | Will not implement (deprecated in FreeRTOS) |
-| Tickless Idle | ✅ | Requires `tickless-idle` feature |
+| Tickless Idle | ✅ <sup>[2]</sup> | Requires `tickless-idle` feature |
 | Run-time Stats | ✅ | Requires `generate-run-time-stats` feature |
 
 **Legend:** ✅ Supported | ❌ Not yet done | ⚠️ Partial | ➖ Will not implement
 
 <sup>[1]</sup> *Cortex-M7 reuses the CM4F port, per FreeRTOS's recommendation. Early CM7 silicon (r0p0/r0p1) requires ARM Errata 837070 workaround, which is not currently implemented. Most modern CM7 chips do not need this workaround.*
+
+<sup>[2]</sup> *Tickless idle support is per-port. It has been tested and appears to work correctly in QEMU for all ports included in this repository.*
 
 ## Running the Demos on QEMU
 

@@ -285,6 +285,15 @@ pub extern "C" fn main() -> ! {
     println("[Init] Initializing timer...");
     timer_init();
 
+    // Configure tickless idle with timer parameters
+    // Timer runs at 1MHz, 1000 counts per tick (1ms), 32-bit counter
+    println("[Init] Configuring tickless idle...");
+    freertos_in_rust::port::vPortConfigureTimerForTickless(
+        TIMER0_BASE,
+        1000,        // counts per tick (1MHz / 1000Hz)
+        0xFFFFFFFF,  // 32-bit counter max
+    );
+
     // Create synchronization primitives
     create_sync_primitives();
 

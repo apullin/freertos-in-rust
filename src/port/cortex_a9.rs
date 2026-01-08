@@ -664,12 +664,171 @@ pub fn portINCREMENT_RUN_TIME_COUNTER() {
 }
 
 // =============================================================================
-// Tickless Idle (Stub)
+// Tickless Idle
 // =============================================================================
 
-/// Tickless idle is platform-specific for Cortex-A
+/// SP804 Timer register offsets (for tickless idle)
+const SP804_TIMER_LOAD: usize = 0x00;
+const SP804_TIMER_VALUE: usize = 0x04;
+const SP804_TIMER_CONTROL: usize = 0x08;
+const SP804_TIMER_INTCLR: usize = 0x0C;
+
+/// SP804 Timer control bits
+const SP804_CTRL_ENABLE: u32 = 1 << 7;
+const SP804_CTRL_PERIODIC: u32 = 1 << 6;
+const SP804_CTRL_INTENABLE: u32 = 1 << 5;
+const SP804_CTRL_32BIT: u32 = 1 << 1;
+
+/// Timer base address for tickless idle - must be set by user before scheduler starts
+/// For vexpress-a9: 0x10011000
+#[no_mangle]
+pub static mut ulTimerBaseAddress: usize = 0;
+
+/// Timer counts per tick (set based on timer frequency and tick rate)
+/// For vexpress-a9 at 1MHz with 1000Hz tick rate: 1000
+#[no_mangle]
+pub static mut ulTimerCountsForOneTick: u32 = 1000;
+
+/// Maximum ticks that can be suppressed (limited by timer counter width)
+#[no_mangle]
+pub static mut ulMaximumPossibleSuppressedTicks: TickType_t = 0xFFFFFFFF / 1000;
+
+/// Compensation for time spent entering/exiting sleep
+#[no_mangle]
+pub static mut ulStoppedTimerCompensation: u32 = 45;
+
+/// Configure timer for tickless idle
+/// Call this before starting the scheduler with the timer base address and counts per tick
+#[no_mangle]
+pub extern "C" fn vPortConfigureTimerForTickless(
+    timer_base: usize,
+    counts_per_tick: u32,
+    timer_max_count: u32,
+) {
+    unsafe {
+        ulTimerBaseAddress = timer_base;
+        ulTimerCountsForOneTick = counts_per_tick;
+        ulMaximumPossibleSuppressedTicks = (timer_max_count / counts_per_tick) as TickType_t;
+    }
+}
+
+/// Tickless idle implementation for Cortex-A9 with SP804 timer
+#[cfg(feature = "tickless-idle")]
+pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
+    use crate::types::eSleepModeStatus;
+
+    unsafe {
+        // Check if timer is configured
+        if ulTimerBaseAddress == 0 {
+            return;
+        }
+
+        let timer_load = (ulTimerBaseAddress + SP804_TIMER_LOAD) as *mut u32;
+        let timer_value = (ulTimerBaseAddress + SP804_TIMER_VALUE) as *const u32;
+        let timer_control = (ulTimerBaseAddress + SP804_TIMER_CONTROL) as *mut u32;
+        let timer_intclr = (ulTimerBaseAddress + SP804_TIMER_INTCLR) as *mut u32;
+
+        let mut xExpectedIdleTime = xExpectedIdleTime;
+
+        // Limit to maximum possible
+        if xExpectedIdleTime > ulMaximumPossibleSuppressedTicks {
+            xExpectedIdleTime = ulMaximumPossibleSuppressedTicks;
+        }
+
+        // Disable interrupts (but not via GIC - use CPU flag)
+        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("dsb", options(nomem, nostack));
+        core::arch::asm!("isb", options(nomem, nostack));
+
+        // Check if sleep should be aborted
+        if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
+            core::arch::asm!("cpsie i", options(nomem, nostack));
+            return;
+        }
+
+        // Stop the timer
+        let ctrl = core::ptr::read_volatile(timer_control);
+        core::ptr::write_volatile(timer_control, ctrl & !SP804_CTRL_ENABLE);
+
+        // Read current timer value (counts remaining until next tick)
+        let mut ulTimerDecrementsLeft = core::ptr::read_volatile(timer_value);
+        if ulTimerDecrementsLeft == 0 {
+            ulTimerDecrementsLeft = ulTimerCountsForOneTick;
+        }
+
+        // Calculate reload value for expected idle time
+        // -1 because we're partway through the current tick
+        let mut ulReloadValue = ulTimerDecrementsLeft
+            + (ulTimerCountsForOneTick * (xExpectedIdleTime as u32 - 1));
+
+        // Apply compensation for time spent in this function
+        if ulReloadValue > ulStoppedTimerCompensation {
+            ulReloadValue -= ulStoppedTimerCompensation;
+        }
+
+        // Load new value and restart timer
+        core::ptr::write_volatile(timer_load, ulReloadValue);
+        core::ptr::write_volatile(timer_intclr, 1); // Clear any pending interrupt
+        core::ptr::write_volatile(
+            timer_control,
+            SP804_CTRL_ENABLE | SP804_CTRL_PERIODIC | SP804_CTRL_INTENABLE | SP804_CTRL_32BIT,
+        );
+
+        // Sleep until interrupt (WFI = Wait For Interrupt)
+        core::arch::asm!("dsb", options(nomem, nostack));
+        core::arch::asm!("wfi", options(nomem, nostack));
+        core::arch::asm!("isb", options(nomem, nostack));
+
+        // Re-enable interrupts briefly to let the wake interrupt execute
+        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("dsb", options(nomem, nostack));
+        core::arch::asm!("isb", options(nomem, nostack));
+
+        // Disable interrupts again for tick compensation
+        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("dsb", options(nomem, nostack));
+        core::arch::asm!("isb", options(nomem, nostack));
+
+        // Stop timer to read how much time elapsed
+        let ctrl = core::ptr::read_volatile(timer_control);
+        core::ptr::write_volatile(timer_control, ctrl & !SP804_CTRL_ENABLE);
+
+        // Calculate how many complete ticks elapsed
+        let ulTimerValueNow = core::ptr::read_volatile(timer_value);
+        let ulElapsedCounts = if ulReloadValue > ulTimerValueNow {
+            ulReloadValue - ulTimerValueNow
+        } else {
+            ulReloadValue // Timer wrapped or expired
+        };
+
+        let ulCompletedTicks = ulElapsedCounts / ulTimerCountsForOneTick;
+
+        // Step the tick count forward
+        if ulCompletedTicks > 0 {
+            crate::kernel::tasks::vTaskStepTick(ulCompletedTicks as TickType_t);
+        }
+
+        // Calculate remaining counts until next tick
+        let ulRemainingCounts = ulTimerCountsForOneTick
+            - (ulElapsedCounts % ulTimerCountsForOneTick);
+
+        // Reload timer for normal operation
+        core::ptr::write_volatile(timer_load, ulRemainingCounts);
+        core::ptr::write_volatile(timer_intclr, 1);
+        core::ptr::write_volatile(
+            timer_control,
+            SP804_CTRL_ENABLE | SP804_CTRL_PERIODIC | SP804_CTRL_INTENABLE | SP804_CTRL_32BIT,
+        );
+
+        // Re-enable interrupts
+        core::arch::asm!("cpsie i", options(nomem, nostack));
+    }
+}
+
+/// Stub for when tickless idle is not enabled
+#[cfg(not(feature = "tickless-idle"))]
 pub fn vPortSuppressTicksAndSleep(_xExpectedIdleTime: TickType_t) {
-    // Platform-specific implementation required
+    // No-op when tickless idle is disabled
 }
 
 // =============================================================================

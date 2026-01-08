@@ -31,6 +31,7 @@ freertos-in-rust = { path = "../..", features = [
     "stats-formatting",
     "stream-buffers",
     "generate-run-time-stats",
+    "tickless-idle",
 ] }
 
 [build-dependencies]

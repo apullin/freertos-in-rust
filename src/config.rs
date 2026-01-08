@@ -248,6 +248,11 @@ pub const configUSE_TASK_PREEMPTION_DISABLE: BaseType_t = 0;
 /// Enable tickless idle mode
 pub const configUSE_TICKLESS_IDLE: BaseType_t = 0;
 
+/// Minimum expected idle time before entering tickless sleep (in ticks).
+/// The idle task will only attempt to enter a low-power state if the
+/// expected idle time is at least this many ticks.
+pub const configEXPECTED_IDLE_TIME_BEFORE_SLEEP: super::types::TickType_t = 2;
+
 /// Initial tick count value
 pub const configINITIAL_TICK_COUNT: super::types::TickType_t = 0;
 

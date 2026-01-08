@@ -432,6 +432,9 @@ pub fn traceLOW_POWER_IDLE_BEGIN() {}
 #[inline(always)]
 pub fn traceLOW_POWER_IDLE_END() {}
 
+#[inline(always)]
+pub fn traceINCREASE_TICK_COUNT(_xTicksToJump: TickType_t) {}
+
 // =============================================================================
 // Memory allocation tracing
 // =============================================================================

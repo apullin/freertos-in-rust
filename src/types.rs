@@ -210,6 +210,30 @@ pub type StreamBufferHandle_t = *mut core::ffi::c_void;
 pub type MessageBufferHandle_t = StreamBufferHandle_t;
 
 // =============================================================================
+// Sleep Mode Status (for tickless idle)
+// =============================================================================
+
+/// Return type for eTaskConfirmSleepModeStatus
+///
+/// Used by the port layer to determine whether to enter a sleep mode.
+#[cfg(feature = "tickless-idle")]
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum eSleepModeStatus {
+    /// A task has been made ready or a context switch pended since
+    /// portSUPPRESS_TICKS_AND_SLEEP() was called - abort entering a sleep mode.
+    eAbortSleep = 0,
+
+    /// Enter a sleep mode that will not last any longer than the expected idle time.
+    eStandardSleep = 1,
+
+    /// No tasks are waiting for a timeout so it is safe to enter a sleep mode
+    /// that can only be exited by an external interrupt.
+    #[cfg(feature = "task-suspend")]
+    eNoTasksWaitingTimeout = 2,
+}
+
+// =============================================================================
 // Null handle constant
 // =============================================================================
 

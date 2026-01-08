@@ -267,3 +267,15 @@ pub fn portINCREMENT_RUN_TIME_COUNTER() {
         ulRunTimeCounterValue = ulRunTimeCounterValue.wrapping_add(1);
     }
 }
+
+// =============================================================================
+// Tickless Idle Support
+// =============================================================================
+
+/// Suppress ticks and enter a low-power sleep mode (dummy implementation).
+///
+/// The dummy port does not support actual low-power sleep.
+/// This is a no-op stub for compilation purposes.
+pub fn vPortSuppressTicksAndSleep(_xExpectedIdleTime: crate::types::TickType_t) {
+    // Dummy port - no actual sleep
+}

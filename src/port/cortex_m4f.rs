@@ -434,6 +434,10 @@ pub fn vPortSetupTimerInterrupt() {
         // Clear current value
         core::ptr::write_volatile(SYST_CVR, 0);
 
+        // Initialize tickless idle variables
+        #[cfg(feature = "tickless-idle")]
+        prvSetupTicklessIdle();
+
         // Enable SysTick with processor clock and interrupt
         core::ptr::write_volatile(
             SYST_CSR,
@@ -558,6 +562,219 @@ pub fn portINCREMENT_RUN_TIME_COUNTER() {
     unsafe {
         ulRunTimeCounterValue = ulRunTimeCounterValue.wrapping_add(1);
     }
+}
+
+// =============================================================================
+// Tickless Idle Support
+// =============================================================================
+
+/// Number of timer counts that make up one tick period.
+#[cfg(feature = "tickless-idle")]
+static mut ulTimerCountsForOneTick: u32 = 0;
+
+/// Maximum number of tick periods that can be suppressed.
+/// Limited by the 24-bit SysTick timer resolution.
+#[cfg(feature = "tickless-idle")]
+static mut xMaximumPossibleSuppressedTicks: TickType_t = 0;
+
+/// Compensation value for the time the SysTick is stopped.
+#[cfg(feature = "tickless-idle")]
+static mut ulStoppedTimerCompensation: u32 = 0;
+
+/// SysTick COUNT flag bit (indicates timer counted to zero)
+#[cfg(feature = "tickless-idle")]
+const portNVIC_SYSTICK_COUNT_FLAG_BIT: u32 = 1 << 16;
+
+/// Bit in ICSR to clear pending SysTick interrupt
+#[cfg(feature = "tickless-idle")]
+const portNVIC_PEND_SYSTICK_CLEAR_BIT: u32 = 1 << 25;
+
+/// Initialize tickless idle variables.
+/// Called from vPortSetupTimerInterrupt().
+#[cfg(feature = "tickless-idle")]
+fn prvSetupTicklessIdle() {
+    unsafe {
+        // Calculate the number of timer counts for one tick
+        ulTimerCountsForOneTick = configCPU_CLOCK_HZ / configTICK_RATE_HZ as u32;
+
+        // Maximum suppressed ticks limited by 24-bit SysTick counter
+        xMaximumPossibleSuppressedTicks = (0x00FF_FFFF / ulTimerCountsForOneTick) as TickType_t;
+
+        // Compensation for the time taken to stop and restart SysTick.
+        // This is a tuning value that may need adjustment for specific hardware.
+        ulStoppedTimerCompensation = 45;
+    }
+}
+
+/// Suppress ticks and enter a low-power sleep mode.
+///
+/// This function is called from the idle task when the expected idle time
+/// is long enough to justify entering a low-power mode.
+///
+/// # Arguments
+/// * `xExpectedIdleTime` - The expected time (in ticks) until the next task needs to run
+#[cfg(feature = "tickless-idle")]
+pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
+    use crate::types::eSleepModeStatus;
+
+    unsafe {
+        let mut xExpectedIdleTime = xExpectedIdleTime;
+
+        // Make sure the SysTick reload value does not overflow the counter.
+        if xExpectedIdleTime > xMaximumPossibleSuppressedTicks {
+            xExpectedIdleTime = xMaximumPossibleSuppressedTicks;
+        }
+
+        // Enter a critical section but don't use the taskENTER_CRITICAL()
+        // method as that will mask interrupts that should exit sleep mode.
+        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("dsb", options(nomem, nostack));
+        core::arch::asm!("isb", options(nomem, nostack));
+
+        // If a context switch is pending or a task is waiting for the scheduler
+        // to be unsuspended then abandon the low power entry.
+        if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
+            // Re-enable interrupts
+            core::arch::asm!("cpsie i", options(nomem, nostack));
+        } else {
+            // Stop the SysTick momentarily. The time the SysTick is stopped for
+            // is accounted for as best it can be.
+            let systick_ctrl = core::ptr::read_volatile(SYST_CSR);
+            core::ptr::write_volatile(SYST_CSR, systick_ctrl & !SYST_CSR_ENABLE);
+
+            // Use the SysTick current-value register to determine the number of
+            // SysTick decrements remaining until the next tick interrupt.
+            let mut ulSysTickDecrementsLeft = core::ptr::read_volatile(SYST_CVR);
+
+            if ulSysTickDecrementsLeft == 0 {
+                ulSysTickDecrementsLeft = ulTimerCountsForOneTick;
+            }
+
+            // Calculate the reload value required to wait xExpectedIdleTime
+            // tick periods. -1 is used because this code normally executes part
+            // way through the first tick period.
+            let mut ulReloadValue = ulSysTickDecrementsLeft
+                + (ulTimerCountsForOneTick * (xExpectedIdleTime as u32 - 1));
+
+            // Check if a SysTick interrupt is pending
+            if (core::ptr::read_volatile(NVIC_ICSR) & (1 << 26)) != 0 {
+                // Clear the pending SysTick interrupt
+                core::ptr::write_volatile(NVIC_ICSR, portNVIC_PEND_SYSTICK_CLEAR_BIT);
+                ulReloadValue -= ulTimerCountsForOneTick;
+            }
+
+            if ulReloadValue > ulStoppedTimerCompensation {
+                ulReloadValue -= ulStoppedTimerCompensation;
+            }
+
+            // Set the new reload value
+            core::ptr::write_volatile(SYST_RVR, ulReloadValue);
+
+            // Clear the SysTick count flag and set the count value back to zero
+            core::ptr::write_volatile(SYST_CVR, 0);
+
+            // Restart SysTick
+            core::ptr::write_volatile(
+                SYST_CSR,
+                SYST_CSR_ENABLE | SYST_CSR_TICKINT | SYST_CSR_CLKSOURCE,
+            );
+
+            // Sleep until something happens (WFI = Wait For Interrupt)
+            core::arch::asm!("dsb", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("isb", options(nomem, nostack));
+
+            // Re-enable interrupts to allow the interrupt that brought the MCU
+            // out of sleep mode to execute immediately.
+            core::arch::asm!("cpsie i", options(nomem, nostack));
+            core::arch::asm!("dsb", options(nomem, nostack));
+            core::arch::asm!("isb", options(nomem, nostack));
+
+            // Disable interrupts again because the clock is about to be stopped
+            // and interrupts that execute while the clock is stopped will increase
+            // any slippage between the time maintained by the RTOS and calendar time.
+            core::arch::asm!("cpsid i", options(nomem, nostack));
+            core::arch::asm!("dsb", options(nomem, nostack));
+            core::arch::asm!("isb", options(nomem, nostack));
+
+            // Disable the SysTick clock without reading the CTRL register
+            // to ensure the COUNT flag is not cleared if it is set.
+            core::ptr::write_volatile(SYST_CSR, SYST_CSR_TICKINT | SYST_CSR_CLKSOURCE);
+
+            // Determine whether the SysTick has already counted to zero.
+            let ulCompleteTickPeriods: u32;
+            let systick_ctrl = core::ptr::read_volatile(SYST_CSR);
+
+            if (systick_ctrl & portNVIC_SYSTICK_COUNT_FLAG_BIT) != 0 {
+                // The tick interrupt ended the sleep (or is now pending).
+                // A new tick period has started.
+                let ulCalculatedLoadValue: u32;
+                let current_value = core::ptr::read_volatile(SYST_CVR);
+
+                let calc = (ulTimerCountsForOneTick - 1)
+                    .wrapping_sub(ulReloadValue.wrapping_sub(current_value));
+
+                // Don't allow a tiny value or values that have underflowed.
+                if calc <= ulStoppedTimerCompensation || calc > ulTimerCountsForOneTick {
+                    ulCalculatedLoadValue = ulTimerCountsForOneTick - 1;
+                } else {
+                    ulCalculatedLoadValue = calc;
+                }
+
+                core::ptr::write_volatile(SYST_RVR, ulCalculatedLoadValue);
+
+                // As the pending tick will be processed as soon as this
+                // function exits, the tick value maintained by the tick is stepped
+                // forward by one less than the time spent waiting.
+                ulCompleteTickPeriods = xExpectedIdleTime as u32 - 1;
+            } else {
+                // Something other than the tick interrupt ended the sleep.
+
+                // Use the SysTick current-value register to determine the
+                // number of SysTick decrements remaining.
+                let mut ulSysTickDecrementsLeft = core::ptr::read_volatile(SYST_CVR);
+
+                if ulSysTickDecrementsLeft == 0 {
+                    ulSysTickDecrementsLeft = ulReloadValue;
+                }
+
+                // Work out how long the sleep lasted rounded to complete tick periods.
+                let ulCompletedSysTickDecrements =
+                    (xExpectedIdleTime as u32 * ulTimerCountsForOneTick) - ulSysTickDecrementsLeft;
+
+                // How many complete tick periods passed while the processor was waiting?
+                ulCompleteTickPeriods = ulCompletedSysTickDecrements / ulTimerCountsForOneTick;
+
+                // The reload value is set to whatever fraction of a single tick
+                // period remains.
+                let reload = ((ulCompleteTickPeriods + 1) * ulTimerCountsForOneTick)
+                    - ulCompletedSysTickDecrements;
+                core::ptr::write_volatile(SYST_RVR, reload);
+            }
+
+            // Restart SysTick so it runs from the reload register again
+            core::ptr::write_volatile(SYST_CVR, 0);
+            core::ptr::write_volatile(
+                SYST_CSR,
+                SYST_CSR_ENABLE | SYST_CSR_TICKINT | SYST_CSR_CLKSOURCE,
+            );
+
+            // Reset the reload value to the standard tick period
+            core::ptr::write_volatile(SYST_RVR, ulTimerCountsForOneTick - 1);
+
+            // Step the tick to account for any tick periods that elapsed.
+            crate::kernel::tasks::vTaskStepTick(ulCompleteTickPeriods as TickType_t);
+
+            // Exit with interrupts enabled.
+            core::arch::asm!("cpsie i", options(nomem, nostack));
+        }
+    }
+}
+
+/// Stub for when tickless idle is not enabled
+#[cfg(not(feature = "tickless-idle"))]
+pub fn vPortSuppressTicksAndSleep(_xExpectedIdleTime: TickType_t) {
+    // No-op when tickless idle is disabled
 }
 
 // =============================================================================

@@ -787,8 +787,32 @@ extern "C" fn prvIdleTask(_pvParameters: *mut c_void) {
         }
 
         // Tickless idle (if enabled).
-        if configUSE_TICKLESS_IDLE != 0 {
-            // TODO: Enter tickless mode
+        // This uses the feature flag rather than the config constant for
+        // conditional compilation.
+        #[cfg(feature = "tickless-idle")]
+        {
+            let xExpectedIdleTime = prvGetExpectedIdleTime();
+
+            // Only attempt to enter a low-power state if the expected idle
+            // time is above the minimum threshold.
+            if xExpectedIdleTime >= configEXPECTED_IDLE_TIME_BEFORE_SLEEP {
+                vTaskSuspendAll();
+                {
+                    // Now the scheduler is suspended, the expected idle time
+                    // can be sampled again, and this time its value can be used.
+                    unsafe {
+                        configASSERT(xNextTaskUnblockTime >= xTickCount);
+                    }
+                    let xExpectedIdleTime = prvGetExpectedIdleTime();
+
+                    if xExpectedIdleTime >= configEXPECTED_IDLE_TIME_BEFORE_SLEEP {
+                        crate::trace::traceLOW_POWER_IDLE_BEGIN();
+                        crate::port::vPortSuppressTicksAndSleep(xExpectedIdleTime);
+                        crate::trace::traceLOW_POWER_IDLE_END();
+                    }
+                }
+                xTaskResumeAll();
+            }
         }
 
         // Yield to allow other tasks at same priority to run.
@@ -3645,5 +3669,154 @@ pub unsafe fn vTaskGetRunTimeStatistics(pcWriteBuffer: *mut u8, uxBufferLength: 
                 );
             }
         }
+    }
+}
+
+// =============================================================================
+// Tickless Idle Functions (configUSE_TICKLESS_IDLE)
+// =============================================================================
+
+/// Calculate the expected idle time.
+///
+/// Returns the number of ticks until the next task needs to wake up.
+/// This is used to determine if it's worth entering a low-power sleep mode.
+///
+/// This function should only be called from the idle task.
+#[cfg(feature = "tickless-idle")]
+fn prvGetExpectedIdleTime() -> TickType_t {
+    unsafe {
+        let mut xReturn: TickType_t;
+        let mut xHigherPriorityReadyTasks = pdFALSE;
+
+        // xHigherPriorityReadyTasks takes care of the case where
+        // configUSE_PREEMPTION is 0, so there may be tasks above the idle priority
+        // task that are in the Ready state, even though the idle task is running.
+
+        #[cfg(not(feature = "port-optimised-task-selection"))]
+        {
+            if uxTopReadyPriority > tskIDLE_PRIORITY {
+                xHigherPriorityReadyTasks = pdTRUE;
+            }
+        }
+
+        #[cfg(feature = "port-optimised-task-selection")]
+        {
+            // When port optimised task selection is used, uxTopReadyPriority
+            // is a bit map. If bits other than the least significant bit are set,
+            // there are tasks above idle priority ready.
+            const UX_LEAST_SIGNIFICANT_BIT: UBaseType_t = 0x01;
+            if uxTopReadyPriority > UX_LEAST_SIGNIFICANT_BIT {
+                xHigherPriorityReadyTasks = pdTRUE;
+            }
+        }
+
+        if !pxCurrentTCB.is_null() && (*pxCurrentTCB).uxPriority > tskIDLE_PRIORITY {
+            // Current task is above idle priority - cannot sleep
+            xReturn = 0;
+        } else if listCURRENT_LIST_LENGTH(&pxReadyTasksLists[tskIDLE_PRIORITY as usize]) > 1 {
+            // There are other idle priority tasks in the ready state.
+            // If time slicing is used, the next tick interrupt must be processed.
+            xReturn = 0;
+        } else if xHigherPriorityReadyTasks != pdFALSE {
+            // There are tasks in the Ready state that have a priority above the
+            // idle priority. This path can only be reached if configUSE_PREEMPTION is 0.
+            xReturn = 0;
+        } else {
+            xReturn = xNextTaskUnblockTime;
+            xReturn = xReturn.wrapping_sub(xTickCount);
+        }
+
+        xReturn
+    }
+}
+
+/// Confirm that it is still safe to enter a sleep mode.
+///
+/// This function is called from the port layer after disabling interrupts
+/// but before entering the sleep mode. It checks for conditions that would
+/// require aborting the sleep.
+///
+/// Must be called from a critical section.
+#[cfg(feature = "tickless-idle")]
+pub fn eTaskConfirmSleepModeStatus() -> crate::types::eSleepModeStatus {
+    use crate::types::eSleepModeStatus;
+
+    unsafe {
+        // Check if a task was made ready while the scheduler was suspended.
+        if listCURRENT_LIST_LENGTH(&xPendingReadyList) != 0 {
+            return eSleepModeStatus::eAbortSleep;
+        }
+
+        // Check if a yield was pended while the scheduler was suspended.
+        if xYieldPendings[0] != pdFALSE {
+            return eSleepModeStatus::eAbortSleep;
+        }
+
+        // Check if a tick interrupt has already occurred but was held pending
+        // because the scheduler is suspended.
+        if xPendedTicks != 0 {
+            return eSleepModeStatus::eAbortSleep;
+        }
+
+        // Check if all tasks are suspended (can enter deep sleep)
+        #[cfg(feature = "task-suspend")]
+        {
+            // The idle task exists in addition to the application tasks.
+            let uxNonApplicationTasks: UBaseType_t = configNUMBER_OF_CORES as UBaseType_t;
+
+            if listCURRENT_LIST_LENGTH(&xSuspendedTaskList)
+                == (uxCurrentNumberOfTasks - uxNonApplicationTasks)
+            {
+                // All tasks are in the suspended list (which might mean they
+                // have an infinite block time rather than actually being suspended).
+                // It is safe to enter a sleep mode that can only be exited by
+                // an external interrupt.
+                return eSleepModeStatus::eNoTasksWaitingTimeout;
+            }
+        }
+
+        // Standard sleep - enter a sleep that will end at the next tick
+        eSleepModeStatus::eStandardSleep
+    }
+}
+
+/// Step the tick count forward after sleeping.
+///
+/// Called from the port layer after waking from tickless sleep to advance
+/// the tick count by the number of ticks that elapsed during sleep.
+///
+/// # Arguments
+/// * `xTicksToJump` - Number of ticks to advance the tick count by
+#[cfg(feature = "tickless-idle")]
+pub fn vTaskStepTick(xTicksToJump: TickType_t) {
+    unsafe {
+        let mut xTicksToJump = xTicksToJump;
+
+        // Correct the tick count value after a period during which the tick
+        // was suppressed. Note this does *not* call the tick hook function for
+        // each stepped tick.
+        let xUpdatedTickCount = xTickCount.wrapping_add(xTicksToJump);
+
+        configASSERT(xUpdatedTickCount <= xNextTaskUnblockTime);
+
+        if xUpdatedTickCount == xNextTaskUnblockTime {
+            // Arrange for xTickCount to reach xNextTaskUnblockTime in
+            // xTaskIncrementTick() when the scheduler resumes. This ensures
+            // that any delayed tasks are resumed at the correct time.
+            configASSERT(uxSchedulerSuspended != 0);
+            configASSERT(xTicksToJump != 0);
+
+            // Prevent the tick interrupt modifying xPendedTicks simultaneously.
+            taskENTER_CRITICAL();
+            {
+                xPendedTicks += 1;
+            }
+            taskEXIT_CRITICAL();
+            xTicksToJump -= 1;
+        }
+
+        xTickCount = xTickCount.wrapping_add(xTicksToJump);
+
+        crate::trace::traceINCREASE_TICK_COUNT(xTicksToJump);
     }
 }

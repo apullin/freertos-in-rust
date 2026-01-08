@@ -64,7 +64,7 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | SMP / Multi-core | ➖ | Will not implement (out of scope) |
 | MPU Support | ➖ | Will not implement (out of scope) |
 | Co-routines | ➖ | Will not implement (deprecated in FreeRTOS) |
-| Tickless Idle | ❌ | Not yet implemented |
+| Tickless Idle | ✅ | Requires `tickless-idle` feature |
 | Run-time Stats | ✅ | Requires `generate-run-time-stats` feature |
 
 **Legend:** ✅ Supported | ❌ Not yet done | ⚠️ Partial | ➖ Will not implement

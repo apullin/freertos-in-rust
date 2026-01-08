@@ -35,6 +35,7 @@ freertos-in-rust = { path = "../..", features = [
     "stats-formatting",
     "stream-buffers",
     "generate-run-time-stats",
+    "tickless-idle",
 ] }
 
 # External allocator (optional, for use-embedded-alloc feature)

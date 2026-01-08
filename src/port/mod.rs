@@ -22,24 +22,68 @@
 //! ## Available Ports
 //!
 //! - `port-dummy` - Dummy port for compilation testing (panics at runtime)
-//!
-//! ## Future Ports (TODO)
-//!
-//! - `port-cortex-m4f` - ARM Cortex-M4F with FPU
+//! - `port-cortex-m0` - ARM Cortex-M0/M0+ (ARMv6-M, no FPU, PRIMASK)
+//! - `port-cortex-m3` - ARM Cortex-M3 (ARMv7-M, no FPU, BASEPRI)
+//! - `port-cortex-m4f` - ARM Cortex-M4F with FPU (ARMv7E-M, BASEPRI)
+//! - `port-cortex-m7` - ARM Cortex-M7 (same as CM4F per FreeRTOS docs)
 
-// Only use dummy if port-dummy is enabled AND port-cortex-m4f is NOT enabled
-// This makes the ports mutually exclusive
-#[cfg(all(feature = "port-dummy", not(feature = "port-cortex-m4f")))]
-mod dummy;
+// Port selection - only one can be active at a time
+// Priority: CM0 > CM3 > CM4F > CM7 > dummy
 
-#[cfg(all(feature = "port-dummy", not(feature = "port-cortex-m4f")))]
-pub use dummy::*;
+#[cfg(feature = "port-cortex-m0")]
+mod cortex_m0;
+#[cfg(feature = "port-cortex-m0")]
+pub use cortex_m0::*;
 
-#[cfg(feature = "port-cortex-m4f")]
+#[cfg(all(feature = "port-cortex-m3", not(feature = "port-cortex-m0")))]
+mod cortex_m3;
+#[cfg(all(feature = "port-cortex-m3", not(feature = "port-cortex-m0")))]
+pub use cortex_m3::*;
+
+#[cfg(all(
+    feature = "port-cortex-m4f",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3")
+))]
 mod cortex_m4f;
-
-#[cfg(feature = "port-cortex-m4f")]
+#[cfg(all(
+    feature = "port-cortex-m4f",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3")
+))]
 pub use cortex_m4f::*;
+
+#[cfg(all(
+    feature = "port-cortex-m7",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3"),
+    not(feature = "port-cortex-m4f")
+))]
+mod cortex_m7;
+#[cfg(all(
+    feature = "port-cortex-m7",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3"),
+    not(feature = "port-cortex-m4f")
+))]
+pub use cortex_m7::*;
+
+#[cfg(all(
+    feature = "port-dummy",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3"),
+    not(feature = "port-cortex-m4f"),
+    not(feature = "port-cortex-m7")
+))]
+mod dummy;
+#[cfg(all(
+    feature = "port-dummy",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3"),
+    not(feature = "port-cortex-m4f"),
+    not(feature = "port-cortex-m7")
+))]
+pub use dummy::*;
 
 // =============================================================================
 // Port-independent constants (from portable.h)

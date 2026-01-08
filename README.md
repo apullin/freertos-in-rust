@@ -56,8 +56,10 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | Static Allocation | ✅ | |
 | heap_1 through heap_5 | ➖ | N/A - uses Rust allocator instead |
 | **Ports** | | |
-| Cortex-M4F | ✅ | Tested on QEMU |
-| Cortex-M0/M3/M7 | ❌ | Not yet implemented |
+| Cortex-M4F | ✅ | Tested on QEMU (lm3s6965evb) |
+| Cortex-M7 | ✅ <sup>[1]</sup> | Tested on QEMU |
+| Cortex-M3 | ✅ | Tested on QEMU (lm3s6965evb) |
+| Cortex-M0/M0+ | ✅ | Tested on QEMU (microbit) |
 | RISC-V | ❌ | Not yet implemented |
 | x86/x64 (Linux/Windows) | ❌ | Not yet implemented |
 | **Advanced Features** | | |
@@ -69,15 +71,19 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 
 **Legend:** ✅ Supported | ❌ Not yet done | ⚠️ Partial | ➖ Will not implement
 
-## Running the Demo on QEMU
+<sup>[1]</sup> *Cortex-M7 reuses the CM4F port, per FreeRTOS's recommendation. Early CM7 silicon (r0p0/r0p1) requires ARM Errata 837070 workaround, which is not currently implemented. Most modern CM7 chips do not need this workaround.*
 
-The demo runs on an emulated Cortex-M4F (LM3S6965 board) using QEMU.
+## Running the Demos on QEMU
+
+Demos are available for all supported Cortex-M ports.
 
 ### Prerequisites
 
 ```bash
-# Install Rust ARM target
-rustup target add thumbv7em-none-eabihf
+# Install Rust ARM targets
+rustup target add thumbv7em-none-eabihf  # CM4F, CM7
+rustup target add thumbv7m-none-eabi     # CM3
+rustup target add thumbv6m-none-eabi     # CM0
 
 # Install QEMU (macOS)
 brew install qemu
@@ -86,15 +92,11 @@ brew install qemu
 sudo apt install qemu-system-arm
 ```
 
-### Build and Run
+### Cortex-M4F Demo
 
 ```bash
 cd demo/cortex-m4f
-
-# Build the demo
 cargo build --release
-
-# Run in QEMU (uses semihosting for output)
 qemu-system-arm \
   -cpu cortex-m4 \
   -machine lm3s6965evb \
@@ -103,14 +105,42 @@ qemu-system-arm \
   -kernel target/thumbv7em-none-eabihf/release/demo
 ```
 
+### Cortex-M3 Demo
+
+```bash
+cd demo/cortex-m3
+cargo build --release
+qemu-system-arm \
+  -cpu cortex-m3 \
+  -machine lm3s6965evb \
+  -nographic \
+  -semihosting-config enable=on,target=native \
+  -kernel target/thumbv7m-none-eabi/release/demo
+```
+
+### Cortex-M0 Demo
+
+```bash
+cd demo/cortex-m0
+cargo build --release
+qemu-system-arm \
+  -cpu cortex-m0 \
+  -machine microbit \
+  -nographic \
+  -semihosting-config enable=on,target=native \
+  -kernel target/thumbv6m-none-eabi/release/demo
+```
+
 You should see output like:
 ```
-FreeRusTOS Demo Starting...
-Creating tasks...
-Starting scheduler...
-[Blinky] LED ON (count: 1)
-[Blinky] LED OFF (count: 2)
+========================================
+   FreeRusTOS Demo - Cortex-M0
+========================================
+
+[Init] Creating mutex...
+[Init] Mutex created successfully
 ...
+[Main] Starting scheduler...
 ```
 
 Press `Ctrl-A X` to exit QEMU.
@@ -181,10 +211,13 @@ src/
 │   ├── queue.rs        # Queues & semaphores (queue.c)
 │   ├── list.rs         # Linked list implementation (list.c)
 │   ├── timers.rs       # Software timers (timers.c)
-│   ├── event_groups.rs # Event groups (event_groups.c) [skeleton]
-│   └── stream_buffer.rs# Stream buffers (stream_buffer.c) [skeleton]
+│   ├── event_groups.rs # Event groups (event_groups.c)
+│   └── stream_buffer.rs# Stream buffers (stream_buffer.c)
 ├── port/
-│   ├── cortex_m4f.rs   # Cortex-M4F port layer
+│   ├── cortex_m4f.rs   # Cortex-M4F port (ARMv7E-M with FPU)
+│   ├── cortex_m7.rs    # Cortex-M7 port (reexports CM4F)
+│   ├── cortex_m3.rs    # Cortex-M3 port (ARMv7-M, no FPU)
+│   ├── cortex_m0.rs    # Cortex-M0/M0+ port (ARMv6-M, Thumb-1)
 │   └── dummy.rs        # Dummy port for testing
 ├── memory/
 │   └── mod.rs          # pvPortMalloc/vPortFree
@@ -200,7 +233,7 @@ Rust doesn't have header files, so `FreeRTOSConfig.h` is replaced by two mechani
 ```toml
 [dependencies]
 freertos-in-rust = { version = "0.1", features = [
-    "port-cortex-m4f",    # Select your port
+    "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7)
     "heap-4",             # Allocator: ported heap_4 (or "alloc" for external)
     "use-mutexes",        # configUSE_MUTEXES
     "timers",             # configUSE_TIMERS
@@ -237,10 +270,7 @@ This is currently a monolithic single-crate repository. Future work includes:
 
 ### Missing Features
 
-- Event groups (complete implementation)
-- Additional ports (Cortex-M0/M3/M7, RISC-V)
-- Tickless idle mode
-- Run-time statistics
+- Additional ports (RISC-V, x86/x64)
 
 ### Testing
 

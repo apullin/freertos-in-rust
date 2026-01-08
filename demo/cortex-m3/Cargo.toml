@@ -1,0 +1,53 @@
+[package]
+name = "freertos-demo-m3"
+version = "0.1.0"
+edition = "2021"
+authors = ["FreeRusTOS Contributors"]
+description = "Demo application for FreeRusTOS on Cortex-M3"
+
+[[bin]]
+name = "demo"
+path = "../cortex-m4f/src/main.rs"
+
+[features]
+default = ["use-heap-4"]
+use-heap-4 = ["freertos-in-rust/heap-4"]
+use-embedded-alloc = ["freertos-in-rust/alloc", "dep:embedded-alloc"]
+
+[dependencies]
+freertos-in-rust = { path = "../..", features = [
+    "port-cortex-m3",
+    "use-mutexes",
+    "timers",
+    "task-delete",
+    "task-suspend",
+    "thread-local-storage",
+    "application-task-tag",
+    "stack-high-water-mark",
+    "task-priority-set",
+    "abort-delay",
+    "queue-sets",
+    "queue-registry",
+    "trace-facility",
+    "stats-formatting",
+    "stream-buffers",
+    "generate-run-time-stats",
+    "tickless-idle",
+] }
+
+embedded-alloc = { version = "0.6", optional = true }
+
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+
+[profile.dev]
+opt-level = "s"
+debug = true
+lto = false
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

@@ -21,7 +21,10 @@ default = ["port-dummy", "tick-32bit", "arch-32bit"]
 
 # Port selection (exactly one should be enabled)
 port-dummy = []
+port-cortex-m0 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
+port-cortex-m3 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-cortex-m4f = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
+port-cortex-m7 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 
 # Architecture width for BaseType_t, UBaseType_t, StackType_t
 arch-32bit = []

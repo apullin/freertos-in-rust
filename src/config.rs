@@ -84,7 +84,7 @@ pub const configSUPPORT_DYNAMIC_ALLOCATION: BaseType_t = 1;
 pub const configSUPPORT_DYNAMIC_ALLOCATION: BaseType_t = 0;
 
 /// Total heap size when using FreeRTOS heap implementations
-pub const configTOTAL_HEAP_SIZE: usize = 10240;
+pub const configTOTAL_HEAP_SIZE: usize = 6144; // 6KB - fits in 16KB RAM devices
 
 // =============================================================================
 // Optional Features

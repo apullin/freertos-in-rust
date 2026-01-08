@@ -34,6 +34,7 @@ freertos-in-rust = { path = "../..", features = [
     "trace-facility",
     "stats-formatting",
     "stream-buffers",
+    "generate-run-time-stats",
 ] }
 
 # External allocator (optional, for use-embedded-alloc feature)

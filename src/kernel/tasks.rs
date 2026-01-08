@@ -248,6 +248,11 @@ pub struct tskTaskControlBlock {
     /// Thread local storage pointers array.
     #[cfg(feature = "thread-local-storage")]
     pub pvThreadLocalStoragePointers: [*mut c_void; configNUM_THREAD_LOCAL_STORAGE_POINTERS],
+
+    /// Run-time counter for this task.
+    /// Stores the total time this task has been running.
+    #[cfg(feature = "generate-run-time-stats")]
+    pub ulRunTimeCounter: configRUN_TIME_COUNTER_TYPE,
 }
 
 /// Type alias for TCB pointer
@@ -300,6 +305,9 @@ impl tskTaskControlBlock {
 
             #[cfg(feature = "thread-local-storage")]
             pvThreadLocalStoragePointers: [ptr::null_mut(); configNUM_THREAD_LOCAL_STORAGE_POINTERS],
+
+            #[cfg(feature = "generate-run-time-stats")]
+            ulRunTimeCounter: 0,
         }
     }
 }
@@ -403,6 +411,20 @@ static mut uxSchedulerSuspended: UBaseType_t = 0;
 /// For OpenOCD debugging support.
 #[no_mangle]
 static uxTopUsedPriority: UBaseType_t = configMAX_PRIORITIES - 1;
+
+// =============================================================================
+// Run-time Stats Tracking Variables
+// =============================================================================
+
+/// The time at which the current task was switched in.
+/// Used to calculate how long the task has been running.
+#[cfg(feature = "generate-run-time-stats")]
+static mut ulTaskSwitchedInTime: configRUN_TIME_COUNTER_TYPE = 0;
+
+/// The total accumulated run time.
+/// This is updated in vTaskSwitchContext() by calling portGET_RUN_TIME_COUNTER_VALUE().
+#[cfg(feature = "generate-run-time-stats")]
+static mut ulTotalRunTime: configRUN_TIME_COUNTER_TYPE = 0;
 
 // =============================================================================
 // Task Macros as Functions
@@ -1774,6 +1796,28 @@ pub extern "C" fn vTaskSwitchContext() {
             // TODO: taskCHECK_FOR_STACK_OVERFLOW()
         }
 
+        // Update run-time stats for the task being switched out.
+        #[cfg(feature = "generate-run-time-stats")]
+        {
+            // Get the current run-time counter value.
+            ulTotalRunTime = crate::port::portGET_RUN_TIME_COUNTER_VALUE();
+
+            // Add the amount of time the task has been running to the accumulated
+            // time so far. The time the task started running was stored in
+            // ulTaskSwitchedInTime. Note that there is no overflow protection here
+            // so count values are only valid until the timer overflows. The guard
+            // against negative values is to protect against suspect run time stat
+            // counter implementations - which are provided by the application, not
+            // the kernel.
+            if ulTotalRunTime > ulTaskSwitchedInTime {
+                if !pxCurrentTCB.is_null() {
+                    (*pxCurrentTCB).ulRunTimeCounter += ulTotalRunTime - ulTaskSwitchedInTime;
+                }
+            }
+
+            ulTaskSwitchedInTime = ulTotalRunTime;
+        }
+
         // Select next task.
         taskSELECT_HIGHEST_PRIORITY_TASK();
 
@@ -2971,8 +3015,14 @@ pub unsafe fn vTaskGetInfo(
     }
 
     // Run time counter (if run-time stats are enabled)
-    // [AMENDMENT] configGENERATE_RUN_TIME_STATS is not yet implemented as a feature
-    (*pxTaskStatus).ulRunTimeCounter = 0;
+    #[cfg(feature = "generate-run-time-stats")]
+    {
+        (*pxTaskStatus).ulRunTimeCounter = (*pxTCB).ulRunTimeCounter;
+    }
+    #[cfg(not(feature = "generate-run-time-stats"))]
+    {
+        (*pxTaskStatus).ulRunTimeCounter = 0;
+    }
 
     // Stack base pointer
     (*pxTaskStatus).pxStackBase = (*pxTCB).pxStack;
@@ -3116,9 +3166,15 @@ pub unsafe fn uxTaskGetSystemState(
             }
 
             // Fill in the run time stats if enabled
-            // [AMENDMENT] Run time stats not yet implemented
             if !pulTotalRunTime.is_null() {
-                *pulTotalRunTime = 0;
+                #[cfg(feature = "generate-run-time-stats")]
+                {
+                    *pulTotalRunTime = ulTotalRunTime;
+                }
+                #[cfg(not(feature = "generate-run-time-stats"))]
+                {
+                    *pulTotalRunTime = 0;
+                }
             }
         } else {
             // Array not large enough, return 0
@@ -3273,7 +3329,7 @@ pub unsafe fn vTaskListTasks(pcWriteBuffer: *mut u8, uxBufferLength: usize) {
     {
         // Stack-allocated version for no-alloc builds
         let mut pxTaskStatusArray: [crate::types::TaskStatus_t; MAX_STACK_TASKS] =
-            [crate::types::TaskStatus_t::new(); MAX_STACK_TASKS];
+            [const { crate::types::TaskStatus_t::new() }; MAX_STACK_TASKS];
 
         let uxArraySizeClamped = if uxArraySize as usize > MAX_STACK_TASKS {
             MAX_STACK_TASKS as UBaseType_t
@@ -3328,5 +3384,266 @@ fn prvGetTaskNameFromPtr(pcTaskName: *const u8) -> &'static str {
         }
         // Safety: we're reading from the task name which is valid for TCB lifetime
         core::str::from_utf8_unchecked(core::slice::from_raw_parts(pcTaskName, len))
+    }
+}
+
+// =============================================================================
+// Run-time Statistics Functions (configGENERATE_RUN_TIME_STATS)
+// =============================================================================
+
+/// Get the run-time counter value for a task
+///
+/// Returns the total time the task has spent in the Running state.
+/// This is only available if `generate-run-time-stats` feature is enabled.
+///
+/// # Arguments
+/// * `xTask` - Handle of the task to query, or NULL for the current task
+///
+/// # Returns
+/// The run-time counter value for the task
+#[cfg(feature = "generate-run-time-stats")]
+pub fn ulTaskGetRunTimeCounter(xTask: TaskHandle_t) -> configRUN_TIME_COUNTER_TYPE {
+    unsafe {
+        let pxTCB = prvGetTCBFromHandle(xTask);
+        if pxTCB.is_null() {
+            return 0;
+        }
+        (*pxTCB).ulRunTimeCounter
+    }
+}
+
+/// Get the percentage of total run time that a task has used
+///
+/// Returns the percentage of total run time that the task has consumed.
+/// This is only available if `generate-run-time-stats` feature is enabled.
+///
+/// # Arguments
+/// * `xTask` - Handle of the task to query, or NULL for the current task
+///
+/// # Returns
+/// The percentage of total run time (0-100)
+#[cfg(feature = "generate-run-time-stats")]
+pub fn ulTaskGetRunTimePercent(xTask: TaskHandle_t) -> configRUN_TIME_COUNTER_TYPE {
+    unsafe {
+        let pxTCB = prvGetTCBFromHandle(xTask);
+        if pxTCB.is_null() || ulTotalRunTime == 0 {
+            return 0;
+        }
+
+        // Calculate percentage, avoiding overflow
+        // percentage = (task_runtime * 100) / total_runtime
+        let ulTaskRunTime = (*pxTCB).ulRunTimeCounter;
+
+        // Use u64 for intermediate calculation to avoid overflow
+        ((ulTaskRunTime as u64 * 100) / ulTotalRunTime as u64) as configRUN_TIME_COUNTER_TYPE
+    }
+}
+
+/// Get the run-time counter value for the idle task
+///
+/// Returns the total time the idle task has spent in the Running state.
+/// This is only available if `generate-run-time-stats` feature is enabled.
+///
+/// # Returns
+/// The run-time counter value for the idle task
+#[cfg(feature = "generate-run-time-stats")]
+pub fn ulTaskGetIdleRunTimeCounter() -> configRUN_TIME_COUNTER_TYPE {
+    unsafe {
+        let xIdleTaskHandle = xIdleTaskHandles[0];
+        if xIdleTaskHandle.is_null() {
+            return 0;
+        }
+        let pxIdleTCB = xIdleTaskHandle as *mut TCB_t;
+        (*pxIdleTCB).ulRunTimeCounter
+    }
+}
+
+/// Get the percentage of total run time that the idle task has used
+///
+/// Returns the percentage of total run time that the idle task has consumed.
+/// This is a measure of CPU idle time - higher values indicate more idle time.
+/// This is only available if `generate-run-time-stats` feature is enabled.
+///
+/// # Returns
+/// The percentage of total run time (0-100)
+#[cfg(feature = "generate-run-time-stats")]
+pub fn ulTaskGetIdleRunTimePercent() -> configRUN_TIME_COUNTER_TYPE {
+    unsafe {
+        if ulTotalRunTime == 0 {
+            return 0;
+        }
+
+        let xIdleTaskHandle = xIdleTaskHandles[0];
+        if xIdleTaskHandle.is_null() {
+            return 0;
+        }
+
+        let pxIdleTCB = xIdleTaskHandle as *mut TCB_t;
+        let ulIdleRunTime = (*pxIdleTCB).ulRunTimeCounter;
+
+        // Calculate percentage, avoiding overflow
+        ((ulIdleRunTime as u64 * 100) / ulTotalRunTime as u64) as configRUN_TIME_COUNTER_TYPE
+    }
+}
+
+/// Get the total run time
+///
+/// Returns the total run time since the scheduler started.
+/// This is only available if `generate-run-time-stats` feature is enabled.
+///
+/// # Returns
+/// The total run time counter value
+#[cfg(feature = "generate-run-time-stats")]
+pub fn ulTaskGetTotalRunTime() -> configRUN_TIME_COUNTER_TYPE {
+    unsafe { ulTotalRunTime }
+}
+
+/// Write run-time statistics to a buffer
+///
+/// Writes a human-readable table of task run-time statistics to the provided buffer.
+/// Format: `TaskName        Abs. Time      % Time`
+///
+/// [AMENDMENT] In C, snprintf is used for formatting. In Rust no_std,
+/// we use core::fmt::Write trait with a buffer wrapper instead.
+///
+/// # Arguments
+/// * `pcWriteBuffer` - Pointer to buffer to write statistics into
+/// * `uxBufferLength` - Length of the buffer in bytes
+///
+/// # Safety
+/// Buffer must be large enough for `uxBufferLength` bytes.
+#[cfg(all(
+    feature = "generate-run-time-stats",
+    feature = "stats-formatting",
+    feature = "trace-facility"
+))]
+pub unsafe fn vTaskGetRunTimeStatistics(pcWriteBuffer: *mut u8, uxBufferLength: usize) {
+    use core::fmt::Write;
+
+    // Create a slice from the raw pointer
+    let buffer = core::slice::from_raw_parts_mut(pcWriteBuffer, uxBufferLength);
+    let mut writer = BufferWriter::new(buffer);
+
+    // Write header
+    let _ = writeln!(
+        writer,
+        "{:<16} {:>12} {:>8}",
+        "Name", "Abs. Time", "% Time"
+    );
+
+    // Get the number of tasks
+    let uxArraySize = uxTaskGetNumberOfTasks();
+    if uxArraySize == 0 {
+        return;
+    }
+
+    // Get the total run time
+    let ulTotalTime = ulTotalRunTime;
+    if ulTotalTime == 0 {
+        let _ = writeln!(writer, "(No run time data collected yet)");
+        return;
+    }
+
+    // Allocate array for task status
+    #[cfg(any(feature = "alloc", feature = "heap-4"))]
+    {
+        extern crate alloc;
+        use alloc::vec::Vec;
+
+        let mut pxTaskStatusArray: Vec<crate::types::TaskStatus_t> =
+            Vec::with_capacity(uxArraySize as usize);
+        pxTaskStatusArray.resize_with(uxArraySize as usize, crate::types::TaskStatus_t::new);
+
+        let mut ulTotalRunTimeReturned: u32 = 0;
+        let uxTasksReturned = uxTaskGetSystemState(
+            pxTaskStatusArray.as_mut_ptr(),
+            uxArraySize,
+            &mut ulTotalRunTimeReturned,
+        );
+
+        // Generate output for each task
+        for i in 0..uxTasksReturned as usize {
+            let pxTaskStatus = &pxTaskStatusArray[i];
+
+            // Calculate percentage
+            let ulStatsAsPercentage = if ulTotalTime > 0 {
+                ((pxTaskStatus.ulRunTimeCounter as u64 * 100) / ulTotalTime as u64) as u32
+            } else {
+                0
+            };
+
+            // Get task name as string
+            let pcTaskName = pxTaskStatus.pcTaskName;
+            let name = prvGetTaskNameFromPtr(pcTaskName);
+
+            // Write the task line
+            if ulStatsAsPercentage > 0 {
+                let _ = writeln!(
+                    writer,
+                    "{:<16} {:>12} {:>7}%",
+                    name, pxTaskStatus.ulRunTimeCounter, ulStatsAsPercentage
+                );
+            } else {
+                // If percentage is less than 1%, show "<1%"
+                let _ = writeln!(
+                    writer,
+                    "{:<16} {:>12} {:>7}",
+                    name, pxTaskStatus.ulRunTimeCounter, "<1%"
+                );
+            }
+        }
+    }
+
+    #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+    {
+        // Without dynamic allocation, use a fixed-size array on the stack
+        const MAX_STACK_TASKS: usize = 16;
+        let mut pxTaskStatusArray: [crate::types::TaskStatus_t; MAX_STACK_TASKS] =
+            [const { crate::types::TaskStatus_t::new() }; MAX_STACK_TASKS];
+
+        let uxActualArraySize = if uxArraySize as usize > MAX_STACK_TASKS {
+            MAX_STACK_TASKS as UBaseType_t
+        } else {
+            uxArraySize
+        };
+
+        let mut ulTotalRunTimeReturned: u32 = 0;
+        let uxTasksReturned = uxTaskGetSystemState(
+            pxTaskStatusArray.as_mut_ptr(),
+            uxActualArraySize,
+            &mut ulTotalRunTimeReturned,
+        );
+
+        // Generate output for each task
+        for i in 0..uxTasksReturned as usize {
+            let pxTaskStatus = &pxTaskStatusArray[i];
+
+            // Calculate percentage
+            let ulStatsAsPercentage = if ulTotalTime > 0 {
+                ((pxTaskStatus.ulRunTimeCounter as u64 * 100) / ulTotalTime as u64) as u32
+            } else {
+                0
+            };
+
+            // Get task name as string
+            let pcTaskName = pxTaskStatus.pcTaskName;
+            let name = prvGetTaskNameFromPtr(pcTaskName);
+
+            // Write the task line
+            if ulStatsAsPercentage > 0 {
+                let _ = writeln!(
+                    writer,
+                    "{:<16} {:>12} {:>7}%",
+                    name, pxTaskStatus.ulRunTimeCounter, ulStatsAsPercentage
+                );
+            } else {
+                // If percentage is less than 1%, show "<1%"
+                let _ = writeln!(
+                    writer,
+                    "{:<16} {:>12} {:>7}",
+                    name, pxTaskStatus.ulRunTimeCounter, "<1%"
+                );
+            }
+        }
     }
 }

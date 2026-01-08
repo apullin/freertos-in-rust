@@ -361,6 +361,10 @@ pub unsafe extern "C" fn xPortPendSVHandler() {
 pub extern "C" fn xPortSysTickHandler() {
     let saved = portSET_INTERRUPT_MASK_FROM_ISR();
 
+    // Increment the run-time counter for run-time stats
+    #[cfg(feature = "generate-run-time-stats")]
+    portINCREMENT_RUN_TIME_COUNTER();
+
     crate::trace::traceISR_ENTER();
 
     if crate::kernel::tasks::xTaskIncrementTick() != pdFALSE {
@@ -511,6 +515,50 @@ pub fn portMEMORY_BARRIER() {
 
 /// Architecture name string for this port
 pub const portARCH_NAME: &str = "ARM Cortex-M4F";
+
+// =============================================================================
+// Run-time Stats Timer Support
+// =============================================================================
+
+/// Run-time stats counter value.
+/// This counter is incremented on each tick to provide a time base for run-time statistics.
+/// Users requiring higher resolution should override this with a hardware timer.
+#[cfg(feature = "generate-run-time-stats")]
+static mut ulRunTimeCounterValue: crate::config::configRUN_TIME_COUNTER_TYPE = 0;
+
+/// Configure the timer for run-time stats collection.
+/// This is called from vTaskStartScheduler() before starting the scheduler.
+///
+/// By default, this is a no-op as we increment the counter from the tick interrupt.
+/// Users requiring a dedicated high-frequency timer should provide their own implementation.
+#[cfg(feature = "generate-run-time-stats")]
+#[inline(always)]
+pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
+    unsafe {
+        ulRunTimeCounterValue = 0;
+    }
+}
+
+/// Get the current run-time counter value.
+/// This is called from vTaskSwitchContext() to calculate task run times.
+///
+/// By default, this returns a tick-based counter. Users requiring higher resolution
+/// should provide their own implementation using a hardware timer.
+#[cfg(feature = "generate-run-time-stats")]
+#[inline(always)]
+pub fn portGET_RUN_TIME_COUNTER_VALUE() -> crate::config::configRUN_TIME_COUNTER_TYPE {
+    unsafe { ulRunTimeCounterValue }
+}
+
+/// Increment the run-time counter.
+/// This should be called from the tick interrupt to update the counter.
+#[cfg(feature = "generate-run-time-stats")]
+#[inline(always)]
+pub fn portINCREMENT_RUN_TIME_COUNTER() {
+    unsafe {
+        ulRunTimeCounterValue = ulRunTimeCounterValue.wrapping_add(1);
+    }
+}
 
 // =============================================================================
 // Exception Handler Aliases for cortex-m-rt

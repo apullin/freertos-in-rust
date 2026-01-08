@@ -55,6 +55,9 @@ use freertos_in_rust::kernel::queue::{
 };
 use freertos_in_rust::kernel::tasks::{
     xTaskCreateStatic, vTaskStartScheduler, vTaskDelay, StaticTask_t,
+    ulTaskGetRunTimeCounter, ulTaskGetRunTimePercent,
+    ulTaskGetIdleRunTimeCounter, ulTaskGetIdleRunTimePercent,
+    ulTaskGetTotalRunTime,
 };
 use freertos_in_rust::kernel::timers::*;
 use freertos_in_rust::kernel::stream_buffer::{
@@ -131,6 +134,9 @@ static mut EVENT_SENDER_TCB: StaticTask_t = StaticTask_t::new();
 
 static mut EVENT_WAITER_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
 static mut EVENT_WAITER_TCB: StaticTask_t = StaticTask_t::new();
+
+static mut RUNTIME_STATS_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
+static mut RUNTIME_STATS_TCB: StaticTask_t = StaticTask_t::new();
 
 // =============================================================================
 // Entry Point
@@ -366,6 +372,22 @@ fn create_tasks() {
             hprintln!("[Init] ERROR: Failed to create event waiter task!");
         } else {
             hprintln!("[Init] Event waiter task created (priority {})", PRIORITY_MEDIUM);
+        }
+
+        // Runtime statistics task - periodically prints CPU usage
+        let result = xTaskCreateStatic(
+            task_runtime_stats,
+            b"RunStats\0".as_ptr(),
+            STACK_SIZE,
+            ptr::null_mut(),
+            PRIORITY_LOW,
+            RUNTIME_STATS_STACK.as_mut_ptr(),
+            &mut RUNTIME_STATS_TCB as *mut StaticTask_t,
+        );
+        if result.is_null() {
+            hprintln!("[Init] ERROR: Failed to create runtime stats task!");
+        } else {
+            hprintln!("[Init] Runtime stats task created (priority {})", PRIORITY_LOW);
         }
     }
 }
@@ -727,6 +749,52 @@ extern "C" fn task_event_waiter(_pvParameters: *mut c_void) {
 
         // Small delay
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+// =============================================================================
+// Runtime Statistics Task
+// =============================================================================
+
+/// Runtime statistics task
+///
+/// Periodically prints CPU usage statistics for all tasks.
+/// Demonstrates the generate-run-time-stats feature.
+extern "C" fn task_runtime_stats(_pvParameters: *mut c_void) {
+    let mut iteration: u32 = 0;
+
+    // Let system run for a bit before collecting stats
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
+    loop {
+        iteration += 1;
+
+        hprintln!("");
+        hprintln!("========== Run-Time Statistics (#{}) ==========", iteration);
+
+        // Get total run time
+        let total_time = ulTaskGetTotalRunTime();
+        hprintln!("Total Run Time: {} ticks", total_time);
+
+        // Get idle task stats
+        let idle_counter = ulTaskGetIdleRunTimeCounter();
+        let idle_percent = ulTaskGetIdleRunTimePercent();
+        hprintln!("Idle Task:      {} ticks ({}%)", idle_counter, idle_percent);
+
+        // Calculate non-idle CPU usage
+        let cpu_usage = 100 - idle_percent;
+        hprintln!("CPU Usage:      {}%", cpu_usage);
+
+        // Get current task's runtime (this task)
+        let my_counter = ulTaskGetRunTimeCounter(ptr::null_mut());
+        let my_percent = ulTaskGetRunTimePercent(ptr::null_mut());
+        hprintln!("This Task:      {} ticks ({}%)", my_counter, my_percent);
+
+        hprintln!("================================================");
+        hprintln!("");
+
+        // Wait 5 seconds before next stats report
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 

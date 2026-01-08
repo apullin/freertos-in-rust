@@ -65,6 +65,7 @@ thread-local-storage = []     # configNUM_THREAD_LOCAL_STORAGE_POINTERS
 critical-nesting-in-tcb = []  # portCRITICAL_NESTING_IN_TCB
 idle-yield = []               # Yield in idle task
 stats-formatting = []         # configUSE_STATS_FORMATTING_FUNCTIONS
+generate-run-time-stats = []  # configGENERATE_RUN_TIME_STATS
 
 # TODO: Future features
 # smp = []  # Multi-core support (configNUMBER_OF_CORES > 1)

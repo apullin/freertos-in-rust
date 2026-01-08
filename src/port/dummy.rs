@@ -230,3 +230,40 @@ pub fn portMEMORY_BARRIER() {
 
 /// Architecture name string for this port
 pub const portARCH_NAME: &str = "Dummy";
+
+// =============================================================================
+// Run-time Stats Timer Support
+// =============================================================================
+
+/// Run-time stats counter value.
+/// This counter is incremented to provide a time base for run-time statistics.
+#[cfg(feature = "generate-run-time-stats")]
+static mut ulRunTimeCounterValue: crate::config::configRUN_TIME_COUNTER_TYPE = 0;
+
+/// Configure the timer for run-time stats collection.
+/// This is called from vTaskStartScheduler() before starting the scheduler.
+#[cfg(feature = "generate-run-time-stats")]
+#[inline(always)]
+pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
+    unsafe {
+        ulRunTimeCounterValue = 0;
+    }
+}
+
+/// Get the current run-time counter value.
+/// This is called from vTaskSwitchContext() to calculate task run times.
+#[cfg(feature = "generate-run-time-stats")]
+#[inline(always)]
+pub fn portGET_RUN_TIME_COUNTER_VALUE() -> crate::config::configRUN_TIME_COUNTER_TYPE {
+    unsafe { ulRunTimeCounterValue }
+}
+
+/// Increment the run-time counter.
+/// This should be called from the tick interrupt to update the counter.
+#[cfg(feature = "generate-run-time-stats")]
+#[inline(always)]
+pub fn portINCREMENT_RUN_TIME_COUNTER() {
+    unsafe {
+        ulRunTimeCounterValue = ulRunTimeCounterValue.wrapping_add(1);
+    }
+}

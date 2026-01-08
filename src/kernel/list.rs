@@ -114,6 +114,7 @@ mod integrity {
 #[cfg(feature = "list-data-integrity-check")]
 mod integrity {
     use super::*;
+    use crate::configASSERT;
 
     #[inline(always)]
     pub fn listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxItem: &mut ListItem_t) {

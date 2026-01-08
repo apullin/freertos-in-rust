@@ -62,7 +62,7 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | Cortex-M0/M0+ | ✅ | Tested on QEMU (microbit) |
 | RISC-V RV32 | ✅ | Tested on QEMU (sifive_e) |
 | Cortex-A9 | ✅ | Tested on QEMU (vexpress-a9) |
-| Cortex-A53 (AArch64) | ❌ | Not yet implemented |
+| Cortex-A53 (AArch64) | ✅ | Tested on QEMU (virt) |
 | x86/x64 (Linux/Windows) | ❌ | Not yet implemented |
 | **Advanced Features** | | |
 | SMP / Multi-core | ➖ | Will not implement (out of scope) |
@@ -92,8 +92,9 @@ rustup target add thumbv6m-none-eabi     # CM0
 # Install Rust RISC-V target
 rustup target add riscv32imac-unknown-none-elf  # RISC-V RV32
 
-# Install Rust ARM Cortex-A target
-rustup target add armv7a-none-eabi  # Cortex-A9
+# Install Rust ARM Cortex-A targets
+rustup target add armv7a-none-eabi       # Cortex-A9
+rustup target add aarch64-unknown-none   # Cortex-A53
 
 # Install QEMU (macOS)
 brew install qemu
@@ -164,6 +165,19 @@ qemu-system-arm \
   -nographic \
   -semihosting-config enable=on,target=native \
   -kernel target/armv7a-none-eabi/release/demo
+```
+
+### Cortex-A53 Demo (AArch64)
+
+```bash
+cd demo/cortex-a53
+cargo build --release
+qemu-system-aarch64 \
+  -machine virt \
+  -cpu cortex-a53 \
+  -nographic \
+  -semihosting-config enable=on,target=native \
+  -kernel target/aarch64-unknown-none/release/demo
 ```
 
 You should see output like:
@@ -254,6 +268,7 @@ src/
 │   ├── cortex_m3.rs    # Cortex-M3 port (ARMv7-M, no FPU)
 │   ├── cortex_m0.rs    # Cortex-M0/M0+ port (ARMv6-M, Thumb-1)
 │   ├── cortex_a9.rs    # Cortex-A9 port (ARMv7-A, GIC, SWI)
+│   ├── cortex_a53.rs   # Cortex-A53 port (ARMv8-A/AArch64, GIC, SVC)
 │   ├── riscv32.rs      # RISC-V RV32 port (RV32I/RV32IMAC)
 │   └── dummy.rs        # Dummy port for testing
 ├── memory/
@@ -270,7 +285,7 @@ Rust doesn't have header files, so `FreeRTOSConfig.h` is replaced by two mechani
 ```toml
 [dependencies]
 freertos-in-rust = { version = "0.1", features = [
-    "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7, port-riscv32, port-cortex-a9)
+    "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7, port-riscv32, port-cortex-a9, port-cortex-a53)
     "heap-4",             # Allocator: ported heap_4 (or "alloc" for external)
     "use-mutexes",        # configUSE_MUTEXES
     "timers",             # configUSE_TIMERS
@@ -308,9 +323,9 @@ This is currently a monolithic single-crate repository. Future work includes:
 ### Missing Features
 
 - Additional ports:
-  - Cortex-A53 (ARMv8-A/AArch64, 64-bit) - in progress
   - RISC-V 64-bit
   - x86/x64
+- Debug printing: A holistic solution for debug output in demos is not yet solidified. Using `core::fmt::Write` adds significant code size (~40KB), so demos currently use simple direct print functions. This needs further investigation into what Rust offers for lightweight `no_std` formatting.
 
 ### Testing
 

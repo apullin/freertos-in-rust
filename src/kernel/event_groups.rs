@@ -54,7 +54,7 @@ use crate::types::*;
 #[cfg(feature = "tick-16bit")]
 pub const eventCLEAR_EVENTS_ON_EXIT_BIT: EventBits_t = 0x0100;
 
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 pub const eventCLEAR_EVENTS_ON_EXIT_BIT: EventBits_t = 0x0100_0000;
 
 #[cfg(feature = "tick-64bit")]
@@ -64,7 +64,7 @@ pub const eventCLEAR_EVENTS_ON_EXIT_BIT: EventBits_t = 0x0100_0000_0000_0000;
 #[cfg(feature = "tick-16bit")]
 pub const eventUNBLOCKED_DUE_TO_BIT_SET: EventBits_t = 0x0200;
 
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 pub const eventUNBLOCKED_DUE_TO_BIT_SET: EventBits_t = 0x0200_0000;
 
 #[cfg(feature = "tick-64bit")]
@@ -74,7 +74,7 @@ pub const eventUNBLOCKED_DUE_TO_BIT_SET: EventBits_t = 0x0200_0000_0000_0000;
 #[cfg(feature = "tick-16bit")]
 pub const eventWAIT_FOR_ALL_BITS: EventBits_t = 0x0400;
 
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 pub const eventWAIT_FOR_ALL_BITS: EventBits_t = 0x0400_0000;
 
 #[cfg(feature = "tick-64bit")]
@@ -84,7 +84,7 @@ pub const eventWAIT_FOR_ALL_BITS: EventBits_t = 0x0400_0000_0000_0000;
 #[cfg(feature = "tick-16bit")]
 pub const eventEVENT_BITS_CONTROL_BYTES: EventBits_t = 0xFF00;
 
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 pub const eventEVENT_BITS_CONTROL_BYTES: EventBits_t = 0xFF00_0000;
 
 #[cfg(feature = "tick-64bit")]

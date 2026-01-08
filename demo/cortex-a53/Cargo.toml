@@ -1,0 +1,56 @@
+[package]
+name = "freertos-demo-cortex-a53"
+version = "0.1.0"
+edition = "2021"
+authors = ["FreeRusTOS Contributors"]
+description = "Demo application for FreeRusTOS on ARM Cortex-A53 (AArch64)"
+
+[[bin]]
+name = "demo"
+path = "src/main.rs"
+
+[features]
+default = ["use-heap-4", "tickless-idle"]
+use-heap-4 = ["freertos-in-rust/heap-4"]
+tickless-idle = ["freertos-in-rust/tickless-idle"]
+
+# Full feature set including tickless-idle
+[dependencies]
+freertos-in-rust = { path = "../..", features = [
+    "port-cortex-a53",
+    "use-mutexes",
+    "timers",
+    "task-delete",
+    "task-suspend",
+    "queue-sets",
+    "stream-buffers",
+    "abort-delay",
+    "task-priority-set",
+    "stack-high-water-mark",
+    "pend-function-call",
+    "idle-yield",
+    "trace-facility",
+    "record-stack-high-address",
+    "application-task-tag",
+    "posix-errno",
+    "thread-local-storage",
+    "critical-nesting-in-tcb",
+    "stats-formatting",
+    "queue-registry",
+    "list-data-integrity-check",
+    "stack-overflow-check",
+    "generate-run-time-stats",
+    "tickless-idle",
+] }
+
+# No build dependencies needed - startup is in global_asm!
+
+[profile.dev]
+opt-level = "s"
+debug = true
+lto = false
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

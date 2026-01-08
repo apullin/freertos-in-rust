@@ -99,7 +99,7 @@ const taskBITS_PER_BYTE: usize = 8;
 #[cfg(feature = "tick-16bit")]
 const taskEVENT_LIST_ITEM_VALUE_IN_USE: TickType_t = 0x8000;
 
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 const taskEVENT_LIST_ITEM_VALUE_IN_USE: TickType_t = 0x8000_0000;
 
 #[cfg(feature = "tick-64bit")]

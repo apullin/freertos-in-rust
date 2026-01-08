@@ -32,7 +32,7 @@
 
 /// Signed base type - architecture word size
 /// Used for boolean returns, error codes, and small signed values.
-#[cfg(feature = "arch-32bit")]
+#[cfg(not(feature = "arch-64bit"))]
 pub type BaseType_t = i32;
 
 #[cfg(feature = "arch-64bit")]
@@ -40,7 +40,7 @@ pub type BaseType_t = i64;
 
 /// Unsigned base type - architecture word size
 /// Used for counts, indices, and priority values.
-#[cfg(feature = "arch-32bit")]
+#[cfg(not(feature = "arch-64bit"))]
 pub type UBaseType_t = u32;
 
 #[cfg(feature = "arch-64bit")]
@@ -48,7 +48,7 @@ pub type UBaseType_t = u64;
 
 /// Stack element type
 /// Each stack "slot" is this size.
-#[cfg(feature = "arch-32bit")]
+#[cfg(not(feature = "arch-64bit"))]
 pub type StackType_t = u32;
 
 #[cfg(feature = "arch-64bit")]
@@ -68,11 +68,11 @@ pub type TickType_t = u16;
 pub const portMAX_DELAY: TickType_t = 0xFFFF;
 
 /// Tick counter type - 32-bit variant (most common)
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 pub type TickType_t = u32;
 
 /// Maximum tick value for 32-bit ticks
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 pub const portMAX_DELAY: TickType_t = 0xFFFF_FFFF;
 
 /// Tick counter type - 64-bit variant
@@ -99,7 +99,7 @@ pub const TICK_TYPE_WIDTH_64_BITS: u8 = 2;
 #[cfg(feature = "tick-16bit")]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_16_BITS;
 
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_32_BITS;
 
 #[cfg(feature = "tick-64bit")]
@@ -149,7 +149,7 @@ pub const errQUEUE_YIELD: BaseType_t = -5;
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A;
 
 /// Integrity check magic value - 32-bit ticks
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A;
 
 /// Integrity check magic value - 64-bit ticks

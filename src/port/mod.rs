@@ -27,6 +27,8 @@
 //! - `port-cortex-m4f` - ARM Cortex-M4F with FPU (ARMv7E-M, BASEPRI)
 //! - `port-cortex-m7` - ARM Cortex-M7 (same as CM4F per FreeRTOS docs)
 //! - `port-riscv32` - RISC-V RV32 (standard CLINT timer)
+//! - `port-cortex-a9` - ARM Cortex-A9 (ARMv7-A, GIC, SWI for context switch)
+//! - `port-cortex-a53` - ARM Cortex-A53 (ARMv8-A/AArch64, GIC, SMC for context switch)
 
 // Port selection - only one can be active at a time
 // Priority: CM0 > CM3 > CM4F > CM7 > RISCV32 > dummy
@@ -87,12 +89,54 @@ mod riscv32;
 pub use riscv32::*;
 
 #[cfg(all(
-    feature = "port-dummy",
+    feature = "port-cortex-a9",
     not(feature = "port-cortex-m0"),
     not(feature = "port-cortex-m3"),
     not(feature = "port-cortex-m4f"),
     not(feature = "port-cortex-m7"),
     not(feature = "port-riscv32")
+))]
+mod cortex_a9;
+#[cfg(all(
+    feature = "port-cortex-a9",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3"),
+    not(feature = "port-cortex-m4f"),
+    not(feature = "port-cortex-m7"),
+    not(feature = "port-riscv32")
+))]
+pub use cortex_a9::*;
+
+#[cfg(all(
+    feature = "port-cortex-a53",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3"),
+    not(feature = "port-cortex-m4f"),
+    not(feature = "port-cortex-m7"),
+    not(feature = "port-riscv32"),
+    not(feature = "port-cortex-a9")
+))]
+mod cortex_a53;
+#[cfg(all(
+    feature = "port-cortex-a53",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3"),
+    not(feature = "port-cortex-m4f"),
+    not(feature = "port-cortex-m7"),
+    not(feature = "port-riscv32"),
+    not(feature = "port-cortex-a9")
+))]
+pub use cortex_a53::*;
+
+#[cfg(all(
+    feature = "port-dummy",
+    not(feature = "port-cortex-m0"),
+    not(feature = "port-cortex-m3"),
+    not(feature = "port-cortex-m4f"),
+    not(feature = "port-cortex-m7"),
+    not(feature = "port-riscv32"),
+    not(feature = "port-cortex-a9"),
+    not(feature = "port-cortex-a53")
 ))]
 mod dummy;
 #[cfg(all(
@@ -101,7 +145,9 @@ mod dummy;
     not(feature = "port-cortex-m3"),
     not(feature = "port-cortex-m4f"),
     not(feature = "port-cortex-m7"),
-    not(feature = "port-riscv32")
+    not(feature = "port-riscv32"),
+    not(feature = "port-cortex-a9"),
+    not(feature = "port-cortex-a53")
 ))]
 pub use dummy::*;
 

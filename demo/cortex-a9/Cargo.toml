@@ -1,0 +1,47 @@
+[package]
+name = "freertos-demo-cortex-a9"
+version = "0.1.0"
+edition = "2021"
+authors = ["FreeRusTOS Contributors"]
+description = "Demo application for FreeRusTOS on ARM Cortex-A9"
+
+[[bin]]
+name = "demo"
+path = "src/main.rs"
+
+[features]
+default = ["use-heap-4"]
+use-heap-4 = ["freertos-in-rust/heap-4"]
+
+[dependencies]
+freertos-in-rust = { path = "../..", features = [
+    "port-cortex-a9",
+    "use-mutexes",
+    "timers",
+    "task-delete",
+    "task-suspend",
+    "thread-local-storage",
+    "application-task-tag",
+    "stack-high-water-mark",
+    "task-priority-set",
+    "abort-delay",
+    "queue-sets",
+    "queue-registry",
+    "trace-facility",
+    "stats-formatting",
+    "stream-buffers",
+    "generate-run-time-stats",
+] }
+
+[build-dependencies]
+cc = "1.0"
+
+[profile.dev]
+opt-level = "s"
+debug = true
+lto = false
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

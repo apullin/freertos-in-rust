@@ -26,6 +26,8 @@ port-cortex-m3 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-cortex-m4f = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-cortex-m7 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-riscv32 = ["dep:riscv", "dep:riscv-rt", "arch-32bit", "tick-32bit"]
+port-cortex-a9 = ["arch-32bit", "tick-32bit"]
+port-cortex-a53 = ["arch-64bit", "tick-64bit"]
 
 # Architecture width for BaseType_t, UBaseType_t, StackType_t
 arch-32bit = []

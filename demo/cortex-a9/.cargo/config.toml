@@ -1,0 +1,16 @@
+[build]
+target = "armv7a-none-eabi"
+
+[target.armv7a-none-eabi]
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+]
+
+runner = """
+qemu-system-arm \
+  -machine vexpress-a9 \
+  -cpu cortex-a9 \
+  -m 128M \
+  -nographic \
+  -semihosting-config enable=on,target=native \
+  -kernel"""

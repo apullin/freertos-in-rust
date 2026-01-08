@@ -61,6 +61,8 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | Cortex-M3 | ✅ | Tested on QEMU (lm3s6965evb) |
 | Cortex-M0/M0+ | ✅ | Tested on QEMU (microbit) |
 | RISC-V RV32 | ✅ | Tested on QEMU (sifive_e) |
+| Cortex-A9 | ✅ | Tested on QEMU (vexpress-a9) |
+| Cortex-A53 (AArch64) | ❌ | Not yet implemented |
 | x86/x64 (Linux/Windows) | ❌ | Not yet implemented |
 | **Advanced Features** | | |
 | SMP / Multi-core | ➖ | Will not implement (out of scope) |
@@ -87,6 +89,9 @@ rustup target add thumbv6m-none-eabi     # CM0
 
 # Install Rust RISC-V target
 rustup target add riscv32imac-unknown-none-elf  # RISC-V RV32
+
+# Install Rust ARM Cortex-A target
+rustup target add armv7a-none-eabi  # Cortex-A9
 
 # Install QEMU (macOS)
 brew install qemu
@@ -143,6 +148,20 @@ qemu-system-riscv32 \
   -machine sifive_e \
   -nographic \
   -kernel target/riscv32imac-unknown-none-elf/release/demo
+```
+
+### Cortex-A9 Demo
+
+```bash
+cd demo/cortex-a9
+cargo build --release
+qemu-system-arm \
+  -machine vexpress-a9 \
+  -cpu cortex-a9 \
+  -m 128M \
+  -nographic \
+  -semihosting-config enable=on,target=native \
+  -kernel target/armv7a-none-eabi/release/demo
 ```
 
 You should see output like:
@@ -232,6 +251,7 @@ src/
 │   ├── cortex_m7.rs    # Cortex-M7 port (reexports CM4F)
 │   ├── cortex_m3.rs    # Cortex-M3 port (ARMv7-M, no FPU)
 │   ├── cortex_m0.rs    # Cortex-M0/M0+ port (ARMv6-M, Thumb-1)
+│   ├── cortex_a9.rs    # Cortex-A9 port (ARMv7-A, GIC, SWI)
 │   ├── riscv32.rs      # RISC-V RV32 port (RV32I/RV32IMAC)
 │   └── dummy.rs        # Dummy port for testing
 ├── memory/
@@ -248,7 +268,7 @@ Rust doesn't have header files, so `FreeRTOSConfig.h` is replaced by two mechani
 ```toml
 [dependencies]
 freertos-in-rust = { version = "0.1", features = [
-    "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7, port-riscv32)
+    "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7, port-riscv32, port-cortex-a9)
     "heap-4",             # Allocator: ported heap_4 (or "alloc" for external)
     "use-mutexes",        # configUSE_MUTEXES
     "timers",             # configUSE_TIMERS
@@ -285,7 +305,10 @@ This is currently a monolithic single-crate repository. Future work includes:
 
 ### Missing Features
 
-- Additional ports (RISC-V 64-bit, x86/x64)
+- Additional ports:
+  - Cortex-A53 (ARMv8-A/AArch64, 64-bit) - in progress
+  - RISC-V 64-bit
+  - x86/x64
 
 ### Testing
 

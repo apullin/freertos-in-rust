@@ -40,6 +40,14 @@ pub const configTICK_RATE_HZ: TickType_t = 1000;
 /// Default: 80 MHz (common for Cortex-M4F parts like STM32L4, TI TM4C)
 pub const configCPU_CLOCK_HZ: u32 = 80_000_000;
 
+/// RISC-V MTIME timer frequency in Hz
+/// [AMENDMENT] For RISC-V ports, the CLINT timer (MTIME) may run at a
+/// different frequency than the CPU clock.
+/// QEMU sifive_e: Timer is instruction-based (~1 tick per 6500 instructions).
+/// Using 32768 Hz as effective rate for QEMU testing.
+#[cfg(feature = "port-riscv32")]
+pub const configMTIME_HZ: u32 = 32_768;  // ~33 ticks per ms in QEMU
+
 /// Maximum syscall interrupt priority
 /// Interrupts with priority >= this value can call FreeRTOS "FromISR" APIs.
 /// Lower values = higher priority on Cortex-M (0 = highest).

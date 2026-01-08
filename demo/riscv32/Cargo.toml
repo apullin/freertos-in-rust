@@ -1,0 +1,48 @@
+[package]
+name = "freertos-demo-riscv32"
+version = "0.1.0"
+edition = "2021"
+authors = ["FreeRusTOS Contributors"]
+description = "Demo application for FreeRusTOS on RISC-V RV32"
+
+[[bin]]
+name = "demo"
+path = "src/main.rs"
+
+[features]
+default = ["use-heap-4"]
+use-heap-4 = ["freertos-in-rust/heap-4"]
+
+[dependencies]
+freertos-in-rust = { path = "../..", features = [
+    "port-riscv32",
+    "use-mutexes",
+    "timers",
+    "task-delete",
+    "task-suspend",
+    "thread-local-storage",
+    "application-task-tag",
+    "stack-high-water-mark",
+    "task-priority-set",
+    "abort-delay",
+    "queue-sets",
+    "queue-registry",
+    "trace-facility",
+    "stats-formatting",
+    "stream-buffers",
+    "generate-run-time-stats",
+] }
+
+riscv = "0.12"
+riscv-rt = "0.13"
+panic-halt = "1.0"
+
+[profile.dev]
+opt-level = "s"
+debug = true
+lto = false
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

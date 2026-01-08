@@ -1712,7 +1712,8 @@ pub fn vTaskMissedYield() {
 /// # Returns
 ///
 /// pdTRUE if a context switch should occur.
-pub fn xTaskIncrementTick() -> BaseType_t {
+#[no_mangle]
+pub extern "C" fn xTaskIncrementTick() -> BaseType_t {
     let mut xSwitchRequired = pdFALSE;
 
     unsafe {

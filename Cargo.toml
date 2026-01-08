@@ -25,6 +25,7 @@ port-cortex-m0 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-cortex-m3 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-cortex-m4f = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-cortex-m7 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
+port-riscv32 = ["dep:riscv", "dep:riscv-rt", "arch-32bit", "tick-32bit"]
 
 # Architecture width for BaseType_t, UBaseType_t, StackType_t
 arch-32bit = []
@@ -76,9 +77,13 @@ tickless-idle = []            # configUSE_TICKLESS_IDLE
 # mini-list-item = []  # configUSE_MINI_LIST_ITEM optimization
 
 [dependencies]
-# Cortex-M support (optional, for port-cortex-m4f)
+# Cortex-M support (optional, for port-cortex-m*)
 cortex-m = { version = "0.7", optional = true }
 cortex-m-rt = { version = "0.7", optional = true }
+
+# RISC-V support (optional, for port-riscv32)
+riscv = { version = "0.12", optional = true }
+riscv-rt = { version = "0.13", optional = true }
 
 [dev-dependencies]
 

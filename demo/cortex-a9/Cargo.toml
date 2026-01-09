@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = ["use-heap-4"]
 use-heap-4 = ["freertos-in-rust/heap-4"]
+smp = ["freertos-in-rust/smp"]
 
 [dependencies]
 freertos-in-rust = { path = "../..", features = [

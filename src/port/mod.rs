@@ -184,3 +184,64 @@ pub const fn portTICK_PERIOD_MS() -> TickType_t {
 macro_rules! PRIVILEGED_FUNCTION {
     () => {};
 }
+
+// =============================================================================
+// SMP Port Functions
+// =============================================================================
+
+/// Get the current core ID (single-core stub).
+///
+/// In single-core mode, always returns 0.
+/// SMP ports should override this with actual core ID detection.
+#[inline(always)]
+#[cfg(not(feature = "smp"))]
+pub fn portGET_CORE_ID() -> BaseType_t {
+    0
+}
+
+/// Yield a specific core (SMP only, stub).
+///
+/// Sends an IPI (Inter-Processor Interrupt) to the specified core
+/// to trigger a context switch. Each SMP port must implement this.
+#[inline(always)]
+#[cfg(feature = "smp")]
+pub fn portYIELD_CORE(_xCoreID: BaseType_t) {
+    // TODO: SMP ports must implement this via IPI/SGI
+    // For now, just trigger a local yield if it's the current core
+    portYIELD();
+}
+
+/// Get the task lock (SMP spinlock for task list protection).
+///
+/// SMP ports must implement this as a spinlock.
+/// Non-SMP ports don't need this (uses critical section).
+#[inline(always)]
+#[cfg(feature = "smp")]
+pub fn portGET_TASK_LOCK() {
+    // TODO: SMP ports must implement spinlock
+    portENTER_CRITICAL();
+}
+
+/// Release the task lock (SMP spinlock).
+#[inline(always)]
+#[cfg(feature = "smp")]
+pub fn portRELEASE_TASK_LOCK() {
+    // TODO: SMP ports must implement spinlock
+    portEXIT_CRITICAL();
+}
+
+/// Get the ISR lock (SMP spinlock for ISR context).
+#[inline(always)]
+#[cfg(feature = "smp")]
+pub fn portGET_ISR_LOCK() {
+    // TODO: SMP ports must implement spinlock
+    portENTER_CRITICAL();
+}
+
+/// Release the ISR lock.
+#[inline(always)]
+#[cfg(feature = "smp")]
+pub fn portRELEASE_ISR_LOCK() {
+    // TODO: SMP ports must implement spinlock
+    portEXIT_CRITICAL();
+}

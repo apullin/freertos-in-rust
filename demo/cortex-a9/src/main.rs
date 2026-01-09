@@ -143,6 +143,27 @@ fn print_num(mut n: u32) {
     }
 }
 
+/// Get the current CPU core ID from MPIDR register
+fn get_core_id() -> u32 {
+    let mpidr: u32;
+    unsafe {
+        core::arch::asm!(
+            "mrc p15, 0, {}, c0, c0, 5",
+            out(reg) mpidr,
+            options(nomem, nostack)
+        );
+    }
+    mpidr & 0xFF
+}
+
+/// Print a message with core ID prefix
+fn println_core(s: &str) {
+    print("[Core ");
+    print_num(get_core_id());
+    print("] ");
+    println(s);
+}
+
 // =============================================================================
 // GIC and Timer Setup
 // =============================================================================
@@ -283,8 +304,29 @@ static mut HIGH_TASK_TCB: StaticTask_t = StaticTask_t::new();
 
 #[no_mangle]
 pub extern "C" fn main() -> ! {
+    let core_id = get_core_id();
+
+    // For SMP: Only core 0 initializes the system
+    // Secondary cores should wait for the scheduler to start
+    #[cfg(feature = "smp")]
+    if core_id != 0 {
+        print("[Core ");
+        print_num(core_id);
+        println("] Secondary core waiting for scheduler...");
+
+        // Wait for scheduler to be started by core 0
+        loop {
+            unsafe {
+                core::arch::asm!("wfe"); // Wait for event
+            }
+        }
+    }
+
     println("========================================");
-    println("   FreeRusTOS Demo - Cortex-A9");
+    print("   FreeRusTOS Demo - Cortex-A9");
+    #[cfg(feature = "smp")]
+    print(" (SMP)");
+    println("");
     println("========================================");
     println("");
 
@@ -444,7 +486,7 @@ extern "C" fn timer_callback(_xTimer: TimerHandle_t) {
     unsafe {
         TIMER_TICKS += 1;
     }
-    println("[Timer] Tick!");
+    println_core("[Timer] Tick!");
 }
 
 // =============================================================================
@@ -453,21 +495,21 @@ extern "C" fn timer_callback(_xTimer: TimerHandle_t) {
 
 extern "C" fn task_low_priority(_pvParameters: *mut c_void) {
     loop {
-        println("[Low] Taking mutex...");
+        println_core("[Low] Taking mutex...");
 
         unsafe {
             if xSemaphoreTake(MUTEX_HANDLE, portMAX_DELAY) == pdTRUE {
-                println("[Low] Mutex acquired!");
+                println_core("[Low] Mutex acquired!");
 
                 SHARED_COUNTER += 1;
-                println("[Low] Working...");
+                println_core("[Low] Working...");
 
                 vTaskDelay(pdMS_TO_TICKS(200));
 
                 // Signal semaphore
                 xSemaphoreGive(SEMAPHORE_HANDLE);
 
-                println("[Low] Releasing mutex");
+                println_core("[Low] Releasing mutex");
                 xSemaphoreGive(MUTEX_HANDLE);
             }
         }
@@ -480,7 +522,7 @@ extern "C" fn task_medium_priority(_pvParameters: *mut c_void) {
     vTaskDelay(pdMS_TO_TICKS(50));
 
     loop {
-        println("[Med] Running");
+        println_core("[Med] Running");
         vTaskDelay(pdMS_TO_TICKS(300));
     }
 }
@@ -489,15 +531,15 @@ extern "C" fn task_high_priority(_pvParameters: *mut c_void) {
     loop {
         vTaskDelay(pdMS_TO_TICKS(150));
 
-        println("[High] Taking mutex...");
+        println_core("[High] Taking mutex...");
 
         unsafe {
             if xSemaphoreTake(MUTEX_HANDLE, portMAX_DELAY) == pdTRUE {
-                println("[High] Mutex acquired!");
+                println_core("[High] Mutex acquired!");
 
                 SHARED_COUNTER += 10;
 
-                println("[High] Releasing mutex");
+                println_core("[High] Releasing mutex");
                 xSemaphoreGive(MUTEX_HANDLE);
             }
         }

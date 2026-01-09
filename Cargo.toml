@@ -79,8 +79,11 @@ stats-formatting = []         # configUSE_STATS_FORMATTING_FUNCTIONS
 generate-run-time-stats = []  # configGENERATE_RUN_TIME_STATS
 tickless-idle = []            # configUSE_TICKLESS_IDLE
 
+# SMP (Symmetric Multi-Processing) support
+smp = []                  # configNUMBER_OF_CORES > 1
+core-affinity = ["smp"]   # configUSE_CORE_AFFINITY (requires smp)
+
 # TODO: Future features
-# smp = []  # Multi-core support (configNUMBER_OF_CORES > 1)
 # mini-list-item = []  # configUSE_MINI_LIST_ITEM optimization
 
 [dependencies]

@@ -164,7 +164,7 @@ Without `user-config`, defaults are used (80MHz CPU clock) which will cause inco
 | Cortex-A53 (AArch64) | ✅ | Tested on QEMU (virt) |
 | x86/x64 (Linux/Windows) | ❌ | Not yet implemented |
 | **Advanced Features** | | |
-| SMP / Multi-core | ➖ | Will not implement (out of scope) |
+| SMP / Multi-core | ✅ | Requires `smp` feature, tested on Cortex-A9 |
 | MPU Support | ➖ | Will not implement (out of scope) |
 | Co-routines | ➖ | Will not implement (deprecated in FreeRTOS) |
 | Tickless Idle | ✅ <sup>[2]</sup> | Requires `tickless-idle` feature |

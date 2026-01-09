@@ -54,7 +54,9 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 | **Memory Management** | | |
 | pvPortMalloc / vPortFree | ✅ | Wraps Rust's `#[global_allocator]` |
 | Static Allocation | ✅ | |
-| heap_1 through heap_5 | ➖ | N/A - uses Rust allocator instead |
+| heap_4 | ✅ | Single contiguous region (see `heap-4` feature) |
+| heap_5 | ✅ | Multiple non-contiguous regions (see `heap-5` feature) |
+| heap_1, heap_2, heap_3 | ➖ | N/A - use Rust allocator crates instead |
 | **Ports** | | |
 | Cortex-M4F | ✅ | Tested on QEMU (lm3s6965evb) |
 | Cortex-M7 | ✅ <sup>[1]</sup> | Tested on QEMU |
@@ -218,7 +220,39 @@ use freertos_in_rust::memory::FreeRtosAllocator;
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 ```
 
-### Option 2: `alloc` — Rust-Native Allocator
+### Option 2: `heap-5` — Multi-Region Allocator
+
+Like `heap-4`, but supports **multiple non-contiguous memory regions**. Ideal for systems with:
+- Internal SRAM + external PSRAM (ESP32, STM32 with QSPI RAM)
+- Cortex-M7 with TCM + main RAM
+- Any chip with multiple RAM banks
+
+```toml
+freertos-in-rust = { version = "0.1", features = ["heap-5"] }
+```
+
+```rust
+use freertos_in_rust::memory::{vPortDefineHeapRegions, HeapRegion, FreeRtosAllocator};
+
+// Define your memory regions (must be in ascending address order)
+static mut SRAM: [u8; 32768] = [0; 32768];
+static mut PSRAM: [u8; 65536] = [0; 65536];
+
+#[global_allocator]
+static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
+
+fn main() {
+    // Initialize heap BEFORE any allocations
+    unsafe {
+        vPortDefineHeapRegions(&[
+            HeapRegion::new(SRAM.as_mut_ptr(), SRAM.len()),
+            HeapRegion::new(PSRAM.as_mut_ptr(), PSRAM.len()),
+        ]);
+    }
+}
+```
+
+### Option 3: `alloc` — Rust-Native Allocator
 
 If you prefer a simpler Rust-native solution, use the `alloc` feature with an external allocator like [`embedded-alloc`](https://crates.io/crates/embedded-alloc). This is a well-maintained linked-list allocator from the embedded Rust ecosystem:
 
@@ -286,7 +320,7 @@ Rust doesn't have header files, so `FreeRTOSConfig.h` is replaced by two mechani
 [dependencies]
 freertos-in-rust = { version = "0.1", features = [
     "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7, port-riscv32, port-cortex-a9, port-cortex-a53)
-    "heap-4",             # Allocator: ported heap_4 (or "alloc" for external)
+    "heap-4",             # Allocator: heap_4 (or "heap-5" for multi-region, or "alloc" for external)
     "use-mutexes",        # configUSE_MUTEXES
     "timers",             # configUSE_TIMERS
     "task-delete",        # INCLUDE_vTaskDelete
@@ -294,7 +328,7 @@ freertos-in-rust = { version = "0.1", features = [
 ] }
 ```
 
-See [Memory Allocator](#memory-allocator) for choosing between `heap-4` and `alloc`.
+See [Memory Allocator](#memory-allocator) for choosing between `heap-4`, `heap-5`, and `alloc`.
 
 **Numeric constants** (e.g., `#define configTOTAL_HEAP_SIZE 10240`) live in `src/config.rs` and are referenced as `crate::config::configTOTAL_HEAP_SIZE`:
 

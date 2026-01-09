@@ -56,7 +56,7 @@
 #[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 extern crate alloc;
 
 // Core modules

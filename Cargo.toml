@@ -40,7 +40,8 @@ tick-32bit = []
 tick-64bit = []
 
 # Memory allocation (choose one)
-heap-4 = []  # FreeRTOS heap_4: first-fit with coalescing (recommended)
+heap-4 = []  # FreeRTOS heap_4: first-fit with coalescing, single contiguous region
+heap-5 = []  # FreeRTOS heap_5: like heap_4 but supports multiple non-contiguous regions (PSRAM, etc.)
 alloc = []   # Wrap Rust's #[global_allocator] instead
 
 # Testing support (enables std for host tests)

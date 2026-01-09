@@ -7,12 +7,13 @@
  * [AMENDMENT] This module provides memory allocation for FreeRTOS.
  * The allocator implementation is selected via Cargo features:
  *
- * - `heap-4`: Use FreeRTOS heap_4 (first-fit with coalescing) - RECOMMENDED
- * - `alloc` (without heap-4): Wrap Rust's #[global_allocator]
+ * - `heap-4`: Use FreeRTOS heap_4 (first-fit with coalescing, single region)
+ * - `heap-5`: Use FreeRTOS heap_5 (like heap_4 but supports multiple regions)
+ * - `alloc` (without heap-4/5): Wrap Rust's #[global_allocator]
  * - Neither: Stub implementations that panic at runtime
  *
- * Only ONE of heap-4 or alloc should be enabled. If both are enabled,
- * heap-4 takes precedence.
+ * Only ONE of heap-4, heap-5, or alloc should be enabled.
+ * Priority: heap-4 > heap-5 > alloc > stubs
  */
 
 //! Memory Allocation
@@ -25,11 +26,12 @@
 //!
 //! | Feature | Allocator | Use Case |
 //! |---------|-----------|----------|
-//! | `heap-4` | FreeRTOS heap_4 | Embedded systems, deterministic timing |
+//! | `heap-4` | FreeRTOS heap_4 | Single contiguous heap region |
+//! | `heap-5` | FreeRTOS heap_5 | Multiple non-contiguous regions (PSRAM, TCM, etc.) |
 //! | `alloc` | Rust global allocator | When you have an existing allocator |
 //! | (none) | Stubs (panic) | Static-only allocation |
 //!
-//! ### heap-4 (Recommended for embedded)
+//! ### heap-4 (Single region)
 //!
 //! The authentic FreeRTOS heap_4 implementation:
 //! - First-fit allocation
@@ -40,6 +42,32 @@
 //! ```toml
 //! [dependencies]
 //! freertos-in-rust = { version = "0.1", features = ["heap-4"] }
+//! ```
+//!
+//! ### heap-5 (Multiple regions)
+//!
+//! Like heap_4, but supports multiple non-contiguous memory regions:
+//! - Ideal for systems with internal SRAM + external PSRAM
+//! - Or Cortex-M7 with TCM + main RAM
+//! - Must call `vPortDefineHeapRegions` before any allocation
+//!
+//! ```toml
+//! [dependencies]
+//! freertos-in-rust = { version = "0.1", features = ["heap-5"] }
+//! ```
+//!
+//! ```ignore
+//! use freertos_in_rust::memory::{vPortDefineHeapRegions, HeapRegion};
+//!
+//! static mut SRAM: [u8; 32768] = [0; 32768];
+//! static mut PSRAM: [u8; 65536] = [0; 65536];
+//!
+//! unsafe {
+//!     vPortDefineHeapRegions(&[
+//!         HeapRegion::new(SRAM.as_mut_ptr(), SRAM.len()),
+//!         HeapRegion::new(PSRAM.as_mut_ptr(), PSRAM.len()),
+//!     ]);
+//! }
 //! ```
 //!
 //! ### alloc (Wrap existing allocator)
@@ -96,8 +124,8 @@ pub struct HeapRegion_t {
 // Allocator Selection via Features
 // =============================================================================
 
-// Priority: heap-4 > alloc > stubs
-// This ensures deterministic behavior when heap-4 is explicitly requested
+// Priority: heap-4 > heap-5 > alloc > stubs
+// This ensures deterministic behavior when a specific heap is explicitly requested
 
 #[cfg(feature = "heap-4")]
 mod heap_4;
@@ -110,10 +138,27 @@ pub use heap_4::*;
 pub use heap_4::FreeRtosAllocator;
 
 // =============================================================================
-// With alloc feature (but NOT heap-4): Use Rust's global allocator
+// heap-5: Multi-region allocator (when heap-4 is not enabled)
 // =============================================================================
 
-#[cfg(all(feature = "alloc", not(feature = "heap-4")))]
+#[cfg(all(feature = "heap-5", not(feature = "heap-4")))]
+mod heap_5;
+
+#[cfg(all(feature = "heap-5", not(feature = "heap-4")))]
+pub use heap_5::*;
+
+#[cfg(all(feature = "heap-5", not(feature = "heap-4")))]
+pub use heap_5::FreeRtosAllocator;
+
+// Re-export HeapRegion type for heap-5 users
+#[cfg(all(feature = "heap-5", not(feature = "heap-4")))]
+pub use heap_5::HeapRegion;
+
+// =============================================================================
+// With alloc feature (but NOT heap-4 or heap-5): Use Rust's global allocator
+// =============================================================================
+
+#[cfg(all(feature = "alloc", not(any(feature = "heap-4", feature = "heap-5"))))]
 mod alloc_impl {
     use core::ffi::c_void;
     use alloc::alloc::{alloc, dealloc, Layout};
@@ -219,14 +264,14 @@ mod alloc_impl {
     }
 }
 
-#[cfg(all(feature = "alloc", not(feature = "heap-4")))]
+#[cfg(all(feature = "alloc", not(any(feature = "heap-4", feature = "heap-5"))))]
 pub use alloc_impl::*;
 
 // =============================================================================
 // Without any heap feature: Stub implementations that panic
 // =============================================================================
 
-#[cfg(not(any(feature = "heap-4", feature = "alloc")))]
+#[cfg(not(any(feature = "heap-4", feature = "heap-5", feature = "alloc")))]
 mod stub_impl {
     use core::ffi::c_void;
     use core::ptr;
@@ -279,16 +324,11 @@ mod stub_impl {
     }
 }
 
-#[cfg(not(any(feature = "heap-4", feature = "alloc")))]
+#[cfg(not(any(feature = "heap-4", feature = "heap-5", feature = "alloc")))]
 pub use stub_impl::*;
 
 // =============================================================================
 // Common Functions (defined once, use the selected implementation)
 // =============================================================================
 
-/// Define heap regions (for heap_5)
-///
-/// [AMENDMENT] Not implemented - use heap_5 feature when available.
-pub fn vPortDefineHeapRegions(_pxHeapRegions: *const HeapRegion_t) {
-    // No-op - heap_5 not yet implemented
-}
+// Note: vPortDefineHeapRegions is provided by heap_5 module when that feature is enabled

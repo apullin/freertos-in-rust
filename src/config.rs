@@ -86,9 +86,9 @@ pub const configUSE_MALLOC_FAILED_HOOK: BaseType_t = 0;
 pub const configSUPPORT_STATIC_ALLOCATION: BaseType_t = 1;
 
 /// Support dynamic allocation (xTaskCreate, etc.)
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub const configSUPPORT_DYNAMIC_ALLOCATION: BaseType_t = 1;
-#[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+#[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
 pub const configSUPPORT_DYNAMIC_ALLOCATION: BaseType_t = 0;
 
 /// Total heap size when using FreeRTOS heap implementations

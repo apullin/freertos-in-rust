@@ -828,7 +828,7 @@ unsafe fn prvCreateIdleTasks() -> BaseType_t {
     // Create the idle task.
     let xReturn: BaseType_t;
 
-    #[cfg(any(feature = "alloc", feature = "heap-4"))]
+    #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     {
         xReturn = xTaskCreate(
             prvIdleTask,
@@ -840,7 +840,7 @@ unsafe fn prvCreateIdleTasks() -> BaseType_t {
         );
     }
 
-    #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+    #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
     {
         // Static allocation required but not yet implemented
         xReturn = pdFAIL;
@@ -871,7 +871,7 @@ unsafe fn prvCreateIdleTasks() -> BaseType_t {
 /// # Returns
 ///
 /// pdPASS if successful, errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY if allocation failed.
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub unsafe fn xTaskCreate(
     pxTaskCode: TaskFunction_t,
     pcName: *const u8,
@@ -3315,7 +3315,7 @@ pub unsafe fn vTaskListTasks(pcWriteBuffer: *mut u8, uxBufferLength: usize) {
     // or alloc if available. For simplicity, we limit to 16 tasks on stack.
     const MAX_STACK_TASKS: usize = 16;
 
-    #[cfg(any(feature = "alloc", feature = "heap-4"))]
+    #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     {
         extern crate alloc;
         use alloc::vec::Vec;
@@ -3350,7 +3350,7 @@ pub unsafe fn vTaskListTasks(pcWriteBuffer: *mut u8, uxBufferLength: usize) {
         }
     }
 
-    #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+    #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
     {
         // Stack-allocated version for no-alloc builds
         let mut pxTaskStatusArray: [crate::types::TaskStatus_t; MAX_STACK_TASKS] =
@@ -3570,7 +3570,7 @@ pub unsafe fn vTaskGetRunTimeStatistics(pcWriteBuffer: *mut u8, uxBufferLength: 
     }
 
     // Allocate array for task status
-    #[cfg(any(feature = "alloc", feature = "heap-4"))]
+    #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     {
         extern crate alloc;
         use alloc::vec::Vec;
@@ -3619,7 +3619,7 @@ pub unsafe fn vTaskGetRunTimeStatistics(pcWriteBuffer: *mut u8, uxBufferLength: 
         }
     }
 
-    #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+    #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
     {
         // Without dynamic allocation, use a fixed-size array on the stack
         const MAX_STACK_TASKS: usize = 16;

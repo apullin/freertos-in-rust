@@ -197,7 +197,7 @@ pub struct xQUEUE {
     pub cTxLock: i8,
 
     /// Set to pdTRUE if statically allocated
-    #[cfg(any(feature = "alloc", feature = "heap-4"))]
+    #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     pub ucStaticallyAllocated: u8,
 
     /// Pointer to the queue set this queue/semaphore belongs to (if any)
@@ -425,7 +425,7 @@ pub unsafe fn xQueueGenericCreateStatic(
         /* The address of a statically allocated queue was passed in, use it. */
         pxNewQueue = pxStaticQueue as *mut Queue_t;
 
-        #[cfg(any(feature = "alloc", feature = "heap-4"))]
+        #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
         {
             /* Queues can be allocated either statically or dynamically, so
              * note this queue was allocated statically in case the queue is
@@ -479,7 +479,7 @@ pub unsafe fn xQueueGenericGetStaticBuffers(
     configASSERT(!pxQueue.is_null());
     configASSERT(!ppxStaticQueue.is_null());
 
-    #[cfg(any(feature = "alloc", feature = "heap-4"))]
+    #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     {
         // Check if the queue was statically allocated.
         if (*pxQueue).ucStaticallyAllocated == pdTRUE as u8 {
@@ -494,7 +494,7 @@ pub unsafe fn xQueueGenericGetStaticBuffers(
         }
     }
 
-    #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+    #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
     {
         // Queue must have been statically allocated.
         if !ppucQueueStorage.is_null() {
@@ -519,7 +519,7 @@ pub unsafe fn xQueueGenericGetStaticBuffers(
 /// # Safety
 ///
 /// Requires the `alloc` feature for dynamic allocation
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub unsafe fn xQueueGenericCreate(
     uxQueueLength: UBaseType_t,
     uxItemSize: UBaseType_t,
@@ -579,7 +579,7 @@ pub unsafe fn xQueueGenericCreate(
 // =============================================================================
 
 /// Create a queue (wrapper for xQueueGenericCreate)
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 pub unsafe fn xQueueCreate(uxQueueLength: UBaseType_t, uxItemSize: UBaseType_t) -> QueueHandle_t {
     xQueueGenericCreate(uxQueueLength, uxItemSize, queueQUEUE_TYPE_BASE)
@@ -619,7 +619,7 @@ unsafe fn prvCopyDataToQueue(
 
     if (*pxQueue).uxItemSize == 0 {
         /* This is a mutex - handle priority inheritance */
-        #[cfg(any(feature = "alloc", feature = "heap-4"))] // configUSE_MUTEXES
+        #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))] // configUSE_MUTEXES
         {
             if (*pxQueue).pcHead.is_null() {
                 /* Queue is being used as a mutex */
@@ -1274,7 +1274,7 @@ pub unsafe fn uxQueueMessagesWaitingFromISR(xQueue: QueueHandle_t) -> UBaseType_
 /// memory, only resets the queue.
 ///
 /// [ORIGINAL C] void vQueueDelete( QueueHandle_t xQueue )
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub unsafe fn vQueueDelete(xQueue: QueueHandle_t) {
     let pxQueue = xQueue as *mut Queue_t;
 
@@ -1547,11 +1547,11 @@ fn traceTAKE_MUTEX_RECURSIVE(_pxMutex: *mut c_void) {}
 fn traceTAKE_MUTEX_RECURSIVE_FAILED(_pxMutex: *mut c_void) {}
 
 // Counting semaphore trace stubs
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 fn traceENTER_xQueueCreateCountingSemaphore(_uxMaxCount: UBaseType_t, _uxInitialCount: UBaseType_t) {}
 
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 fn traceRETURN_xQueueCreateCountingSemaphore(_xHandle: QueueHandle_t) {}
 
@@ -1639,15 +1639,15 @@ fn traceENTER_uxQueueMessagesWaitingFromISR(_xQueue: QueueHandle_t) {}
 #[inline(always)]
 fn traceRETURN_uxQueueMessagesWaitingFromISR(_uxReturn: UBaseType_t) {}
 
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 fn traceENTER_vQueueDelete(_xQueue: QueueHandle_t) {}
 
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 fn traceRETURN_vQueueDelete() {}
 
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 fn traceQUEUE_DELETE(_pxQueue: *mut c_void) {}
 
@@ -1969,7 +1969,7 @@ pub unsafe fn vQueueWaitForMessageRestricted(
 /// Mutexes support priority inheritance - if a high priority task blocks
 /// on a mutex held by a low priority task, the low priority task inherits
 /// the high priority until it releases the mutex.
-#[cfg(all(any(feature = "alloc", feature = "heap-4"), feature = "use-mutexes"))]
+#[cfg(all(any(feature = "alloc", feature = "heap-4", feature = "heap-5"), feature = "use-mutexes"))]
 pub unsafe fn xQueueCreateMutex(ucQueueType: u8) -> QueueHandle_t {
     let xNewQueue = xQueueGenericCreate(1, 0, ucQueueType);
 
@@ -2232,7 +2232,7 @@ pub unsafe fn xQueueTakeMutexRecursive(
 /// [ORIGINAL C] QueueHandle_t xQueueCreateCountingSemaphore(
 ///                  const UBaseType_t uxMaxCount,
 ///                  const UBaseType_t uxInitialCount )
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub unsafe fn xQueueCreateCountingSemaphore(
     uxMaxCount: UBaseType_t,
     uxInitialCount: UBaseType_t,

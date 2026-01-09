@@ -316,7 +316,7 @@ pub fn xTimerCreateTimerTask() -> BaseType_t {
             // Create the timer task
             // [AMENDMENT] For static allocation, we would call
             // vApplicationGetTimerTaskMemory. For now, use dynamic.
-            #[cfg(any(feature = "alloc", feature = "heap-4"))]
+            #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
             {
                 xReturn = xTaskCreate(
                     prvTimerTask,
@@ -328,7 +328,7 @@ pub fn xTimerCreateTimerTask() -> BaseType_t {
                 );
             }
 
-            #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+            #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
             {
                 // Static allocation requires user to provide memory
                 // via vApplicationGetTimerTaskMemory
@@ -356,7 +356,7 @@ pub fn xTimerCreateTimerTask() -> BaseType_t {
 ///
 /// # Returns
 /// Handle to the timer, or NULL on failure
-#[cfg(any(feature = "alloc", feature = "heap-4"))]
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub fn xTimerCreate(
     pcTimerName: *const u8,
     xTimerPeriodInTicks: TickType_t,
@@ -1240,7 +1240,7 @@ fn prvProcessReceivedCommands() {
 
                         x if x == tmrCOMMAND_DELETE => {
                             // Delete timer
-                            #[cfg(any(feature = "alloc", feature = "heap-4"))]
+                            #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
                             {
                                 if ((*pxTimer).ucStatus & tmrSTATUS_IS_STATICALLY_ALLOCATED) == 0 {
                                     vPortFree(pxTimer as *mut c_void);
@@ -1248,7 +1248,7 @@ fn prvProcessReceivedCommands() {
                                     (*pxTimer).ucStatus &= !tmrSTATUS_IS_ACTIVE;
                                 }
                             }
-                            #[cfg(not(any(feature = "alloc", feature = "heap-4")))]
+                            #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
                             {
                                 (*pxTimer).ucStatus &= !tmrSTATUS_IS_ACTIVE;
                             }

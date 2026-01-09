@@ -821,11 +821,9 @@ pub fn xTimerPendFunctionCallFromISR(
 
     let mut xMessage: DaemonTaskMessage_t = unsafe { core::mem::zeroed() };
     xMessage.xMessageID = tmrCOMMAND_EXECUTE_CALLBACK_FROM_ISR;
-    unsafe {
-        xMessage.u.xCallbackParameters.pxCallbackFunction = xFunctionToPend;
-        xMessage.u.xCallbackParameters.pvParameter1 = pvParameter1;
-        xMessage.u.xCallbackParameters.ulParameter2 = ulParameter2;
-    }
+    xMessage.u.xCallbackParameters.pxCallbackFunction = xFunctionToPend;
+    xMessage.u.xCallbackParameters.pvParameter1 = pvParameter1;
+    xMessage.u.xCallbackParameters.ulParameter2 = ulParameter2;
 
     let xReturn = unsafe {
         xQueueSendFromISR(
@@ -857,11 +855,9 @@ pub fn xTimerPendFunctionCall(
 
     let mut xMessage: DaemonTaskMessage_t = unsafe { core::mem::zeroed() };
     xMessage.xMessageID = tmrCOMMAND_EXECUTE_CALLBACK;
-    unsafe {
-        xMessage.u.xCallbackParameters.pxCallbackFunction = xFunctionToPend;
-        xMessage.u.xCallbackParameters.pvParameter1 = pvParameter1;
-        xMessage.u.xCallbackParameters.ulParameter2 = ulParameter2;
-    }
+    xMessage.u.xCallbackParameters.pxCallbackFunction = xFunctionToPend;
+    xMessage.u.xCallbackParameters.pvParameter1 = pvParameter1;
+    xMessage.u.xCallbackParameters.ulParameter2 = ulParameter2;
 
     let xReturn = unsafe {
         xQueueSendToBack(

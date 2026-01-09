@@ -667,14 +667,12 @@ pub fn xEventGroupSetBitsFromISR(
 
     traceEVENT_GROUP_SET_BITS_FROM_ISR(xEventGroup as *mut c_void, uxBitsToSet as UBaseType_t);
 
-    let xReturn = unsafe {
-        xTimerPendFunctionCallFromISR(
-            vEventGroupSetBitsCallback,
-            xEventGroup as *mut c_void,
-            uxBitsToSet as u32,
-            pxHigherPriorityTaskWoken,
-        )
-    };
+    let xReturn = xTimerPendFunctionCallFromISR(
+        vEventGroupSetBitsCallback,
+        xEventGroup as *mut c_void,
+        uxBitsToSet as u32,
+        pxHigherPriorityTaskWoken,
+    );
 
     traceRETURN_xEventGroupSetBitsFromISR(xReturn);
 
@@ -693,14 +691,12 @@ pub fn xEventGroupClearBitsFromISR(
 
     traceEVENT_GROUP_CLEAR_BITS_FROM_ISR(xEventGroup as *mut c_void, uxBitsToClear as UBaseType_t);
 
-    let xReturn = unsafe {
-        xTimerPendFunctionCallFromISR(
-            vEventGroupClearBitsCallback,
-            xEventGroup as *mut c_void,
-            uxBitsToClear as u32,
-            ptr::null_mut(),
-        )
-    };
+    let xReturn = xTimerPendFunctionCallFromISR(
+        vEventGroupClearBitsCallback,
+        xEventGroup as *mut c_void,
+        uxBitsToClear as u32,
+        ptr::null_mut(),
+    );
 
     traceRETURN_xEventGroupClearBitsFromISR(xReturn);
 

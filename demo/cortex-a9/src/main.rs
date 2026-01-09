@@ -44,10 +44,15 @@ const UART_DR: usize = UART0_BASE + 0x00; // Data Register
 const UART_FR: usize = UART0_BASE + 0x18; // Flag Register
 
 /// SP804 Timer base address
+#[allow(dead_code)]
 const TIMER0_BASE: usize = 0x1001_1000;
+#[allow(dead_code)]
 const TIMER_LOAD: usize = TIMER0_BASE + 0x00;
+#[allow(dead_code)]
 const TIMER_VALUE: usize = TIMER0_BASE + 0x04;
+#[allow(dead_code)]
 const TIMER_CONTROL: usize = TIMER0_BASE + 0x08;
+#[allow(dead_code)]
 const TIMER_INTCLR: usize = TIMER0_BASE + 0x0C;
 
 /// GIC (Generic Interrupt Controller)
@@ -61,9 +66,13 @@ const GICD_IPRIORITYR: usize = GIC_DIST_BASE + 0x400;
 const GICD_ITARGETSR: usize = GIC_DIST_BASE + 0x800;
 
 // GIC CPU Interface registers
+#[allow(dead_code)]
 const GICC_CTLR: usize = GIC_CPU_BASE + 0x00;
+#[allow(dead_code)]
 const GICC_PMR: usize = GIC_CPU_BASE + 0x04;
+#[allow(dead_code)]
 const GICC_IAR: usize = GIC_CPU_BASE + 0x0C;
+#[allow(dead_code)]
 const GICC_EOIR: usize = GIC_CPU_BASE + 0x10;
 
 /// Timer interrupt ID (SP804 timer 0 on vexpress-a9)
@@ -115,6 +124,7 @@ fn println(s: &str) {
 }
 
 /// Print a number in decimal
+#[allow(dead_code)]
 fn print_num(mut n: u32) {
     if n == 0 {
         uart_putc(b'0');

@@ -59,6 +59,9 @@
 #![allow(dead_code)] // During development
 #![allow(static_mut_refs)] // TODO: Migrate to raw pointers for Rust 2024
 
+#[cfg(all(feature = "smp", not(feature = "port-cortex-a9")))]
+compile_error!("the experimental SMP scaffolding currently supports only port-cortex-a9");
+
 #[cfg(not(any(
     feature = "port-cortex-m0",
     feature = "port-cortex-m3",

@@ -8,6 +8,9 @@ publish = false
 name = "smoke"
 path = "src/bin/smoke.rs"
 
+[features]
+smp = ["freertos-in-rust/smp"]
+
 [dependencies]
 freertos-in-rust = { path = "../../..", default-features = false, features = [
     "port-cortex-a9",

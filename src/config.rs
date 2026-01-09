@@ -103,8 +103,12 @@ pub const configMAX_TASK_NAME_LEN: usize = 16;
 // =============================================================================
 
 /// Number of cores (1 = single core, >1 = SMP)
-/// \[AMENDMENT\] Currently only single-core is supported. TODO: SMP support.
+/// \[AMENDMENT\] The experimental `smp` branch fixes this at two Cortex-A9
+/// cores. The qualified 0.3 single-core configuration remains one core.
+#[cfg(not(feature = "smp"))]
 pub const configNUMBER_OF_CORES: BaseType_t = 1;
+#[cfg(feature = "smp")]
+pub const configNUMBER_OF_CORES: BaseType_t = 2;
 
 // =============================================================================
 // Hook Functions
@@ -397,6 +401,9 @@ pub const configUSE_POSIX_ERRNO: BaseType_t = 0;
 pub const configUSE_PORT_OPTIMISED_TASK_SELECTION: BaseType_t = 0;
 
 /// Enable core affinity (SMP only)
+#[cfg(feature = "core-affinity")]
+pub const configUSE_CORE_AFFINITY: BaseType_t = 1;
+#[cfg(not(feature = "core-affinity"))]
 pub const configUSE_CORE_AFFINITY: BaseType_t = 0;
 
 /// Enable per-task preemption disable

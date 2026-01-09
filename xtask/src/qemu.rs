@@ -192,6 +192,8 @@ fn build_firmware(
             .arg("--no-default-features")
             .arg("--features")
             .arg("static-only");
+    } else if suite == "smp" {
+        command.arg("--features").arg("smp");
     } else if suite == "tickless" {
         command.arg("--features").arg("tickless");
     }
@@ -374,7 +376,7 @@ impl Platform {
                     1
                 },
                 maximum_cpus: if arch == Architecture::CortexA9Smp {
-                    4
+                    2
                 } else {
                     1
                 },
@@ -491,6 +493,7 @@ mod tests {
         assert!(rendered.contains("vexpress-a9"));
         assert!(rendered.contains("-smp"));
         assert!(rendered.contains('2'));
+        assert_eq!(platform.maximum_cpus, 2);
     }
 
     #[test]

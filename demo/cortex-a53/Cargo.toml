@@ -16,7 +16,7 @@ tickless-idle = ["freertos-in-rust/tickless-idle"]
 
 # Full feature set including tickless-idle
 [dependencies]
-freertos-in-rust = { path = "../..", features = [
+freertos-in-rust = { path = "../..", default-features = false, features = [
     "port-cortex-a53",
     "use-mutexes",
     "timers",

@@ -17,10 +17,11 @@ keywords = ["rtos", "embedded", "no-std", "freertos"]
 categories = ["embedded", "no-std", "concurrency"]
 
 [features]
-default = ["port-dummy", "tick-32bit", "arch-32bit"]
+default = []
 
 # Port selection (exactly one should be enabled)
-port-dummy = []
+# Each port specifies its arch width and tick width
+port-dummy = ["arch-32bit", "tick-32bit"]  # For testing only
 port-cortex-m0 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-cortex-m3 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-cortex-m4f = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]

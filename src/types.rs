@@ -18,13 +18,37 @@
 //! - `TickType_t` - Tick counter type
 //!
 //! ## Architecture Width
-//! - `arch-32bit` feature: 32-bit types (default)
+//! - `arch-32bit` feature: 32-bit types
 //! - `arch-64bit` feature: 64-bit types
 //!
 //! ## Tick Width
 //! - `tick-16bit` feature: 16-bit tick counter
-//! - `tick-32bit` feature: 32-bit tick counter (default)
+//! - `tick-32bit` feature: 32-bit tick counter
 //! - `tick-64bit` feature: 64-bit tick counter
+//!
+//! Exactly one of each category must be enabled.
+
+// =============================================================================
+// Feature validation (compile-time checks)
+// =============================================================================
+
+// Ensure exactly one arch is selected
+#[cfg(all(feature = "arch-32bit", feature = "arch-64bit"))]
+compile_error!("Cannot enable both arch-32bit and arch-64bit");
+
+#[cfg(not(any(feature = "arch-32bit", feature = "arch-64bit")))]
+compile_error!("Must enable either arch-32bit or arch-64bit");
+
+// Ensure exactly one tick width is selected
+#[cfg(any(
+    all(feature = "tick-16bit", feature = "tick-32bit"),
+    all(feature = "tick-16bit", feature = "tick-64bit"),
+    all(feature = "tick-32bit", feature = "tick-64bit"),
+))]
+compile_error!("Cannot enable multiple tick width features");
+
+#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+compile_error!("Must enable one of: tick-16bit, tick-32bit, tick-64bit");
 
 // =============================================================================
 // Architecture-dependent types (BaseType_t, UBaseType_t, StackType_t)
@@ -32,7 +56,7 @@
 
 /// Signed base type - architecture word size
 /// Used for boolean returns, error codes, and small signed values.
-#[cfg(not(feature = "arch-64bit"))]
+#[cfg(feature = "arch-32bit")]
 pub type BaseType_t = i32;
 
 #[cfg(feature = "arch-64bit")]
@@ -40,7 +64,7 @@ pub type BaseType_t = i64;
 
 /// Unsigned base type - architecture word size
 /// Used for counts, indices, and priority values.
-#[cfg(not(feature = "arch-64bit"))]
+#[cfg(feature = "arch-32bit")]
 pub type UBaseType_t = u32;
 
 #[cfg(feature = "arch-64bit")]
@@ -48,7 +72,7 @@ pub type UBaseType_t = u64;
 
 /// Stack element type
 /// Each stack "slot" is this size.
-#[cfg(not(feature = "arch-64bit"))]
+#[cfg(feature = "arch-32bit")]
 pub type StackType_t = u32;
 
 #[cfg(feature = "arch-64bit")]
@@ -68,11 +92,11 @@ pub type TickType_t = u16;
 pub const portMAX_DELAY: TickType_t = 0xFFFF;
 
 /// Tick counter type - 32-bit variant (most common)
-#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
+#[cfg(feature = "tick-32bit")]
 pub type TickType_t = u32;
 
 /// Maximum tick value for 32-bit ticks
-#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
+#[cfg(feature = "tick-32bit")]
 pub const portMAX_DELAY: TickType_t = 0xFFFF_FFFF;
 
 /// Tick counter type - 64-bit variant
@@ -99,7 +123,7 @@ pub const TICK_TYPE_WIDTH_64_BITS: u8 = 2;
 #[cfg(feature = "tick-16bit")]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_16_BITS;
 
-#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
+#[cfg(feature = "tick-32bit")]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_32_BITS;
 
 #[cfg(feature = "tick-64bit")]
@@ -149,7 +173,7 @@ pub const errQUEUE_YIELD: BaseType_t = -5;
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A;
 
 /// Integrity check magic value - 32-bit ticks
-#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
+#[cfg(feature = "tick-32bit")]
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A;
 
 /// Integrity check magic value - 64-bit ticks

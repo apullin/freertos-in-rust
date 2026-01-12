@@ -1,5 +1,7 @@
 # FreeRusTOS
 
+[![CI](https://github.com/apullin/freertos-in-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/apullin/freertos-in-rust/actions/workflows/ci.yml)
+
 A line-by-line port of the FreeRTOS kernel from C to Rust.
 
 ## Intent

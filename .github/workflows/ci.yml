@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [master, smp, ci]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-demos:
+    name: Build Demos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            thumbv6m-none-eabi,
+            thumbv7m-none-eabi,
+            thumbv7em-none-eabihf,
+            armv7a-none-eabi,
+            aarch64-unknown-none,
+            riscv32imac-unknown-none-elf
+
+      - name: Build Cortex-M0 demo
+        run: cargo build --release --manifest-path demo/cortex-m0/Cargo.toml
+
+      - name: Build Cortex-M3 demo
+        run: cargo build --release --manifest-path demo/cortex-m3/Cargo.toml
+
+      - name: Build Cortex-M4F demo
+        run: cargo build --release --manifest-path demo/cortex-m4f/Cargo.toml
+
+      - name: Build Cortex-A9 demo
+        run: cargo build --release --manifest-path demo/cortex-a9/Cargo.toml
+
+      - name: Build Cortex-A53 demo
+        run: cargo build --release --manifest-path demo/cortex-a53/Cargo.toml
+
+      - name: Build RISC-V32 demo
+        run: cargo build --release --manifest-path demo/riscv32/Cargo.toml
+
+  # Verify the library builds with various feature combinations
+  check-features:
+    name: Check Feature Combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+
+      - name: Check with heap-4
+        run: cargo check --target thumbv7em-none-eabihf --features "port-cortex-m4f,heap-4"
+
+      - name: Check with heap-5
+        run: cargo check --target thumbv7em-none-eabihf --features "port-cortex-m4f,heap-5"
+
+      - name: Check with all kernel features
+        run: cargo check --target thumbv7em-none-eabihf --features "port-cortex-m4f,heap-4,use-mutexes,timers,task-delete,task-suspend,queue-sets,stream-buffers"
+
+  formatting:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check

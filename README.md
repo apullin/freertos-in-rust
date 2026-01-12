@@ -8,6 +8,65 @@ The goal here is to duplicate the FreeRTOS C implementation in Rust, as closely 
 
 This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The kernel is pure Rust.
 
+## Project Structure
+
+```
+src/
+├── lib.rs              # Crate root, re-exports
+├── config.rs           # FreeRTOSConfig.h equivalent
+├── types.rs            # Base types (BaseType_t, TickType_t, etc.)
+├── kernel/
+│   ├── tasks.rs        # Task management (tasks.c)
+│   ├── queue.rs        # Queues & semaphores (queue.c)
+│   ├── list.rs         # Linked list implementation (list.c)
+│   ├── timers.rs       # Software timers (timers.c)
+│   ├── event_groups.rs # Event groups (event_groups.c)
+│   └── stream_buffer.rs# Stream buffers (stream_buffer.c)
+├── port/
+│   ├── cortex_m4f.rs   # Cortex-M4F port (ARMv7E-M with FPU)
+│   ├── cortex_m7.rs    # Cortex-M7 port (reexports CM4F)
+│   ├── cortex_m3.rs    # Cortex-M3 port (ARMv7-M, no FPU)
+│   ├── cortex_m0.rs    # Cortex-M0/M0+ port (ARMv6-M, Thumb-1)
+│   ├── cortex_a9.rs    # Cortex-A9 port (ARMv7-A, GIC, SWI)
+│   ├── cortex_a53.rs   # Cortex-A53 port (ARMv8-A/AArch64, GIC, SVC)
+│   ├── riscv32.rs      # RISC-V RV32 port (RV32I/RV32IMAC)
+│   └── dummy.rs        # Dummy port for testing
+├── memory/
+│   └── mod.rs          # pvPortMalloc/vPortFree
+└── trace.rs            # Trace macros (no-op by default)
+```
+
+## Configuration
+
+Rust doesn't have header files, so `FreeRTOSConfig.h` is replaced by two mechanisms:
+
+**Boolean flags** (e.g., `#define configUSE_MUTEXES 1`) become Cargo features:
+
+```toml
+[dependencies]
+freertos-in-rust = { version = "0.1", features = [
+    "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7, port-riscv32, port-cortex-a9, port-cortex-a53)
+    "heap-4",             # Allocator: heap_4 (or "heap-5" for multi-region, or "alloc" for external)
+    "use-mutexes",        # configUSE_MUTEXES
+    "timers",             # configUSE_TIMERS
+    "task-delete",        # INCLUDE_vTaskDelete
+    "task-suspend",       # INCLUDE_vTaskSuspend
+] }
+```
+
+See [Memory Allocator](#memory-allocator) for choosing between `heap-4`, `heap-5`, and `alloc`.
+
+**Numeric constants** (e.g., `#define configTOTAL_HEAP_SIZE 10240`) live in `src/config.rs` and are referenced as `crate::config::configTOTAL_HEAP_SIZE`:
+
+```rust
+// src/config.rs
+pub const configMAX_PRIORITIES: UBaseType_t = 5;
+pub const configTICK_RATE_HZ: TickType_t = 1000;
+pub const configTOTAL_HEAP_SIZE: usize = 10240;
+pub const configTIMER_TASK_PRIORITY: UBaseType_t = 2;
+// ... etc
+```
+
 ## Feature Support
 
 | Feature | Status | Notes |
@@ -281,65 +340,6 @@ fn main() {
 For fully static allocation, don't enable any heap feature:
 - Use only `*Static` API variants (e.g., `xTaskCreateStatic`, `xQueueCreateStatic`)
 - `pvPortMalloc` will panic if called
-
-## Project Structure
-
-```
-src/
-├── lib.rs              # Crate root, re-exports
-├── config.rs           # FreeRTOSConfig.h equivalent
-├── types.rs            # Base types (BaseType_t, TickType_t, etc.)
-├── kernel/
-│   ├── tasks.rs        # Task management (tasks.c)
-│   ├── queue.rs        # Queues & semaphores (queue.c)
-│   ├── list.rs         # Linked list implementation (list.c)
-│   ├── timers.rs       # Software timers (timers.c)
-│   ├── event_groups.rs # Event groups (event_groups.c)
-│   └── stream_buffer.rs# Stream buffers (stream_buffer.c)
-├── port/
-│   ├── cortex_m4f.rs   # Cortex-M4F port (ARMv7E-M with FPU)
-│   ├── cortex_m7.rs    # Cortex-M7 port (reexports CM4F)
-│   ├── cortex_m3.rs    # Cortex-M3 port (ARMv7-M, no FPU)
-│   ├── cortex_m0.rs    # Cortex-M0/M0+ port (ARMv6-M, Thumb-1)
-│   ├── cortex_a9.rs    # Cortex-A9 port (ARMv7-A, GIC, SWI)
-│   ├── cortex_a53.rs   # Cortex-A53 port (ARMv8-A/AArch64, GIC, SVC)
-│   ├── riscv32.rs      # RISC-V RV32 port (RV32I/RV32IMAC)
-│   └── dummy.rs        # Dummy port for testing
-├── memory/
-│   └── mod.rs          # pvPortMalloc/vPortFree
-└── trace.rs            # Trace macros (no-op by default)
-```
-
-## Configuration
-
-Rust doesn't have header files, so `FreeRTOSConfig.h` is replaced by two mechanisms:
-
-**Boolean flags** (e.g., `#define configUSE_MUTEXES 1`) become Cargo features:
-
-```toml
-[dependencies]
-freertos-in-rust = { version = "0.1", features = [
-    "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7, port-riscv32, port-cortex-a9, port-cortex-a53)
-    "heap-4",             # Allocator: heap_4 (or "heap-5" for multi-region, or "alloc" for external)
-    "use-mutexes",        # configUSE_MUTEXES
-    "timers",             # configUSE_TIMERS
-    "task-delete",        # INCLUDE_vTaskDelete
-    "task-suspend",       # INCLUDE_vTaskSuspend
-] }
-```
-
-See [Memory Allocator](#memory-allocator) for choosing between `heap-4`, `heap-5`, and `alloc`.
-
-**Numeric constants** (e.g., `#define configTOTAL_HEAP_SIZE 10240`) live in `src/config.rs` and are referenced as `crate::config::configTOTAL_HEAP_SIZE`:
-
-```rust
-// src/config.rs
-pub const configMAX_PRIORITIES: UBaseType_t = 5;
-pub const configTICK_RATE_HZ: TickType_t = 1000;
-pub const configTOTAL_HEAP_SIZE: usize = 10240;
-pub const configTIMER_TASK_PRIORITY: UBaseType_t = 2;
-// ... etc
-```
 
 ## TODOs
 

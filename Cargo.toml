@@ -12,7 +12,7 @@ edition = "2021"
 authors = ["FreeRusTOS Contributors"]
 description = "FreeRTOS kernel ported to Rust - no_std, no C FFI"
 license = "MIT"
-repository = "https://github.com/anthropics/FreeRTOS-in-rust"
+repository = "https://github.com/apullin/freertos-in-rust"
 keywords = ["rtos", "embedded", "no-std", "freertos"]
 categories = ["embedded", "no-std", "concurrency"]
 

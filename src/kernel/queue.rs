@@ -352,7 +352,6 @@ unsafe fn prvInitialiseNewQueue(
     #[allow(unused_variables)] ucQueueType: u8,
     pxNewQueue: *mut Queue_t,
 ) {
-
     if uxItemSize == 0 {
         /* No RAM was allocated for the queue storage area, but PC head cannot
          * be set to NULL because NULL is used as a key to say the queue is used as
@@ -1549,7 +1548,11 @@ fn traceTAKE_MUTEX_RECURSIVE_FAILED(_pxMutex: *mut c_void) {}
 // Counting semaphore trace stubs
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
-fn traceENTER_xQueueCreateCountingSemaphore(_uxMaxCount: UBaseType_t, _uxInitialCount: UBaseType_t) {}
+fn traceENTER_xQueueCreateCountingSemaphore(
+    _uxMaxCount: UBaseType_t,
+    _uxInitialCount: UBaseType_t,
+) {
+}
 
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
@@ -1574,7 +1577,11 @@ fn traceCREATE_COUNTING_SEMAPHORE_FAILED() {}
 
 // ISR trace stubs
 #[inline(always)]
-fn traceENTER_xQueueGiveFromISR(_xQueue: QueueHandle_t, _pxHigherPriorityTaskWoken: *mut BaseType_t) {}
+fn traceENTER_xQueueGiveFromISR(
+    _xQueue: QueueHandle_t,
+    _pxHigherPriorityTaskWoken: *mut BaseType_t,
+) {
+}
 
 #[inline(always)]
 fn traceRETURN_xQueueGiveFromISR(_xReturn: BaseType_t) {}
@@ -1587,7 +1594,8 @@ fn traceQUEUE_SEND_FROM_ISR_FAILED(_pxQueue: *mut c_void) {}
 
 // Peek trace stubs
 #[inline(always)]
-fn traceENTER_xQueuePeek(_pxQueue: *mut c_void, _pvBuffer: *mut c_void, _xTicksToWait: TickType_t) {}
+fn traceENTER_xQueuePeek(_pxQueue: *mut c_void, _pvBuffer: *mut c_void, _xTicksToWait: TickType_t) {
+}
 
 #[inline(always)]
 fn traceRETURN_xQueuePeek(_xReturn: BaseType_t) {}
@@ -1732,7 +1740,12 @@ pub unsafe fn xQueueSendToBackFromISR(
     pvItemToQueue: *const c_void,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) -> BaseType_t {
-    xQueueGenericSendFromISR(xQueue, pvItemToQueue, pxHigherPriorityTaskWoken, queueSEND_TO_BACK)
+    xQueueGenericSendFromISR(
+        xQueue,
+        pvItemToQueue,
+        pxHigherPriorityTaskWoken,
+        queueSEND_TO_BACK,
+    )
 }
 
 /// Send an item to a queue from an ISR (same as xQueueSendToBackFromISR)
@@ -1969,7 +1982,10 @@ pub unsafe fn vQueueWaitForMessageRestricted(
 /// Mutexes support priority inheritance - if a high priority task blocks
 /// on a mutex held by a low priority task, the low priority task inherits
 /// the high priority until it releases the mutex.
-#[cfg(all(any(feature = "alloc", feature = "heap-4", feature = "heap-5"), feature = "use-mutexes"))]
+#[cfg(all(
+    any(feature = "alloc", feature = "heap-4", feature = "heap-5"),
+    feature = "use-mutexes"
+))]
 pub unsafe fn xQueueCreateMutex(ucQueueType: u8) -> QueueHandle_t {
     let xNewQueue = xQueueGenericCreate(1, 0, ucQueueType);
 
@@ -2032,7 +2048,12 @@ unsafe fn prvInitialiseMutex(pxNewQueue: *mut Queue_t) {
         (*pxNewQueue).pcHead = ptr::null_mut();
 
         // Give the mutex initially (it starts available)
-        xQueueGenericSend(pxNewQueue as QueueHandle_t, ptr::null(), 0, queueSEND_TO_BACK);
+        xQueueGenericSend(
+            pxNewQueue as QueueHandle_t,
+            ptr::null(),
+            0,
+            queueSEND_TO_BACK,
+        );
 
         traceCREATE_MUTEX(pxNewQueue as *mut c_void);
     } else {
@@ -2148,10 +2169,7 @@ pub unsafe fn xQueueGiveMutexRecursive(xMutex: QueueHandle_t) -> BaseType_t {
 ///
 /// This wraps xQueueReceive with mutex-specific handling for priority inheritance.
 #[inline(always)]
-pub unsafe fn xQueueSemaphoreTake(
-    xQueue: QueueHandle_t,
-    xTicksToWait: TickType_t,
-) -> BaseType_t {
+pub unsafe fn xQueueSemaphoreTake(xQueue: QueueHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
     let pxQueue = xQueue as *mut Queue_t;
 
     // For mutexes (pcHead == NULL), we need to handle priority inheritance
@@ -2180,7 +2198,7 @@ pub unsafe fn xQueueTakeMutexRecursive(
     xMutex: QueueHandle_t,
     xTicksToWait: TickType_t,
 ) -> BaseType_t {
-    use crate::kernel::tasks::{xTaskGetCurrentTaskHandle, pvTaskIncrementMutexHeldCount};
+    use crate::kernel::tasks::{pvTaskIncrementMutexHeldCount, xTaskGetCurrentTaskHandle};
 
     let xReturn: BaseType_t;
     let pxMutex = xMutex as *mut Queue_t;
@@ -2244,7 +2262,11 @@ pub unsafe fn xQueueCreateCountingSemaphore(
     configASSERT(uxMaxCount != 0);
     configASSERT(uxInitialCount <= uxMaxCount);
 
-    xHandle = xQueueGenericCreate(uxMaxCount, queueSEMAPHORE_QUEUE_ITEM_LENGTH, queueQUEUE_TYPE_COUNTING_SEMAPHORE);
+    xHandle = xQueueGenericCreate(
+        uxMaxCount,
+        queueSEMAPHORE_QUEUE_ITEM_LENGTH,
+        queueQUEUE_TYPE_COUNTING_SEMAPHORE,
+    );
 
     if !xHandle.is_null() {
         let pxQueue = xHandle as *mut Queue_t;
@@ -2335,7 +2357,8 @@ unsafe fn prvNotifyQueueSetContainer(pxQueue: *const Queue_t) -> BaseType_t {
 
         if cTxLock == queueUNLOCKED {
             if listLIST_IS_EMPTY(&(*pxQueueSetContainer).xTasksWaitingToReceive) == pdFALSE {
-                if xTaskRemoveFromEventList(&(*pxQueueSetContainer).xTasksWaitingToReceive) != pdFALSE
+                if xTaskRemoveFromEventList(&(*pxQueueSetContainer).xTasksWaitingToReceive)
+                    != pdFALSE
                 {
                     // The task waiting has a higher priority.
                     xReturn = pdTRUE;

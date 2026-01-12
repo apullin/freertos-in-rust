@@ -204,7 +204,9 @@ extern "C" fn prvTaskExitError() -> ! {
     // A task should never return from its function
     portDISABLE_INTERRUPTS();
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
     }
 }
 
@@ -366,56 +368,51 @@ unsafe extern "C" fn vRestoreContextOfFirstTask() -> ! {
     core::arch::asm!(
         // Load pxCurrentTCB
         "la t1, pxCurrentTCB",
-        "lw sp, 0(t1)",      // sp = pxCurrentTCB
-        "lw sp, 0(sp)",      // sp = pxCurrentTCB->pxTopOfStack
-
+        "lw sp, 0(t1)", // sp = pxCurrentTCB
+        "lw sp, 0(sp)", // sp = pxCurrentTCB->pxTopOfStack
         // Load mepc from stack[0]
         "lw t0, 0(sp)",
         "csrw mepc, t0",
-
         // Load mstatus from stack[1]
         "lw t0, 4(sp)",
         // Set MIE bit so interrupts are enabled after mret
         "ori t0, t0, 0x8",
         "csrw mstatus, t0",
-
         // Load xCriticalNesting from stack[30]
-        "lw t0, 120(sp)",    // 30 * 4 = 120
+        "lw t0, 120(sp)", // 30 * 4 = 120
         "la t1, xCriticalNesting",
         "sw t0, 0(t1)",
-
         // Restore registers
-        "lw x1,   8(sp)",    // ra
-        "lw x5,  12(sp)",    // t0
-        "lw x6,  16(sp)",    // t1
-        "lw x7,  20(sp)",    // t2
-        "lw x8,  24(sp)",    // s0/fp
-        "lw x9,  28(sp)",    // s1
-        "lw x10, 32(sp)",    // a0
-        "lw x11, 36(sp)",    // a1
-        "lw x12, 40(sp)",    // a2
-        "lw x13, 44(sp)",    // a3
-        "lw x14, 48(sp)",    // a4
-        "lw x15, 52(sp)",    // a5
-        "lw x16, 56(sp)",    // a6
-        "lw x17, 60(sp)",    // a7
-        "lw x18, 64(sp)",    // s2
-        "lw x19, 68(sp)",    // s3
-        "lw x20, 72(sp)",    // s4
-        "lw x21, 76(sp)",    // s5
-        "lw x22, 80(sp)",    // s6
-        "lw x23, 84(sp)",    // s7
-        "lw x24, 88(sp)",    // s8
-        "lw x25, 92(sp)",    // s9
-        "lw x26, 96(sp)",    // s10
-        "lw x27, 100(sp)",   // s11
-        "lw x28, 104(sp)",   // t3
-        "lw x29, 108(sp)",   // t4
-        "lw x30, 112(sp)",   // t5
-        "lw x31, 116(sp)",   // t6
-
+        "lw x1,   8(sp)",  // ra
+        "lw x5,  12(sp)",  // t0
+        "lw x6,  16(sp)",  // t1
+        "lw x7,  20(sp)",  // t2
+        "lw x8,  24(sp)",  // s0/fp
+        "lw x9,  28(sp)",  // s1
+        "lw x10, 32(sp)",  // a0
+        "lw x11, 36(sp)",  // a1
+        "lw x12, 40(sp)",  // a2
+        "lw x13, 44(sp)",  // a3
+        "lw x14, 48(sp)",  // a4
+        "lw x15, 52(sp)",  // a5
+        "lw x16, 56(sp)",  // a6
+        "lw x17, 60(sp)",  // a7
+        "lw x18, 64(sp)",  // s2
+        "lw x19, 68(sp)",  // s3
+        "lw x20, 72(sp)",  // s4
+        "lw x21, 76(sp)",  // s5
+        "lw x22, 80(sp)",  // s6
+        "lw x23, 84(sp)",  // s7
+        "lw x24, 88(sp)",  // s8
+        "lw x25, 92(sp)",  // s9
+        "lw x26, 96(sp)",  // s10
+        "lw x27, 100(sp)", // s11
+        "lw x28, 104(sp)", // t3
+        "lw x29, 108(sp)", // t4
+        "lw x30, 112(sp)", // t5
+        "lw x31, 116(sp)", // t6
         // Restore sp and return
-        "addi sp, sp, 124",  // portCONTEXT_SIZE_BYTES
+        "addi sp, sp, 124", // portCONTEXT_SIZE_BYTES
         "mret",
         options(noreturn)
     );
@@ -645,9 +642,7 @@ pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
 #[cfg(feature = "generate-run-time-stats")]
 pub fn portGET_RUN_TIME_COUNTER_VALUE() -> u32 {
     // Use MTIME as the run-time counter source
-    unsafe {
-        core::ptr::read_volatile(MTIME_ADDR as *const u32)
-    }
+    unsafe { core::ptr::read_volatile(MTIME_ADDR as *const u32) }
 }
 
 // =============================================================================

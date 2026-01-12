@@ -193,7 +193,6 @@ pub struct tskTaskControlBlock {
     pub pcTaskName: [u8; configMAX_TASK_NAME_LEN],
 
     // --- Optional fields based on config ---
-
     /// Points to the highest valid address for the stack (stack grows down).
     /// Only present if portSTACK_GROWTH > 0 or configRECORD_STACK_HIGH_ADDRESS == 1.
     #[cfg(any(
@@ -304,7 +303,8 @@ impl tskTaskControlBlock {
             iTaskErrno: 0,
 
             #[cfg(feature = "thread-local-storage")]
-            pvThreadLocalStoragePointers: [ptr::null_mut(); configNUM_THREAD_LOCAL_STORAGE_POINTERS],
+            pvThreadLocalStoragePointers: [ptr::null_mut();
+                configNUM_THREAD_LOCAL_STORAGE_POINTERS],
 
             #[cfg(feature = "generate-run-time-stats")]
             ulRunTimeCounter: 0,
@@ -390,7 +390,8 @@ static mut xSchedulerRunning: BaseType_t = pdFALSE;
 static mut xPendedTicks: TickType_t = 0;
 
 /// Yield pending flag (single core).
-static mut xYieldPendings: [BaseType_t; configNUMBER_OF_CORES as usize] = [pdFALSE; configNUMBER_OF_CORES as usize];
+static mut xYieldPendings: [BaseType_t; configNUMBER_OF_CORES as usize] =
+    [pdFALSE; configNUMBER_OF_CORES as usize];
 
 /// Number of tick count overflows.
 static mut xNumOfOverflows: BaseType_t = 0;
@@ -452,7 +453,8 @@ unsafe fn taskSELECT_HIGHEST_PRIORITY_TASK() {
     }
 
     // Get the next task from that priority's list (round-robin within priority).
-    pxCurrentTCB = listGET_OWNER_OF_NEXT_ENTRY(&mut pxReadyTasksLists[uxTopPriority as usize]) as *mut TCB_t;
+    pxCurrentTCB =
+        listGET_OWNER_OF_NEXT_ENTRY(&mut pxReadyTasksLists[uxTopPriority as usize]) as *mut TCB_t;
     uxTopReadyPriority = uxTopPriority;
 }
 
@@ -680,11 +682,7 @@ unsafe fn prvInitialiseNewTask(
 
     // Initialize the stack.
     // pxPortInitialiseStack is provided by the port layer.
-    (*pxNewTCB).pxTopOfStack = pxPortInitialiseStack(
-        pxTopOfStack,
-        pxTaskCode,
-        pvParameters,
-    );
+    (*pxNewTCB).pxTopOfStack = pxPortInitialiseStack(pxTopOfStack, pxTaskCode, pvParameters);
 
     // Return the handle if requested.
     if !pxCreatedTask.is_null() {
@@ -714,7 +712,10 @@ unsafe fn prvAddCurrentTaskToDelayedList(
 
         if xTimeToWake < xConstTickCount {
             // Wake time has overflowed, add to overflow list.
-            vListInsert(pxOverflowDelayedTaskList, &mut (*pxCurrentTCB).xStateListItem);
+            vListInsert(
+                pxOverflowDelayedTaskList,
+                &mut (*pxCurrentTCB).xStateListItem,
+            );
         } else {
             // Add to the delayed list.
             vListInsert(pxDelayedTaskList, &mut (*pxCurrentTCB).xStateListItem);
@@ -883,15 +884,13 @@ pub unsafe fn xTaskCreate(
     let xReturn: BaseType_t;
 
     // Allocate the TCB.
-    let pxNewTCB = crate::memory::pvPortMalloc(
-        core::mem::size_of::<TCB_t>()
-    ) as *mut TCB_t;
+    let pxNewTCB = crate::memory::pvPortMalloc(core::mem::size_of::<TCB_t>()) as *mut TCB_t;
 
     if !pxNewTCB.is_null() {
         // Allocate the stack.
-        let pxStack = crate::memory::pvPortMalloc(
-            uxStackDepth * core::mem::size_of::<StackType_t>()
-        ) as *mut StackType_t;
+        let pxStack =
+            crate::memory::pvPortMalloc(uxStackDepth * core::mem::size_of::<StackType_t>())
+                as *mut StackType_t;
 
         if !pxStack.is_null() {
             (*pxNewTCB).pxStack = pxStack;
@@ -924,8 +923,11 @@ pub unsafe fn xTaskCreate(
 
             // Fill stack with known value for high water mark (if enabled).
             if tskSET_NEW_STACKS_TO_KNOWN_VALUE != 0 {
-                ptr::write_bytes(pxStack as *mut u8, tskSTACK_FILL_BYTE,
-                    uxStackDepth * core::mem::size_of::<StackType_t>());
+                ptr::write_bytes(
+                    pxStack as *mut u8,
+                    tskSTACK_FILL_BYTE,
+                    uxStackDepth * core::mem::size_of::<StackType_t>(),
+                );
             }
 
             // Mark as dynamically allocated.
@@ -1021,8 +1023,11 @@ pub unsafe fn xTaskCreateStatic(
 
         // Fill stack with known value if enabled.
         if tskSET_NEW_STACKS_TO_KNOWN_VALUE != 0 {
-            ptr::write_bytes(puxStackBuffer as *mut u8, tskSTACK_FILL_BYTE,
-                uxStackDepth * core::mem::size_of::<StackType_t>());
+            ptr::write_bytes(
+                puxStackBuffer as *mut u8,
+                tskSTACK_FILL_BYTE,
+                uxStackDepth * core::mem::size_of::<StackType_t>(),
+            );
         }
 
         // Mark as statically allocated.
@@ -1243,10 +1248,7 @@ pub fn xTaskDelayUntil(
 
             if xShouldDelay != pdFALSE {
                 crate::trace::traceTASK_DELAY_UNTIL(xTimeToWake);
-                prvAddCurrentTaskToDelayedList(
-                    xTimeToWake.wrapping_sub(xConstTickCount),
-                    pdFALSE,
-                );
+                prvAddCurrentTaskToDelayedList(xTimeToWake.wrapping_sub(xConstTickCount), pdFALSE);
             }
         }
         xTaskResumeAll();
@@ -1339,7 +1341,10 @@ pub unsafe fn xTaskRemoveFromEventList(pxEventList: *const List_t) -> BaseType_t
         );
     } else {
         // Scheduler is suspended, add to pending ready list.
-        vListInsertEnd(&mut xPendingReadyList, &mut (*pxUnblockedTCB).xEventListItem);
+        vListInsertEnd(
+            &mut xPendingReadyList,
+            &mut (*pxUnblockedTCB).xEventListItem,
+        );
     }
 
     // Return pdTRUE if the unblocked task has higher priority.
@@ -1420,7 +1425,10 @@ pub unsafe fn xTaskRemoveFromUnorderedEventList(
         let _ux = uxListRemove(&mut (*pxUnblockedTCB).xStateListItem);
         prvAddTaskToReadyList(pxUnblockedTCB);
     } else {
-        vListInsertEnd(&mut xPendingReadyList, &mut (*pxUnblockedTCB).xEventListItem);
+        vListInsertEnd(
+            &mut xPendingReadyList,
+            &mut (*pxUnblockedTCB).xEventListItem,
+        );
     }
 
     if (*pxUnblockedTCB).uxPriority > (*pxCurrentTCB).uxPriority {
@@ -1454,7 +1462,8 @@ pub fn uxTaskResetEventItemValue() -> TickType_t {
         // higher priorities have lower item values (for sorted list ordering)
         listSET_LIST_ITEM_VALUE(
             &mut (*pxCurrentTCBLocal).xEventListItem,
-            (configMAX_PRIORITIES as TickType_t).wrapping_sub((*pxCurrentTCBLocal).uxPriority as TickType_t),
+            (configMAX_PRIORITIES as TickType_t)
+                .wrapping_sub((*pxCurrentTCBLocal).uxPriority as TickType_t),
         );
 
         uxReturn
@@ -1559,7 +1568,8 @@ pub fn vTaskPriorityInherit(pxMutexHolder: TaskHandle_t) {
             if (*pxMutexHolderTCB).uxPriority < (*pxCurrentTCB).uxPriority {
                 // Adjust event list item value if in an event list.
                 if (listGET_LIST_ITEM_VALUE(&(*pxMutexHolderTCB).xEventListItem)
-                    & taskEVENT_LIST_ITEM_VALUE_IN_USE) == 0
+                    & taskEVENT_LIST_ITEM_VALUE_IN_USE)
+                    == 0
                 {
                     listSET_LIST_ITEM_VALUE(
                         &mut (*pxMutexHolderTCB).xEventListItem,
@@ -1767,7 +1777,9 @@ pub extern "C" fn xTaskIncrementTick() -> BaseType_t {
 
             // Time slicing within same priority.
             if configUSE_PREEMPTION != 0 {
-                if listCURRENT_LIST_LENGTH(&pxReadyTasksLists[(*pxCurrentTCB).uxPriority as usize]) > 1 {
+                if listCURRENT_LIST_LENGTH(&pxReadyTasksLists[(*pxCurrentTCB).uxPriority as usize])
+                    > 1
+                {
                     xSwitchRequired = pdTRUE;
                 }
             }
@@ -2120,11 +2132,7 @@ const tskDEFAULT_INDEX_TO_NOTIFY: UBaseType_t = 0;
 /// # Returns
 ///
 /// pdPASS on success, pdFAIL if notification couldn't be sent
-pub unsafe fn xTaskNotify(
-    xTaskToNotify: TaskHandle_t,
-    ulValue: u32,
-    eAction: i32,
-) -> BaseType_t {
+pub unsafe fn xTaskNotify(xTaskToNotify: TaskHandle_t, ulValue: u32, eAction: i32) -> BaseType_t {
     xTaskGenericNotify(
         xTaskToNotify,
         tskDEFAULT_INDEX_TO_NOTIFY,
@@ -2277,14 +2285,16 @@ pub unsafe fn xTaskGenericNotifyWait(
         {
             taskENTER_CRITICAL();
             {
-                if (*pxCurrentTCB).ucNotifyState[uxIndexToWait as usize] != taskNOTIFICATION_RECEIVED
+                if (*pxCurrentTCB).ucNotifyState[uxIndexToWait as usize]
+                    != taskNOTIFICATION_RECEIVED
                 {
                     // Clear bits on entry.
                     (*pxCurrentTCB).ulNotifiedValue[uxIndexToWait as usize] &=
                         !ulBitsToClearOnEntry;
 
                     // Mark as waiting for notification.
-                    (*pxCurrentTCB).ucNotifyState[uxIndexToWait as usize] = taskWAITING_NOTIFICATION;
+                    (*pxCurrentTCB).ucNotifyState[uxIndexToWait as usize] =
+                        taskWAITING_NOTIFICATION;
                     xShouldBlock = pdTRUE;
                 }
             }
@@ -2372,10 +2382,7 @@ pub unsafe fn xTaskGenericNotifyFromISR(
         if ucOriginalNotifyState == taskWAITING_NOTIFICATION {
             // If the scheduler is suspended, add to pending ready list.
             if uxSchedulerSuspended != 0 {
-                vListInsertEnd(
-                    &mut xPendingReadyList,
-                    &mut (*pxTCB).xEventListItem,
-                );
+                vListInsertEnd(&mut xPendingReadyList, &mut (*pxTCB).xEventListItem);
             } else {
                 let _ = uxListRemove(&mut (*pxTCB).xStateListItem);
                 prvAddTaskToReadyList(pxTCB);
@@ -2466,10 +2473,7 @@ pub type TaskHookFunction_t = Option<extern "C" fn(*mut c_void) -> BaseType_t>;
 /// * `xTask` - Handle of the task, or NULL for the calling task
 /// * `pxHookFunction` - Function pointer to store, or None to clear
 #[cfg(feature = "application-task-tag")]
-pub unsafe fn vTaskSetApplicationTaskTag(
-    xTask: TaskHandle_t,
-    pxHookFunction: TaskHookFunction_t,
-) {
+pub unsafe fn vTaskSetApplicationTaskTag(xTask: TaskHandle_t, pxHookFunction: TaskHookFunction_t) {
     let pxTCB: *mut TCB_t;
 
     // If xTask is null, use the current task.
@@ -3324,19 +3328,16 @@ pub unsafe fn vTaskListTasks(pcWriteBuffer: *mut u8, uxBufferLength: usize) {
             Vec::with_capacity(uxArraySize as usize);
         pxTaskStatusArray.resize_with(uxArraySize as usize, crate::types::TaskStatus_t::new);
 
-        let uxTasksReturned = uxTaskGetSystemState(
-            pxTaskStatusArray.as_mut_ptr(),
-            uxArraySize,
-            ptr::null_mut(),
-        );
+        let uxTasksReturned =
+            uxTaskGetSystemState(pxTaskStatusArray.as_mut_ptr(), uxArraySize, ptr::null_mut());
 
         // Write each task
         for i in 0..uxTasksReturned as usize {
             let pxTaskStatus = &pxTaskStatusArray[i];
             let name = prvGetTaskNameFromPtr(pxTaskStatus.pcTaskName);
-            let state_char = prvGetTaskStateChar(
-                core::mem::transmute::<u8, eTaskState>(pxTaskStatus.eCurrentState),
-            );
+            let state_char = prvGetTaskStateChar(core::mem::transmute::<u8, eTaskState>(
+                pxTaskStatus.eCurrentState,
+            ));
 
             let _ = writeln!(
                 writer,
@@ -3372,9 +3373,9 @@ pub unsafe fn vTaskListTasks(pcWriteBuffer: *mut u8, uxBufferLength: usize) {
         for i in 0..uxTasksReturned as usize {
             let pxTaskStatus = &pxTaskStatusArray[i];
             let name = prvGetTaskNameFromPtr(pxTaskStatus.pcTaskName);
-            let state_char = prvGetTaskStateChar(
-                core::mem::transmute::<u8, eTaskState>(pxTaskStatus.eCurrentState),
-            );
+            let state_char = prvGetTaskStateChar(core::mem::transmute::<u8, eTaskState>(
+                pxTaskStatus.eCurrentState,
+            ));
 
             let _ = writeln!(
                 writer,
@@ -3550,11 +3551,7 @@ pub unsafe fn vTaskGetRunTimeStatistics(pcWriteBuffer: *mut u8, uxBufferLength: 
     let mut writer = BufferWriter::new(buffer);
 
     // Write header
-    let _ = writeln!(
-        writer,
-        "{:<16} {:>12} {:>8}",
-        "Name", "Abs. Time", "% Time"
-    );
+    let _ = writeln!(writer, "{:<16} {:>12} {:>8}", "Name", "Abs. Time", "% Time");
 
     // Get the number of tasks
     let uxArraySize = uxTaskGetNumberOfTasks();

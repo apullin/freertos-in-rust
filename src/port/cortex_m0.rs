@@ -313,27 +313,21 @@ pub extern "C" fn vPortSVCHandler_C(_pulCallerStackAddress: *mut u32) {
 pub unsafe extern "C" fn vRestoreContextOfFirstTask() {
     naked_asm!(
         ".syntax unified",
-
         // Get pxCurrentTCB address
         "ldr r2, =pxCurrentTCB",
-        "ldr r1, [r2]",           // r1 = pxCurrentTCB
-        "ldr r0, [r1]",           // r0 = pxCurrentTCB->pxTopOfStack
-
+        "ldr r1, [r2]", // r1 = pxCurrentTCB
+        "ldr r0, [r1]", // r0 = pxCurrentTCB->pxTopOfStack
         // Pop EXC_RETURN into r2
-        "ldm r0!, {{r2}}",        // r2 = EXC_RETURN
-
+        "ldm r0!, {{r2}}", // r2 = EXC_RETURN
         // Set CONTROL register to use PSP in thread mode
         "movs r1, #2",
         "msr CONTROL, r1",
-
         // Discard r4-r11 from stack (we skip restoring them as they're not used yet)
         // Stack currently has: [EXC_RETURN already popped] r4-r7, r8-r11
-        "adds r0, #32",           // Skip 8 registers (32 bytes)
-
+        "adds r0, #32", // Skip 8 registers (32 bytes)
         // Set PSP to point to hardware-saved context (r0, r1, r2, r3, r12, lr, pc, xpsr)
         "msr psp, r0",
         "isb",
-
         // Return to thread mode using the EXC_RETURN in r2
         "bx r2",
     );
@@ -350,20 +344,20 @@ global_asm!(
     "mrs r0, psp",
     // Get pxCurrentTCB address
     "ldr r2, =pxCurrentTCB",
-    "ldr r1, [r2]",           // r1 = pxCurrentTCB
+    "ldr r1, [r2]", // r1 = pxCurrentTCB
     // Make space on stack for LR(EXC_RETURN) + r4-r11 = 9 words = 36 bytes
     "subs r0, r0, #36",
     // Save new top of stack into TCB
     "str r0, [r1]",
     // Save LR (EXC_RETURN) and r4-r7
-    "mov r3, lr",             // r3 = EXC_RETURN
-    "stmia r0!, {{r3-r7}}",   // Store EXC_RETURN, r4, r5, r6, r7
+    "mov r3, lr",           // r3 = EXC_RETURN
+    "stmia r0!, {{r3-r7}}", // Store EXC_RETURN, r4, r5, r6, r7
     // Move r8-r11 to r4-r7, then store
     "mov r4, r8",
     "mov r5, r9",
     "mov r6, r10",
     "mov r7, r11",
-    "stmia r0!, {{r4-r7}}",   // Store r8-r11 (via r4-r7)
+    "stmia r0!, {{r4-r7}}", // Store r8-r11 (via r4-r7)
     // Disable interrupts during context switch
     "cpsid i",
     // Call vTaskSwitchContext to select next task
@@ -372,10 +366,10 @@ global_asm!(
     "cpsie i",
     // Get new task's TCB
     "ldr r2, =pxCurrentTCB",
-    "ldr r1, [r2]",           // r1 = new pxCurrentTCB
-    "ldr r0, [r1]",           // r0 = new pxCurrentTCB->pxTopOfStack
+    "ldr r1, [r2]", // r1 = new pxCurrentTCB
+    "ldr r0, [r1]", // r0 = new pxCurrentTCB->pxTopOfStack
     // Move past EXC_RETURN and r4-r7 to get to r8-r11
-    "adds r0, r0, #20",       // Skip 5 words (20 bytes)
+    "adds r0, r0, #20", // Skip 5 words (20 bytes)
     // Restore r8-r11 from stack (load into r4-r7, move to r8-r11)
     "ldmia r0!, {{r4-r7}}",
     "mov r8, r4",
@@ -386,7 +380,7 @@ global_asm!(
     "msr psp, r0",
     // Go back to start of saved context to restore EXC_RETURN and r4-r7
     "subs r0, r0, #36",
-    "ldmia r0!, {{r3-r7}}",   // r3 = EXC_RETURN, r4-r7 restored
+    "ldmia r0!, {{r3-r7}}", // r3 = EXC_RETURN, r4-r7 restored
     // Return using EXC_RETURN in r3
     "bx r3",
 );
@@ -453,20 +447,16 @@ pub extern "C" fn xPortSysTickHandler() {
 unsafe extern "C" fn prvPortStartFirstTask() {
     naked_asm!(
         ".syntax unified",
-
         // Don't reset MSP via VTOR as VTOR is optional on CM0/CM0+
 
         // Enable interrupts
         "cpsie i",
-
         // Synchronization barriers
         "dsb",
         "isb",
-
         // Trigger SVC to start the first task
         // SVC number 0 = start scheduler
         "svc #0",
-
         // Should never get here
         "nop",
     );
@@ -718,13 +708,12 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
                 let current_value = core::ptr::read_volatile(SYST_CVR);
                 let calc = (ulTimerCountsForOneTick - 1)
                     .wrapping_sub(ulReloadValue.wrapping_sub(current_value));
-                let ulCalculatedLoadValue = if calc <= ulStoppedTimerCompensation
-                    || calc > ulTimerCountsForOneTick
-                {
-                    ulTimerCountsForOneTick - 1
-                } else {
-                    calc
-                };
+                let ulCalculatedLoadValue =
+                    if calc <= ulStoppedTimerCompensation || calc > ulTimerCountsForOneTick {
+                        ulTimerCountsForOneTick - 1
+                    } else {
+                        calc
+                    };
                 core::ptr::write_volatile(SYST_RVR, ulCalculatedLoadValue);
                 ulCompleteTickPeriods = xExpectedIdleTime as u32 - 1;
             } else {
@@ -759,4 +748,3 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 pub fn vPortSuppressTicksAndSleep(_xExpectedIdleTime: TickType_t) {
     // No-op when tickless idle is disabled
 }
-

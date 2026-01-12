@@ -46,37 +46,34 @@ use crate::types::*;
 
 // Import trace macros (exported at crate root via #[macro_export])
 use crate::{
-    traceENTER_xTimerCreateTimerTask, traceRETURN_xTimerCreateTimerTask,
-    traceENTER_xTimerCreate, traceRETURN_xTimerCreate,
-    traceENTER_xTimerCreateStatic, traceRETURN_xTimerCreateStatic,
-    traceENTER_xTimerGenericCommandFromTask, traceRETURN_xTimerGenericCommandFromTask,
-    traceENTER_xTimerGenericCommandFromISR, traceRETURN_xTimerGenericCommandFromISR,
-    traceTIMER_COMMAND_SEND,
-    traceENTER_xTimerGetTimerDaemonTaskHandle, traceRETURN_xTimerGetTimerDaemonTaskHandle,
-    traceENTER_xTimerGetPeriod, traceRETURN_xTimerGetPeriod,
-    traceENTER_vTimerSetReloadMode, traceRETURN_vTimerSetReloadMode,
-    traceENTER_xTimerGetReloadMode, traceRETURN_xTimerGetReloadMode,
-    traceENTER_uxTimerGetReloadMode, traceRETURN_uxTimerGetReloadMode,
-    traceENTER_xTimerGetExpiryTime, traceRETURN_xTimerGetExpiryTime,
-    traceENTER_pcTimerGetName, traceRETURN_pcTimerGetName,
-    traceENTER_xTimerIsTimerActive, traceRETURN_xTimerIsTimerActive,
-    traceENTER_pvTimerGetTimerID, traceRETURN_pvTimerGetTimerID,
-    traceENTER_vTimerSetTimerID, traceRETURN_vTimerSetTimerID,
-    traceENTER_xTimerGetStaticBuffer, traceRETURN_xTimerGetStaticBuffer,
-    traceTIMER_CREATE, traceTIMER_EXPIRED, traceTIMER_COMMAND_RECEIVED,
+    traceENTER_pcTimerGetName, traceENTER_pvTimerGetTimerID, traceENTER_uxTimerGetReloadMode,
+    traceENTER_vTimerSetReloadMode, traceENTER_vTimerSetTimerID, traceENTER_xTimerCreate,
+    traceENTER_xTimerCreateStatic, traceENTER_xTimerCreateTimerTask,
+    traceENTER_xTimerGenericCommandFromISR, traceENTER_xTimerGenericCommandFromTask,
+    traceENTER_xTimerGetExpiryTime, traceENTER_xTimerGetPeriod, traceENTER_xTimerGetReloadMode,
+    traceENTER_xTimerGetStaticBuffer, traceENTER_xTimerGetTimerDaemonTaskHandle,
+    traceENTER_xTimerIsTimerActive, traceRETURN_pcTimerGetName, traceRETURN_pvTimerGetTimerID,
+    traceRETURN_uxTimerGetReloadMode, traceRETURN_vTimerSetReloadMode,
+    traceRETURN_vTimerSetTimerID, traceRETURN_xTimerCreate, traceRETURN_xTimerCreateStatic,
+    traceRETURN_xTimerCreateTimerTask, traceRETURN_xTimerGenericCommandFromISR,
+    traceRETURN_xTimerGenericCommandFromTask, traceRETURN_xTimerGetExpiryTime,
+    traceRETURN_xTimerGetPeriod, traceRETURN_xTimerGetReloadMode,
+    traceRETURN_xTimerGetStaticBuffer, traceRETURN_xTimerGetTimerDaemonTaskHandle,
+    traceRETURN_xTimerIsTimerActive, traceTIMER_COMMAND_RECEIVED, traceTIMER_COMMAND_SEND,
+    traceTIMER_CREATE, traceTIMER_EXPIRED,
 };
 
 #[cfg(feature = "trace-facility")]
 use crate::{
-    traceENTER_uxTimerGetTimerNumber, traceRETURN_uxTimerGetTimerNumber,
-    traceENTER_vTimerSetTimerNumber, traceRETURN_vTimerSetTimerNumber,
+    traceENTER_uxTimerGetTimerNumber, traceENTER_vTimerSetTimerNumber,
+    traceRETURN_uxTimerGetTimerNumber, traceRETURN_vTimerSetTimerNumber,
 };
 
 #[cfg(feature = "pend-function-call")]
 use crate::{
-    traceENTER_xTimerPendFunctionCallFromISR, traceRETURN_xTimerPendFunctionCallFromISR,
-    traceENTER_xTimerPendFunctionCall, traceRETURN_xTimerPendFunctionCall,
-    tracePEND_FUNC_CALL_FROM_ISR, tracePEND_FUNC_CALL,
+    traceENTER_xTimerPendFunctionCall, traceENTER_xTimerPendFunctionCallFromISR,
+    tracePEND_FUNC_CALL, tracePEND_FUNC_CALL_FROM_ISR, traceRETURN_xTimerPendFunctionCall,
+    traceRETURN_xTimerPendFunctionCallFromISR,
 };
 
 // =============================================================================
@@ -364,9 +361,16 @@ pub fn xTimerCreate(
     pvTimerID: *mut c_void,
     pxCallbackFunction: TimerCallbackFunction_t,
 ) -> TimerHandle_t {
-    traceENTER_xTimerCreate!(pcTimerName, xTimerPeriodInTicks, xAutoReload, pvTimerID, pxCallbackFunction);
+    traceENTER_xTimerCreate!(
+        pcTimerName,
+        xTimerPeriodInTicks,
+        xAutoReload,
+        pvTimerID,
+        pxCallbackFunction
+    );
 
-    let pxNewTimer: *mut Timer_t = unsafe { pvPortMalloc(core::mem::size_of::<Timer_t>()) as *mut Timer_t };
+    let pxNewTimer: *mut Timer_t =
+        unsafe { pvPortMalloc(core::mem::size_of::<Timer_t>()) as *mut Timer_t };
 
     if pxNewTimer != ptr::null_mut() {
         // Status is zero - not static, not active, auto-reload set below
@@ -408,7 +412,14 @@ pub fn xTimerCreateStatic(
     pxCallbackFunction: TimerCallbackFunction_t,
     pxTimerBuffer: *mut StaticTimer_t,
 ) -> TimerHandle_t {
-    traceENTER_xTimerCreateStatic!(pcTimerName, xTimerPeriodInTicks, xAutoReload, pvTimerID, pxCallbackFunction, pxTimerBuffer);
+    traceENTER_xTimerCreateStatic!(
+        pcTimerName,
+        xTimerPeriodInTicks,
+        xAutoReload,
+        pvTimerID,
+        pxCallbackFunction,
+        pxTimerBuffer
+    );
 
     // Verify StaticTimer_t is same size as Timer_t
     #[cfg(debug_assertions)]
@@ -466,7 +477,13 @@ pub fn xTimerGenericCommandFromTask(
 ) -> BaseType_t {
     let mut xReturn: BaseType_t = pdFAIL;
 
-    traceENTER_xTimerGenericCommandFromTask!(xTimer, xCommandID, xOptionalValue, pxHigherPriorityTaskWoken, xTicksToWait);
+    traceENTER_xTimerGenericCommandFromTask!(
+        xTimer,
+        xCommandID,
+        xOptionalValue,
+        pxHigherPriorityTaskWoken,
+        xTicksToWait
+    );
 
     unsafe {
         if xTimerQueue != ptr::null_mut() && xTimer != ptr::null_mut() {
@@ -520,7 +537,13 @@ pub fn xTimerGenericCommandFromISR(
 ) -> BaseType_t {
     let mut xReturn: BaseType_t = pdFAIL;
 
-    traceENTER_xTimerGenericCommandFromISR!(xTimer, xCommandID, xOptionalValue, pxHigherPriorityTaskWoken, _xTicksToWait);
+    traceENTER_xTimerGenericCommandFromISR!(
+        xTimer,
+        xCommandID,
+        xOptionalValue,
+        pxHigherPriorityTaskWoken,
+        _xTicksToWait
+    );
 
     unsafe {
         if xTimerQueue != ptr::null_mut() && xTimer != ptr::null_mut() {
@@ -558,9 +581,21 @@ pub fn xTimerGenericCommand(
     xTicksToWait: TickType_t,
 ) -> BaseType_t {
     if xCommandID < tmrFIRST_FROM_ISR_COMMAND {
-        xTimerGenericCommandFromTask(xTimer, xCommandID, xOptionalValue, pxHigherPriorityTaskWoken, xTicksToWait)
+        xTimerGenericCommandFromTask(
+            xTimer,
+            xCommandID,
+            xOptionalValue,
+            pxHigherPriorityTaskWoken,
+            xTicksToWait,
+        )
     } else {
-        xTimerGenericCommandFromISR(xTimer, xCommandID, xOptionalValue, pxHigherPriorityTaskWoken, xTicksToWait)
+        xTimerGenericCommandFromISR(
+            xTimer,
+            xCommandID,
+            xOptionalValue,
+            pxHigherPriorityTaskWoken,
+            xTicksToWait,
+        )
     }
 }
 
@@ -817,7 +852,12 @@ pub fn xTimerPendFunctionCallFromISR(
     ulParameter2: u32,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) -> BaseType_t {
-    traceENTER_xTimerPendFunctionCallFromISR!(xFunctionToPend, pvParameter1, ulParameter2, pxHigherPriorityTaskWoken);
+    traceENTER_xTimerPendFunctionCallFromISR!(
+        xFunctionToPend,
+        pvParameter1,
+        ulParameter2,
+        pxHigherPriorityTaskWoken
+    );
 
     let mut xMessage: DaemonTaskMessage_t = unsafe { core::mem::zeroed() };
     xMessage.xMessageID = tmrCOMMAND_EXECUTE_CALLBACK_FROM_ISR;
@@ -1167,11 +1207,17 @@ fn prvProcessReceivedCommands() {
 
                 if pxTimer != ptr::null_mut() {
                     // Remove timer from any list it might be in
-                    if listIS_CONTAINED_WITHIN(ptr::null_mut(), &mut (*pxTimer).xTimerListItem) == pdFALSE {
+                    if listIS_CONTAINED_WITHIN(ptr::null_mut(), &mut (*pxTimer).xTimerListItem)
+                        == pdFALSE
+                    {
                         uxListRemove(&mut (*pxTimer).xTimerListItem);
                     }
 
-                    traceTIMER_COMMAND_RECEIVED!(pxTimer, xMessage.xMessageID, xMessage.u.xTimerParameters.xMessageValue);
+                    traceTIMER_COMMAND_RECEIVED!(
+                        pxTimer,
+                        xMessage.xMessageID,
+                        xMessage.u.xTimerParameters.xMessageValue
+                    );
 
                     // Sample time now
                     let xTimeNow = prvSampleTimeNow(&mut xTimerListsWereSwitched);
@@ -1200,11 +1246,7 @@ fn prvProcessReceivedCommands() {
                             {
                                 // Timer already expired
                                 if ((*pxTimer).ucStatus & tmrSTATUS_IS_AUTORELOAD) != 0 {
-                                    prvReloadTimer(
-                                        pxTimer,
-                                        xNextExpiryTime,
-                                        xTimeNow,
-                                    );
+                                    prvReloadTimer(pxTimer, xNextExpiryTime, xTimeNow);
                                 } else {
                                     (*pxTimer).ucStatus &= !tmrSTATUS_IS_ACTIVE;
                                 }
@@ -1248,7 +1290,11 @@ fn prvProcessReceivedCommands() {
                                     (*pxTimer).ucStatus &= !tmrSTATUS_IS_ACTIVE;
                                 }
                             }
-                            #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
+                            #[cfg(not(any(
+                                feature = "alloc",
+                                feature = "heap-4",
+                                feature = "heap-5"
+                            )))]
                             {
                                 (*pxTimer).ucStatus &= !tmrSTATUS_IS_ACTIVE;
                             }

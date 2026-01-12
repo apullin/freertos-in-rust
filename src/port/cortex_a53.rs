@@ -127,7 +127,9 @@ fn get_iccpmr_address() -> *mut u32 {
 
 /// Get ICCIAR address
 fn get_icciar_address() -> *const u32 {
-    unsafe { (ulGICCPUInterfaceBase as usize + portICCIAR_INTERRUPT_ACKNOWLEDGE_OFFSET) as *const u32 }
+    unsafe {
+        (ulGICCPUInterfaceBase as usize + portICCIAR_INTERRUPT_ACKNOWLEDGE_OFFSET) as *const u32
+    }
 }
 
 /// Get ICCEOIR address
@@ -147,11 +149,7 @@ pub static mut ullMaxAPIPriorityMask: u64 = 0;
 
 /// Configure GIC addresses - call before starting scheduler
 #[no_mangle]
-pub extern "C" fn vPortConfigureGIC(
-    gic_dist_base: u64,
-    gic_cpu_base: u64,
-    max_api_priority: u32,
-) {
+pub extern "C" fn vPortConfigureGIC(gic_dist_base: u64, gic_cpu_base: u64, max_api_priority: u32) {
     unsafe {
         ulGICDistributorBase = gic_dist_base;
         ulGICCPUInterfaceBase = gic_cpu_base;
@@ -598,7 +596,9 @@ static mut ulRunTimeCounterValue: crate::config::configRUN_TIME_COUNTER_TYPE = 0
 #[cfg(feature = "generate-run-time-stats")]
 #[inline(always)]
 pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
-    unsafe { ulRunTimeCounterValue = 0; }
+    unsafe {
+        ulRunTimeCounterValue = 0;
+    }
 }
 
 #[cfg(feature = "generate-run-time-stats")]
@@ -610,7 +610,9 @@ pub fn portGET_RUN_TIME_COUNTER_VALUE() -> crate::config::configRUN_TIME_COUNTER
 #[cfg(feature = "generate-run-time-stats")]
 #[inline(always)]
 pub fn portINCREMENT_RUN_TIME_COUNTER() {
-    unsafe { ulRunTimeCounterValue = ulRunTimeCounterValue.wrapping_add(1); }
+    unsafe {
+        ulRunTimeCounterValue = ulRunTimeCounterValue.wrapping_add(1);
+    }
 }
 
 // =============================================================================
@@ -747,8 +749,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         }
 
         // Calculate remaining counts until next tick
-        let ulRemainingCounts = ulTimerCountsForOneTick
-            - (ulElapsedCounts % ulTimerCountsForOneTick);
+        let ulRemainingCounts =
+            ulTimerCountsForOneTick - (ulElapsedCounts % ulTimerCountsForOneTick);
 
         // Set compare value for next tick
         let ulNextCompare = ulTimerCountNow + ulRemainingCounts;
@@ -777,14 +779,12 @@ extern "C" {
 
 global_asm!(
     ".align 8",
-
     // ==========================================================================
     // portSAVE_CONTEXT macro
     // ==========================================================================
     ".macro portSAVE_CONTEXT",
     // Switch to EL0 stack pointer
     "msr spsel, #0",
-
     // Save all general purpose registers
     "stp x0, x1, [sp, #-0x10]!",
     "stp x2, x3, [sp, #-0x10]!",
@@ -802,20 +802,16 @@ global_asm!(
     "stp x26, x27, [sp, #-0x10]!",
     "stp x28, x29, [sp, #-0x10]!",
     "stp x30, xzr, [sp, #-0x10]!",
-
     // Save SPSR and ELR (EL1)
     "mrs x3, spsr_el1",
     "mrs x2, elr_el1",
     "stp x2, x3, [sp, #-0x10]!",
-
     // Save critical nesting
     "ldr x0, =ullCriticalNesting",
     "ldr x3, [x0]",
-
     // Save FPU context flag
     "ldr x0, =ullPortTaskHasFPUContext",
     "ldr x2, [x0]",
-
     // Save FPU registers if needed
     "cmp x2, #0",
     "b.eq 1f",
@@ -836,36 +832,29 @@ global_asm!(
     "stp q28, q29, [sp, #-0x20]!",
     "stp q30, q31, [sp, #-0x20]!",
     "1:",
-
     // Store critical nesting and FPU flag
     "stp x2, x3, [sp, #-0x10]!",
-
     // Save SP to TCB
     "ldr x0, =pxCurrentTCB",
     "ldr x1, [x0]",
     "mov x0, sp",
     "str x0, [x1]",
-
     // Switch back to ELx stack
     "msr spsel, #1",
     ".endm",
-
     // ==========================================================================
     // portRESTORE_CONTEXT macro
     // ==========================================================================
     ".macro portRESTORE_CONTEXT",
     // Switch to EL0 stack pointer
     "msr spsel, #0",
-
     // Get SP from TCB
     "ldr x0, =pxCurrentTCB",
     "ldr x1, [x0]",
     "ldr x0, [x1]",
     "mov sp, x0",
-
     // Restore critical nesting and FPU flag
     "ldp x2, x3, [sp], #0x10",
-
     // Set GIC priority mask based on critical nesting
     "ldr x0, =ullCriticalNesting",
     "mov x1, #255",
@@ -880,11 +869,9 @@ global_asm!(
     "dsb sy",
     "isb sy",
     "str x3, [x0]",
-
     // Restore FPU context flag
     "ldr x0, =ullPortTaskHasFPUContext",
     "str x2, [x0]",
-
     // Restore FPU registers if needed
     "cmp x2, #0",
     "b.eq 3f",
@@ -905,12 +892,10 @@ global_asm!(
     "ldp q2, q3, [sp], #0x20",
     "ldp q0, q1, [sp], #0x20",
     "3:",
-
     // Restore SPSR and ELR
     "ldp x2, x3, [sp], #0x10",
     "msr spsr_el1, x3",
     "msr elr_el1, x2",
-
     // Restore general purpose registers
     "ldp x30, xzr, [sp], #0x10",
     "ldp x28, x29, [sp], #0x10",
@@ -928,12 +913,10 @@ global_asm!(
     "ldp x4, x5, [sp], #0x10",
     "ldp x2, x3, [sp], #0x10",
     "ldp x0, x1, [sp], #0x10",
-
     // Switch to ELx stack and return
     "msr spsel, #1",
     "eret",
     ".endm",
-
     // ==========================================================================
     // FreeRTOS_SWI_Handler - SVC Handler (Context Switch)
     // ==========================================================================
@@ -943,7 +926,6 @@ global_asm!(
     "portSAVE_CONTEXT",
     "bl vTaskSwitchContext",
     "portRESTORE_CONTEXT",
-
     // ==========================================================================
     // vPortRestoreTaskContext - Start First Task
     // ==========================================================================
@@ -956,7 +938,6 @@ global_asm!(
     "dsb sy",
     "isb sy",
     "portRESTORE_CONTEXT",
-
     // ==========================================================================
     // FreeRTOS_IRQ_Handler - IRQ Handler
     // ==========================================================================
@@ -975,43 +956,35 @@ global_asm!(
     "stp x16, x17, [sp, #-0x10]!",
     "stp x18, x19, [sp, #-0x10]!",
     "stp x29, x30, [sp, #-0x10]!",
-
     // Save SPSR and ELR
     "mrs x3, spsr_el1",
     "mrs x2, elr_el1",
     "stp x2, x3, [sp, #-0x10]!",
-
     // Increment nesting counter
     "ldr x5, =ullPortInterruptNesting",
     "ldr x1, [x5]",
     "add x6, x1, #1",
     "str x6, [x5]",
     "stp x1, x5, [sp, #-0x10]!",
-
     // Read ICCIAR
     "ldr x2, =ullICCIAR",
     "ldr x3, [x2]",
     "ldr w0, [x3]",
     "stp x0, x1, [sp, #-0x10]!",
-
     // Call IRQ handler
     "bl vApplicationIRQHandler",
-
     // Disable interrupts
     "msr daifset, #2",
     "dsb sy",
     "isb sy",
-
     // Restore ICCIAR and write to ICCEOIR
     "ldp x0, x1, [sp], #0x10",
     "ldr x4, =ullICCEOIR",
     "ldr x4, [x4]",
     "str w0, [x4]",
-
     // Restore nesting counter
     "ldp x1, x5, [sp], #0x10",
     "str x1, [x5]",
-
     // Check if context switch needed
     "cmp x1, #0",
     "b.ne 4f",
@@ -1019,11 +992,9 @@ global_asm!(
     "ldr x1, [x0]",
     "cmp x1, #0",
     "b.eq 4f",
-
     // Clear yield flag and do context switch
     "mov x2, #0",
     "str x2, [x0]",
-
     // Restore volatile regs before context switch
     "ldp x4, x5, [sp], #0x10",
     "msr spsr_el1, x5",
@@ -1041,11 +1012,9 @@ global_asm!(
     "ldp x4, x5, [sp], #0x10",
     "ldp x2, x3, [sp], #0x10",
     "ldp x0, x1, [sp], #0x10",
-
     "portSAVE_CONTEXT",
     "bl vTaskSwitchContext",
     "portRESTORE_CONTEXT",
-
     "4:",
     // Exit without context switch
     "ldp x4, x5, [sp], #0x10",
@@ -1085,71 +1054,55 @@ global_asm!(
     ".global _freertos_vector_table",
     ".balign 2048",
     "_freertos_vector_table:",
-
     // Current EL with SP_EL0 (not used by FreeRTOS)
     ".balign 128",
     "curr_el_sp0_sync:",
     "b .",
-
     ".balign 128",
     "curr_el_sp0_irq:",
     "b .",
-
     ".balign 128",
     "curr_el_sp0_fiq:",
     "b .",
-
     ".balign 128",
     "curr_el_sp0_serror:",
     "b .",
-
     // Current EL with SP_ELx (EL1)
     ".balign 128",
     "curr_el_spx_sync:",
     "b FreeRTOS_SWI_Handler",
-
     ".balign 128",
     "curr_el_spx_irq:",
     "b FreeRTOS_IRQ_Handler",
-
     ".balign 128",
     "curr_el_spx_fiq:",
     "b .",
-
     ".balign 128",
     "curr_el_spx_serror:",
     "b .",
-
     // Lower EL using AArch64 (not used - all runs at EL1)
     ".balign 128",
     "lower_el_aarch64_sync:",
     "b .",
-
     ".balign 128",
     "lower_el_aarch64_irq:",
     "b .",
-
     ".balign 128",
     "lower_el_aarch64_fiq:",
     "b .",
-
     ".balign 128",
     "lower_el_aarch64_serror:",
     "b .",
-
     // Lower EL using AArch32 (not used)
     ".balign 128",
     "lower_el_aarch32_sync:",
     "b .",
-
     ".balign 128",
     "lower_el_aarch32_irq:",
     "b .",
-
     ".balign 128",
     "lower_el_aarch32_fiq:",
     "b .",
-
     ".balign 128",
     "lower_el_aarch32_serror:",
     "b .",

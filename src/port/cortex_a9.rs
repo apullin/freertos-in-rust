@@ -758,8 +758,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
         // Calculate reload value for expected idle time
         // -1 because we're partway through the current tick
-        let mut ulReloadValue = ulTimerDecrementsLeft
-            + (ulTimerCountsForOneTick * (xExpectedIdleTime as u32 - 1));
+        let mut ulReloadValue =
+            ulTimerDecrementsLeft + (ulTimerCountsForOneTick * (xExpectedIdleTime as u32 - 1));
 
         // Apply compensation for time spent in this function
         if ulReloadValue > ulStoppedTimerCompensation {
@@ -809,8 +809,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         }
 
         // Calculate remaining counts until next tick
-        let ulRemainingCounts = ulTimerCountsForOneTick
-            - (ulElapsedCounts % ulTimerCountsForOneTick);
+        let ulRemainingCounts =
+            ulTimerCountsForOneTick - (ulElapsedCounts % ulTimerCountsForOneTick);
 
         // Reload timer for normal operation
         core::ptr::write_volatile(timer_load, ulRemainingCounts);
@@ -845,12 +845,10 @@ global_asm!(
     // ARM mode
     ".arm",
     ".align 4",
-
     // Processor mode constants
     ".set SYS_MODE, 0x1f",
     ".set SVC_MODE, 0x13",
     ".set IRQ_MODE, 0x12",
-
     // ==========================================================================
     // portSAVE_CONTEXT macro
     // ==========================================================================
@@ -860,32 +858,26 @@ global_asm!(
     "cps #SYS_MODE",
     // Save R0-R12 and R14
     "push {{r0-r12, r14}}",
-
     // Push critical nesting count
     "ldr r2, =ulCriticalNesting",
     "ldr r1, [r2]",
     "push {{r1}}",
-
     // Check if FPU context needs saving
     "ldr r2, =ulPortTaskHasFPUContext",
     "ldr r3, [r2]",
     "cmp r3, #0",
-
     // Save FPU context if needed (conditional)
     "fmrxne r1, fpscr",
     "pushne {{r1}}",
     "vpushne {{d0-d15}}",
     "vpushne {{d16-d31}}",
-
     // Push FPU context flag
     "push {{r3}}",
-
     // Save stack pointer to TCB
     "ldr r0, =pxCurrentTCB",
     "ldr r1, [r0]",
     "str sp, [r1]",
     ".endm",
-
     // ==========================================================================
     // portRESTORE_CONTEXT macro
     // ==========================================================================
@@ -894,24 +886,20 @@ global_asm!(
     "ldr r0, =pxCurrentTCB",
     "ldr r1, [r0]",
     "ldr sp, [r1]",
-
     // Pop FPU context flag
     "ldr r0, =ulPortTaskHasFPUContext",
     "pop {{r1}}",
     "str r1, [r0]",
     "cmp r1, #0",
-
     // Restore FPU context if needed (conditional)
     "vpopne {{d16-d31}}",
     "vpopne {{d0-d15}}",
     "popne {{r0}}",
     "vmsrne fpscr, r0",
-
     // Pop critical nesting count
     "ldr r0, =ulCriticalNesting",
     "pop {{r1}}",
     "str r1, [r0]",
-
     // Set GIC priority mask based on critical nesting
     "ldr r2, =ulICCPMRAddress",
     "ldr r2, [r2]",
@@ -920,14 +908,11 @@ global_asm!(
     "ldrne r4, =ulMaxAPIPriorityMaskConst",
     "ldrne r4, [r4]",
     "str r4, [r2]",
-
     // Restore R0-R12 and R14
     "pop {{r0-r12, r14}}",
-
     // Return to task, loading CPSR
     "rfeia sp!",
     ".endm",
-
     // ==========================================================================
     // FreeRTOS_SWI_Handler - Software Interrupt Handler (Context Switch)
     // ==========================================================================
@@ -936,18 +921,14 @@ global_asm!(
     "FreeRTOS_SWI_Handler:",
     // Save context of current task
     "portSAVE_CONTEXT",
-
     // Ensure 8-byte stack alignment
     "mov r2, sp",
     "and r2, r2, #4",
     "sub sp, sp, r2",
-
     // Call vTaskSwitchContext
     "bl vTaskSwitchContext",
-
     // Restore context of next task
     "portRESTORE_CONTEXT",
-
     // ==========================================================================
     // vPortRestoreTaskContext - Start First Task
     // ==========================================================================
@@ -957,7 +938,6 @@ global_asm!(
     // Switch to system mode and restore first task
     "cps #SYS_MODE",
     "portRESTORE_CONTEXT",
-
     // ==========================================================================
     // FreeRTOS_IRQ_Handler - IRQ Handler
     // ==========================================================================
@@ -966,63 +946,50 @@ global_asm!(
     "FreeRTOS_IRQ_Handler:",
     // Adjust LR for return (IRQ returns to next instruction)
     "sub lr, lr, #4",
-
     // Push return address and SPSR
     "push {{lr}}",
     "mrs lr, spsr",
     "push {{lr}}",
-
     // Switch to supervisor mode for reentry
     "cps #SVC_MODE",
-
     // Save used registers
     "push {{r0-r4, r12}}",
-
     // Increment interrupt nesting count
     "ldr r3, =ulPortInterruptNesting",
     "ldr r1, [r3]",
     "add r4, r1, #1",
     "str r4, [r3]",
-
     // Read interrupt acknowledge register
     "ldr r2, =ulICCIARAddress",
     "ldr r2, [r2]",
     "ldr r0, [r2]",
-
     // Ensure 8-byte stack alignment
     "mov r2, sp",
     "and r2, r2, #4",
     "sub sp, sp, r2",
-
     // Call application IRQ handler (r0 = ICCIAR value)
     "push {{r0-r4, lr}}",
     "bl vApplicationIRQHandler",
     "pop {{r0-r4, lr}}",
     "add sp, sp, r2",
-
     // Disable interrupts for EOI
     "cpsid i",
     "dsb",
     "isb",
-
     // Write to End of Interrupt register
     "ldr r4, =ulICCEOIRAddress",
     "ldr r4, [r4]",
     "str r0, [r4]",
-
     // Restore interrupt nesting count
     "str r1, [r3]",
-
     // Only switch context if nesting is 0
     "cmp r1, #0",
     "bne exit_without_switch",
-
     // Check if context switch requested
     "ldr r1, =ulPortYieldRequired",
     "ldr r0, [r1]",
     "cmp r0, #0",
     "bne switch_before_exit",
-
     "exit_without_switch:",
     // Restore used registers and return
     "pop {{r0-r4, r12}}",
@@ -1031,33 +998,26 @@ global_asm!(
     "msr spsr_cxsf, lr",
     "pop {{lr}}",
     "movs pc, lr",
-
     "switch_before_exit:",
     // Clear yield flag
     "mov r0, #0",
     "str r0, [r1]",
-
     // Restore registers and prepare for context switch
     "pop {{r0-r4, r12}}",
     "cps #IRQ_MODE",
     "pop {{lr}}",
     "msr spsr_cxsf, lr",
     "pop {{lr}}",
-
     // Save context and switch
     "portSAVE_CONTEXT",
-
     // Ensure 8-byte alignment
     "mov r2, sp",
     "and r2, r2, #4",
     "sub sp, sp, r2",
-
     // Call vTaskSwitchContext
     "bl vTaskSwitchContext",
-
     // Restore new task context
     "portRESTORE_CONTEXT",
-
     // ==========================================================================
     // Weak default IRQ handler (calls vApplicationFPUSafeIRQHandler)
     // ==========================================================================
@@ -1070,16 +1030,13 @@ global_asm!(
     "vpush {{d0-d7}}",
     "vpush {{d16-d31}}",
     "push {{r1}}",
-
     // Call FPU-safe handler
     "bl vApplicationFPUSafeIRQHandler",
-
     // Restore FPU registers
     "pop {{r0}}",
     "vpop {{d16-d31}}",
     "vpop {{d0-d7}}",
     "vmsr fpscr, r0",
-
     "pop {{pc}}",
 );
 

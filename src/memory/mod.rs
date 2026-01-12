@@ -160,8 +160,8 @@ pub use heap_5::HeapRegion;
 
 #[cfg(all(feature = "alloc", not(any(feature = "heap-4", feature = "heap-5"))))]
 mod alloc_impl {
-    use core::ffi::c_void;
     use alloc::alloc::{alloc, dealloc, Layout};
+    use core::ffi::c_void;
     use core::ptr;
     use core::sync::atomic::{AtomicUsize, Ordering};
 

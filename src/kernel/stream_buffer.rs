@@ -62,7 +62,8 @@ pub const sbTYPE_MESSAGE_BUFFER: BaseType_t = 1;
 pub const sbTYPE_STREAM_BATCHING_BUFFER: BaseType_t = 2;
 
 /// Bytes needed to store message length in message buffers
-const sbBYTES_TO_STORE_MESSAGE_LENGTH: usize = core::mem::size_of::<configMESSAGE_BUFFER_LENGTH_TYPE>();
+const sbBYTES_TO_STORE_MESSAGE_LENGTH: usize =
+    core::mem::size_of::<configMESSAGE_BUFFER_LENGTH_TYPE>();
 
 /// Flag: is a message buffer (holds discrete messages)
 const sbFLAGS_IS_MESSAGE_BUFFER: u8 = 1;
@@ -698,14 +699,14 @@ pub unsafe fn xStreamBufferReceive(
     let mut xBytesAvailable: usize;
 
     // Determine minimum bytes before we'll unblock
-    let xBytesToStoreMessageLength =
-        if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER) != 0 {
-            sbBYTES_TO_STORE_MESSAGE_LENGTH
-        } else if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_BATCHING_BUFFER) != 0 {
-            (*pxStreamBuffer).xTriggerLevelBytes
-        } else {
-            0
-        };
+    let xBytesToStoreMessageLength = if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER) != 0
+    {
+        sbBYTES_TO_STORE_MESSAGE_LENGTH
+    } else if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_BATCHING_BUFFER) != 0 {
+        (*pxStreamBuffer).xTriggerLevelBytes
+    } else {
+        0
+    };
 
     if xTicksToWait != 0 {
         portENTER_CRITICAL();
@@ -733,8 +734,12 @@ pub unsafe fn xStreamBufferReceive(
     }
 
     if xBytesAvailable > xBytesToStoreMessageLength {
-        xReceivedLength =
-            prvReadMessageFromBuffer(pxStreamBuffer, pvRxData, xBufferLengthBytes, xBytesAvailable);
+        xReceivedLength = prvReadMessageFromBuffer(
+            pxStreamBuffer,
+            pvRxData,
+            xBufferLengthBytes,
+            xBytesAvailable,
+        );
 
         if xReceivedLength != 0 {
             sbRECEIVE_COMPLETED(pxStreamBuffer);
@@ -757,18 +762,22 @@ pub unsafe fn xStreamBufferReceiveFromISR(
     let pxStreamBuffer = xStreamBuffer as *mut StreamBuffer_t;
     let mut xReceivedLength: usize = 0;
 
-    let xBytesToStoreMessageLength =
-        if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER) != 0 {
-            sbBYTES_TO_STORE_MESSAGE_LENGTH
-        } else {
-            0
-        };
+    let xBytesToStoreMessageLength = if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER) != 0
+    {
+        sbBYTES_TO_STORE_MESSAGE_LENGTH
+    } else {
+        0
+    };
 
     let xBytesAvailable = prvBytesInBuffer(pxStreamBuffer);
 
     if xBytesAvailable > xBytesToStoreMessageLength {
-        xReceivedLength =
-            prvReadMessageFromBuffer(pxStreamBuffer, pvRxData, xBufferLengthBytes, xBytesAvailable);
+        xReceivedLength = prvReadMessageFromBuffer(
+            pxStreamBuffer,
+            pvRxData,
+            xBufferLengthBytes,
+            xBytesAvailable,
+        );
 
         if xReceivedLength != 0 {
             sbRECEIVE_COMPLETED_FROM_ISR(pxStreamBuffer, pxHigherPriorityTaskWoken);
@@ -1064,11 +1073,7 @@ unsafe fn prvReadMessageFromBuffer(
 unsafe fn sbSEND_COMPLETED(pxStreamBuffer: *mut StreamBuffer_t) {
     vTaskSuspendAll();
     if !(*pxStreamBuffer).xTaskWaitingToReceive.is_null() {
-        xTaskNotify(
-            (*pxStreamBuffer).xTaskWaitingToReceive,
-            0,
-            eNoAction as i32,
-        );
+        xTaskNotify((*pxStreamBuffer).xTaskWaitingToReceive, 0, eNoAction as i32);
         (*pxStreamBuffer).xTaskWaitingToReceive = ptr::null_mut();
     }
     xTaskResumeAll();
@@ -1203,11 +1208,8 @@ pub unsafe fn vStreamBufferSetStreamBufferNumber(
 ///
 /// Returns non-zero if this is a message buffer, zero if it's a stream buffer.
 #[cfg(feature = "trace-facility")]
-pub unsafe fn ucStreamBufferGetStreamBufferType(
-    xStreamBuffer: StreamBufferHandle_t,
-) -> u8 {
+pub unsafe fn ucStreamBufferGetStreamBufferType(xStreamBuffer: StreamBufferHandle_t) -> u8 {
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
     (*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER
 }
-

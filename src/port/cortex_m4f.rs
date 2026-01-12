@@ -262,20 +262,16 @@ pub unsafe extern "C" fn vPortSVCHandler() {
     naked_asm!(
         // Get pxCurrentTCB address
         "ldr r3, =pxCurrentTCB",
-        "ldr r1, [r3]",           // r1 = pxCurrentTCB
-        "ldr r0, [r1]",           // r0 = pxCurrentTCB->pxTopOfStack
-
+        "ldr r1, [r3]", // r1 = pxCurrentTCB
+        "ldr r0, [r1]", // r0 = pxCurrentTCB->pxTopOfStack
         // Pop the core registers (R4-R11, R14/EXC_RETURN)
         "ldmia r0!, {{r4-r11, r14}}",
-
         // Set the process stack pointer
         "msr psp, r0",
         "isb",
-
         // Enable interrupts
         "mov r0, #0",
         "msr basepri, r0",
-
         // Return to the first task
         "bx r14",
     );
@@ -391,33 +387,27 @@ unsafe extern "C" fn prvPortStartFirstTask() {
     naked_asm!(
         // Use the NVIC offset register to locate the stack
         // Load VTOR address using literal pool
-        "ldr r0, 1f",             // Load VTOR address from literal pool
-        "ldr r0, [r0]",           // Vector table address
-        "ldr r0, [r0]",           // Initial MSP value (first entry)
-        "msr msp, r0",            // Reset MSP to initial value
-
+        "ldr r0, 1f",   // Load VTOR address from literal pool
+        "ldr r0, [r0]", // Vector table address
+        "ldr r0, [r0]", // Initial MSP value (first entry)
+        "msr msp, r0",  // Reset MSP to initial value
         // Clear CONTROL register to use MSP and privileged mode
         "mov r0, #0",
         "msr control, r0",
-
         // Enable interrupts
         "cpsie i",
         "cpsie f",
-
         // Synchronization barriers
         "dsb",
         "isb",
-
         // Trigger SVC to start the first task
         "svc 0",
-
         // Should never get here
         "nop",
         "b .",
-
         // Literal pool
         ".align 4",
-        "1: .word 0xE000ED08",    // VTOR register address
+        "1: .word 0xE000ED08", // VTOR register address
     );
 }
 
@@ -792,13 +782,11 @@ global_asm!(
     ".type SVCall, %function",
     "SVCall:",
     "b vPortSVCHandler",
-
     ".thumb_func",
     ".global PendSV",
     ".type PendSV, %function",
     "PendSV:",
     "b xPortPendSVHandler",
-
     ".thumb_func",
     ".global SysTick",
     ".type SysTick, %function",

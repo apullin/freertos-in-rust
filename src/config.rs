@@ -46,7 +46,7 @@ pub const configCPU_CLOCK_HZ: u32 = 80_000_000;
 /// QEMU sifive_e: Timer is instruction-based (~1 tick per 6500 instructions).
 /// Using 32768 Hz as effective rate for QEMU testing.
 #[cfg(feature = "port-riscv32")]
-pub const configMTIME_HZ: u32 = 32_768;  // ~33 ticks per ms in QEMU
+pub const configMTIME_HZ: u32 = 32_768; // ~33 ticks per ms in QEMU
 
 /// Maximum syscall interrupt priority
 /// Interrupts with priority >= this value can call FreeRTOS "FromISR" APIs.
@@ -314,15 +314,15 @@ pub const tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE: BaseType_t =
     };
 
 /// Whether to fill new stacks with known value (for high water mark)
-pub const tskSET_NEW_STACKS_TO_KNOWN_VALUE: BaseType_t =
-    if configCHECK_FOR_STACK_OVERFLOW > 1
-        || configUSE_TRACE_FACILITY != 0
-        || INCLUDE_uxTaskGetStackHighWaterMark != 0
-        || INCLUDE_uxTaskGetStackHighWaterMark2 != 0 {
-        1
-    } else {
-        0
-    };
+pub const tskSET_NEW_STACKS_TO_KNOWN_VALUE: BaseType_t = if configCHECK_FOR_STACK_OVERFLOW > 1
+    || configUSE_TRACE_FACILITY != 0
+    || INCLUDE_uxTaskGetStackHighWaterMark != 0
+    || INCLUDE_uxTaskGetStackHighWaterMark2 != 0
+{
+    1
+} else {
+    0
+};
 
 /// Byte value used to fill task stacks for high water mark detection.
 /// Stacks are filled with this value and then scanned to determine

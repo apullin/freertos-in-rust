@@ -25,10 +25,10 @@
 //! - `event_groups` - Event group synchronization (TODO)
 //! - `stream_buffer` - Stream and message buffers (TODO)
 
+pub mod event_groups;
 pub mod list;
 pub mod queue;
-pub mod tasks;
-pub mod timers;
-pub mod event_groups;
 #[cfg(feature = "stream-buffers")]
 pub mod stream_buffer;
+pub mod tasks;
+pub mod timers;

@@ -250,7 +250,13 @@ pub fn xEventGroupWaitBits(
     let xAlreadyYielded: BaseType_t;
     let mut xTimeoutOccurred: BaseType_t = pdFALSE;
 
-    traceENTER_xEventGroupWaitBits(xEventGroup, uxBitsToWaitFor, xClearOnExit, xWaitForAllBits, xTicksToWait);
+    traceENTER_xEventGroupWaitBits(
+        xEventGroup,
+        uxBitsToWaitFor,
+        xClearOnExit,
+        xWaitForAllBits,
+        xTicksToWait,
+    );
 
     configASSERT(!xEventGroup.is_null());
     configASSERT((uxBitsToWaitFor & eventEVENT_BITS_CONTROL_BYTES) == 0);
@@ -261,7 +267,8 @@ pub fn xEventGroupWaitBits(
     unsafe {
         let uxCurrentEventBits = (*pxEventBits).uxEventBits;
 
-        xWaitConditionMet = prvTestWaitCondition(uxCurrentEventBits, uxBitsToWaitFor, xWaitForAllBits);
+        xWaitConditionMet =
+            prvTestWaitCondition(uxCurrentEventBits, uxBitsToWaitFor, xWaitForAllBits);
 
         if xWaitConditionMet != pdFALSE {
             uxReturn = uxCurrentEventBits;
@@ -289,7 +296,10 @@ pub fn xEventGroupWaitBits(
 
             uxReturn = 0;
 
-            traceEVENT_GROUP_WAIT_BITS_BLOCK(xEventGroup as *mut c_void, uxBitsToWaitFor as UBaseType_t);
+            traceEVENT_GROUP_WAIT_BITS_BLOCK(
+                xEventGroup as *mut c_void,
+                uxBitsToWaitFor as UBaseType_t,
+            );
         }
     }
 
@@ -321,7 +331,11 @@ pub fn xEventGroupWaitBits(
         uxReturn &= !eventEVENT_BITS_CONTROL_BYTES;
     }
 
-    traceEVENT_GROUP_WAIT_BITS_END(xEventGroup as *mut c_void, uxBitsToWaitFor as UBaseType_t, xTimeoutOccurred);
+    traceEVENT_GROUP_WAIT_BITS_END(
+        xEventGroup as *mut c_void,
+        uxBitsToWaitFor as UBaseType_t,
+        xTimeoutOccurred,
+    );
 
     traceRETURN_xEventGroupWaitBits(uxReturn);
 
@@ -361,7 +375,11 @@ pub fn xEventGroupSync(
             xTicksToWait = 0;
         } else {
             if xTicksToWait != 0 {
-                traceEVENT_GROUP_SYNC_BLOCK(xEventGroup as *mut c_void, uxBitsToSet as UBaseType_t, uxBitsToWaitFor as UBaseType_t);
+                traceEVENT_GROUP_SYNC_BLOCK(
+                    xEventGroup as *mut c_void,
+                    uxBitsToSet as UBaseType_t,
+                    uxBitsToWaitFor as UBaseType_t,
+                );
 
                 vTaskPlaceOnUnorderedEventList(
                     &mut (*pxEventBits).xTasksWaitingForBits,
@@ -403,7 +421,12 @@ pub fn xEventGroupSync(
         uxReturn &= !eventEVENT_BITS_CONTROL_BYTES;
     }
 
-    traceEVENT_GROUP_SYNC_END(xEventGroup as *mut c_void, uxBitsToSet as UBaseType_t, uxBitsToWaitFor as UBaseType_t, xTimeoutOccurred);
+    traceEVENT_GROUP_SYNC_END(
+        xEventGroup as *mut c_void,
+        uxBitsToSet as UBaseType_t,
+        uxBitsToWaitFor as UBaseType_t,
+        xTimeoutOccurred,
+    );
 
     traceRETURN_xEventGroupSync(uxReturn);
 
@@ -423,7 +446,10 @@ pub fn xEventGroupSync(
 /// # Returns
 /// The event bits value after setting
 #[allow(unused_assignments)] // C pattern: initialize to fail
-pub fn xEventGroupSetBits(xEventGroup: EventGroupHandle_t, uxBitsToSet: EventBits_t) -> EventBits_t {
+pub fn xEventGroupSetBits(
+    xEventGroup: EventGroupHandle_t,
+    uxBitsToSet: EventBits_t,
+) -> EventBits_t {
     let pxEventBits = xEventGroup as *mut EventGroup_t;
     let mut uxBitsToClear: EventBits_t = 0;
     let mut xMatchFound: BaseType_t = pdFALSE;
@@ -498,7 +524,10 @@ pub fn xEventGroupSetBits(xEventGroup: EventGroupHandle_t, uxBitsToSet: EventBit
 ///
 /// # Returns
 /// The event bits value before clearing
-pub fn xEventGroupClearBits(xEventGroup: EventGroupHandle_t, uxBitsToClear: EventBits_t) -> EventBits_t {
+pub fn xEventGroupClearBits(
+    xEventGroup: EventGroupHandle_t,
+    uxBitsToClear: EventBits_t,
+) -> EventBits_t {
     let pxEventBits = xEventGroup as *mut EventGroup_t;
     let uxReturn: EventBits_t;
 
@@ -565,7 +594,10 @@ pub fn vEventGroupDelete(xEventGroup: EventGroupHandle_t) {
         traceEVENT_GROUP_DELETE(xEventGroup as *mut c_void);
 
         while listCURRENT_LIST_LENGTH(pxTasksWaitingForBits) > 0 {
-            configASSERT((*pxTasksWaitingForBits).xListEnd.pxNext != &(*pxTasksWaitingForBits).xListEnd as *const _ as *mut _);
+            configASSERT(
+                (*pxTasksWaitingForBits).xListEnd.pxNext
+                    != &(*pxTasksWaitingForBits).xListEnd as *const _ as *mut _,
+            );
 
             let _ = xTaskRemoveFromUnorderedEventList(
                 (*pxTasksWaitingForBits).xListEnd.pxNext,
@@ -636,7 +668,10 @@ pub fn xEventGroupGetStaticBuffer(
 pub extern "C" fn vEventGroupSetBitsCallback(pvEventGroup: *mut c_void, ulBitsToSet: u32) {
     traceENTER_vEventGroupSetBitsCallback(pvEventGroup, ulBitsToSet);
 
-    let _ = xEventGroupSetBits(pvEventGroup as EventGroupHandle_t, ulBitsToSet as EventBits_t);
+    let _ = xEventGroupSetBits(
+        pvEventGroup as EventGroupHandle_t,
+        ulBitsToSet as EventBits_t,
+    );
 
     traceRETURN_vEventGroupSetBitsCallback();
 }
@@ -645,7 +680,10 @@ pub extern "C" fn vEventGroupSetBitsCallback(pvEventGroup: *mut c_void, ulBitsTo
 pub extern "C" fn vEventGroupClearBitsCallback(pvEventGroup: *mut c_void, ulBitsToClear: u32) {
     traceENTER_vEventGroupClearBitsCallback(pvEventGroup, ulBitsToClear);
 
-    let _ = xEventGroupClearBits(pvEventGroup as EventGroupHandle_t, ulBitsToClear as EventBits_t);
+    let _ = xEventGroupClearBits(
+        pvEventGroup as EventGroupHandle_t,
+        ulBitsToClear as EventBits_t,
+    );
 
     traceRETURN_vEventGroupClearBitsCallback();
 }
@@ -778,11 +816,24 @@ fn traceENTER_xEventGroupCreateStatic(_pxEventGroupBuffer: *mut StaticEventGroup
 #[inline(always)]
 fn traceRETURN_xEventGroupCreateStatic(_pxEventBits: *mut EventGroup_t) {}
 #[inline(always)]
-fn traceENTER_xEventGroupWaitBits(_xEventGroup: EventGroupHandle_t, _uxBitsToWaitFor: EventBits_t, _xClearOnExit: BaseType_t, _xWaitForAllBits: BaseType_t, _xTicksToWait: TickType_t) {}
+fn traceENTER_xEventGroupWaitBits(
+    _xEventGroup: EventGroupHandle_t,
+    _uxBitsToWaitFor: EventBits_t,
+    _xClearOnExit: BaseType_t,
+    _xWaitForAllBits: BaseType_t,
+    _xTicksToWait: TickType_t,
+) {
+}
 #[inline(always)]
 fn traceRETURN_xEventGroupWaitBits(_uxReturn: EventBits_t) {}
 #[inline(always)]
-fn traceENTER_xEventGroupSync(_xEventGroup: EventGroupHandle_t, _uxBitsToSet: EventBits_t, _uxBitsToWaitFor: EventBits_t, _xTicksToWait: TickType_t) {}
+fn traceENTER_xEventGroupSync(
+    _xEventGroup: EventGroupHandle_t,
+    _uxBitsToSet: EventBits_t,
+    _uxBitsToWaitFor: EventBits_t,
+    _xTicksToWait: TickType_t,
+) {
+}
 #[inline(always)]
 fn traceRETURN_xEventGroupSync(_uxReturn: EventBits_t) {}
 #[inline(always)]
@@ -802,7 +853,11 @@ fn traceENTER_vEventGroupDelete(_xEventGroup: EventGroupHandle_t) {}
 #[inline(always)]
 fn traceRETURN_vEventGroupDelete() {}
 #[inline(always)]
-fn traceENTER_xEventGroupGetStaticBuffer(_xEventGroup: EventGroupHandle_t, _ppxEventGroupBuffer: *mut *mut StaticEventGroup_t) {}
+fn traceENTER_xEventGroupGetStaticBuffer(
+    _xEventGroup: EventGroupHandle_t,
+    _ppxEventGroupBuffer: *mut *mut StaticEventGroup_t,
+) {
+}
 #[inline(always)]
 fn traceRETURN_xEventGroupGetStaticBuffer(_xReturn: BaseType_t) {}
 #[inline(always)]
@@ -815,13 +870,22 @@ fn traceENTER_vEventGroupClearBitsCallback(_pvEventGroup: *mut c_void, _ulBitsTo
 fn traceRETURN_vEventGroupClearBitsCallback() {}
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
 #[inline(always)]
-fn traceENTER_xEventGroupSetBitsFromISR(_xEventGroup: EventGroupHandle_t, _uxBitsToSet: EventBits_t, _pxHigherPriorityTaskWoken: *mut BaseType_t) {}
+fn traceENTER_xEventGroupSetBitsFromISR(
+    _xEventGroup: EventGroupHandle_t,
+    _uxBitsToSet: EventBits_t,
+    _pxHigherPriorityTaskWoken: *mut BaseType_t,
+) {
+}
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
 #[inline(always)]
 fn traceRETURN_xEventGroupSetBitsFromISR(_xReturn: BaseType_t) {}
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
 #[inline(always)]
-fn traceENTER_xEventGroupClearBitsFromISR(_xEventGroup: EventGroupHandle_t, _uxBitsToClear: EventBits_t) {}
+fn traceENTER_xEventGroupClearBitsFromISR(
+    _xEventGroup: EventGroupHandle_t,
+    _uxBitsToClear: EventBits_t,
+) {
+}
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
 #[inline(always)]
 fn traceRETURN_xEventGroupClearBitsFromISR(_xReturn: BaseType_t) {}
@@ -833,7 +897,11 @@ fn traceENTER_uxEventGroupGetNumber(_xEventGroup: EventGroupHandle_t) {}
 fn traceRETURN_uxEventGroupGetNumber(_xReturn: UBaseType_t) {}
 #[cfg(feature = "trace-facility")]
 #[inline(always)]
-fn traceENTER_vEventGroupSetNumber(_xEventGroup: EventGroupHandle_t, _uxEventGroupNumber: UBaseType_t) {}
+fn traceENTER_vEventGroupSetNumber(
+    _xEventGroup: EventGroupHandle_t,
+    _uxEventGroupNumber: UBaseType_t,
+) {
+}
 #[cfg(feature = "trace-facility")]
 #[inline(always)]
 fn traceRETURN_vEventGroupSetNumber() {}

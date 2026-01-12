@@ -250,7 +250,9 @@ pub unsafe fn vPortDefineHeapRegions<const N: usize>(regions: &[HeapRegion; N]) 
         // Verify regions are in ascending address order
         #[cfg(debug_assertions)]
         {
-            if !px_previous_free_block.is_null() && px_previous_free_block != &mut X_START as *mut BlockLink {
+            if !px_previous_free_block.is_null()
+                && px_previous_free_block != &mut X_START as *mut BlockLink
+            {
                 debug_assert!(
                     ux_address > px_previous_free_block as usize,
                     "Heap regions must be in ascending address order"
@@ -362,7 +364,10 @@ pub unsafe fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void {
     let mut x_wanted_size = x_wanted_size;
 
     // Check that heap has been initialized
-    configASSERT!(!PX_END.is_null(), "Heap not initialized - call vPortDefineHeapRegions first");
+    configASSERT!(
+        !PX_END.is_null(),
+        "Heap not initialized - call vPortDefineHeapRegions first"
+    );
 
     if x_wanted_size > 0 {
         // Add space for the block header
@@ -404,8 +409,8 @@ pub unsafe fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void {
             // Did we find a block?
             if px_block != PX_END {
                 // Return the memory after the header
-                pv_return = ((*px_previous_block).pxNextFreeBlock as *mut u8)
-                    .add(HEAP_STRUCT_SIZE) as *mut c_void;
+                pv_return = ((*px_previous_block).pxNextFreeBlock as *mut u8).add(HEAP_STRUCT_SIZE)
+                    as *mut c_void;
 
                 // Remove this block from the free list
                 (*px_previous_block).pxNextFreeBlock = (*px_block).pxNextFreeBlock;
@@ -414,8 +419,7 @@ pub unsafe fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void {
                 let block_size = heap_get_block_size(&*px_block);
                 if block_size - x_wanted_size > HEAP_MINIMUM_BLOCK_SIZE {
                     // Split: create new block after our allocation
-                    let px_new_block =
-                        (px_block as *mut u8).add(x_wanted_size) as *mut BlockLink;
+                    let px_new_block = (px_block as *mut u8).add(x_wanted_size) as *mut BlockLink;
                     (*px_new_block).xBlockSize = block_size - x_wanted_size;
 
                     // Update our block size
@@ -548,7 +552,8 @@ pub fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
         xTaskResumeAll();
 
         (*px_heap_stats).xSizeOfLargestFreeBlockInBytes = x_max_size;
-        (*px_heap_stats).xSizeOfSmallestFreeBlockInBytes = if x_blocks > 0 { x_min_size } else { 0 };
+        (*px_heap_stats).xSizeOfSmallestFreeBlockInBytes =
+            if x_blocks > 0 { x_min_size } else { 0 };
         (*px_heap_stats).xNumberOfFreeBlocks = x_blocks;
         (*px_heap_stats).xAvailableHeapSpaceInBytes = X_FREE_BYTES_REMAINING;
         (*px_heap_stats).xNumberOfSuccessfulAllocations = X_NUMBER_OF_SUCCESSFUL_ALLOCATIONS;

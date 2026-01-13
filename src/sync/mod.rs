@@ -27,6 +27,7 @@ mod queue;
 mod semaphore;
 #[cfg(feature = "stream-buffers")]
 mod stream_buffer;
+mod task;
 #[cfg(feature = "timers")]
 mod timer;
 
@@ -38,5 +39,10 @@ pub use queue::Queue;
 pub use semaphore::{BinarySemaphore, CountingSemaphore};
 #[cfg(feature = "stream-buffers")]
 pub use stream_buffer::StreamBuffer;
+pub use task::{TaskFn, TaskHandle};
+#[cfg(feature = "task-delete")]
+pub use task::delete_self;
+#[cfg(feature = "task-suspend")]
+pub use task::suspend_self;
 #[cfg(feature = "timers")]
 pub use timer::Timer;

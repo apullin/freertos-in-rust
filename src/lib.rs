@@ -73,6 +73,10 @@ pub mod memory;
 // Kernel modules
 pub mod kernel;
 
+// Safe synchronization wrappers (requires use-mutexes for Mutex)
+#[cfg(feature = "use-mutexes")]
+pub mod sync;
+
 // Re-export commonly used items at crate root (like FreeRTOS.h does)
 pub use config::*;
 pub use types::*;

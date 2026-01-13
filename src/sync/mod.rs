@@ -19,12 +19,14 @@
 //! } // mutex released here
 //! ```
 
+mod event_group;
 mod mutex;
 mod queue;
 mod semaphore;
 #[cfg(feature = "timers")]
 mod timer;
 
+pub use event_group::EventGroup;
 pub use mutex::{Mutex, MutexGuard};
 pub use queue::Queue;
 pub use semaphore::{BinarySemaphore, CountingSemaphore};

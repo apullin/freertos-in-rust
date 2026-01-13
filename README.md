@@ -12,6 +12,14 @@ This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The ke
 
 ## Project Structure
 
+The `master` branch contains the most direct port, with all features except SMP. This heavily uses `unsafe`, as all constructs are kept as close to the C code as possible.
+
+The `safe_shim` branch adds an interface shim that elides most of the `unsafe` usage, and is more Rust-idiomatic. See `RUST_WRAPPER.md` for details.
+
+SMP support does appear to work, and is in `smp` branch - separated because it steps on a fair amount of definitions throughout the code.
+
+File tree for the core code:
+
 ```
 src/
 ├── lib.rs              # Crate root, re-exports

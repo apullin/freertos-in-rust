@@ -1,6 +1,8 @@
 //! Minimal FreeRusTOS Demo - ARM Cortex-A53 (AArch64)
 //!
-//! Just creates one task and starts the scheduler.
+//! A simple demo using safe Rust wrappers:
+//! - TaskHandle::spawn_static() for task creation
+//! - vTaskDelay via convenience functions
 
 #![no_std]
 #![no_main]
@@ -95,8 +97,11 @@ use freertos_in_rust::memory::FreeRtosAllocator;
 #[global_allocator]
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 
-use freertos_in_rust::kernel::tasks::{vTaskDelay, vTaskStartScheduler, xTaskCreateStatic, StaticTask_t};
+// Import safe wrappers
+use freertos_in_rust::sync::TaskHandle;
+use freertos_in_rust::kernel::tasks::{vTaskDelay, StaticTask_t};
 use freertos_in_rust::types::*;
+use freertos_in_rust::start_scheduler;
 
 // Hardware
 const UART0_BASE: usize = 0x0900_0000;
@@ -129,9 +134,6 @@ fn panic(info: &PanicInfo) -> ! {
 // =============================================================================
 // Simple UART Output
 // =============================================================================
-// NOTE: A holistic solution for debug printing is not yet solidified and will
-// require better understanding of what Rust offers for no_std environments
-// (e.g., core::fmt::Write adds ~40KB). For now, demos use direct print functions.
 
 fn uart_putc(c: u8) {
     unsafe {
@@ -260,17 +262,15 @@ pub extern "C" fn main() -> ! {
 
     println("[Init] Creating task...");
     unsafe {
-        let result = xTaskCreateStatic(
-            simple_task,
-            b"Task\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
+        let result = TaskHandle::spawn_static(
+            b"Task\0",
+            &mut TASK_STACK.0,
+            &mut TASK_TCB,
             1,
-            TASK_STACK.0.as_mut_ptr(),
-            &mut TASK_TCB as *mut StaticTask_t,
+            simple_task,
         );
 
-        if result.is_null() {
+        if result.is_none() {
             println("[Init] Task creation FAILED!");
             loop { core::arch::asm!("wfi"); }
         }
@@ -278,7 +278,7 @@ pub extern "C" fn main() -> ! {
 
     println("[Init] Starting scheduler...");
     unsafe { core::arch::asm!("msr daifclr, #2"); }
-    vTaskStartScheduler();
+    start_scheduler();
 
     println("[Init] ERROR: Scheduler returned!");
     loop { unsafe { core::arch::asm!("wfi"); } }

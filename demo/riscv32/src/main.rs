@@ -1,10 +1,11 @@
 //! FreeRusTOS Demo Application - RISC-V RV32
 //!
-//! This demo demonstrates the FreeRTOS kernel running on RISC-V:
-//! - Task creation and scheduling
-//! - Mutex with priority inheritance
-//! - Binary semaphore
-//! - Software timers
+//! This demo demonstrates the FreeRTOS kernel running on RISC-V
+//! using the safe Rust wrappers:
+//! - TaskHandle::spawn_static() for task creation
+//! - Mutex<T> with priority inheritance
+//! - BinarySemaphore for signaling
+//! - Timer for periodic callbacks
 //!
 //! Target: QEMU sifive_e machine
 //! Output is via UART0.
@@ -15,7 +16,6 @@
 #![allow(static_mut_refs)]
 
 use core::ffi::c_void;
-use core::ptr;
 use core::panic::PanicInfo;
 
 use riscv_rt::entry;
@@ -27,16 +27,11 @@ use freertos_in_rust::memory::FreeRtosAllocator;
 #[global_allocator]
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 
-// Import FreeRTOS types and functions
-use freertos_in_rust::kernel::queue::{
-    xQueueCreateMutex, xQueueGenericCreate, xQueueGenericSend, xQueueSemaphoreTake,
-    queueQUEUE_TYPE_MUTEX, queueQUEUE_TYPE_BINARY_SEMAPHORE, queueSEND_TO_BACK, QueueHandle_t,
-};
-use freertos_in_rust::kernel::tasks::{
-    xTaskCreateStatic, vTaskStartScheduler, vTaskDelay, StaticTask_t,
-};
-use freertos_in_rust::kernel::timers::*;
+// Import safe wrappers
+use freertos_in_rust::sync::{BinarySemaphore, Mutex, TaskHandle, Timer};
+use freertos_in_rust::kernel::tasks::{vTaskDelay, StaticTask_t};
 use freertos_in_rust::types::*;
+use freertos_in_rust::start_scheduler;
 
 // =============================================================================
 // Panic Handler
@@ -53,28 +48,21 @@ fn panic(_info: &PanicInfo) -> ! {
 // UART Output (SiFive UART0)
 // =============================================================================
 
-/// SiFive UART0 base address (sifive_e machine)
 const UART0_BASE: usize = 0x10013000;
 const UART_TXDATA: usize = UART0_BASE + 0x00;
 
-/// Write a single byte to UART
 fn uart_putc(c: u8) {
     unsafe {
         let txdata = UART_TXDATA as *mut u32;
-        // Wait for TX FIFO not full (bit 31 = full)
         while core::ptr::read_volatile(txdata) & 0x8000_0000 != 0 {}
         core::ptr::write_volatile(txdata, c as u32);
     }
 }
 
-/// Write a string to UART
 fn uart_print(s: &str) {
-    for c in s.bytes() {
-        uart_putc(c);
-    }
+    for c in s.bytes() { uart_putc(c); }
 }
 
-/// Print a line to UART
 fn println(s: &str) {
     uart_print(s);
     uart_putc(b'\r');
@@ -82,22 +70,12 @@ fn println(s: &str) {
 }
 
 // =============================================================================
-// Shared Resources
+// Shared Resources (using safe wrappers)
 // =============================================================================
 
-/// Mutex handle - protects shared_counter
-static mut MUTEX_HANDLE: QueueHandle_t = ptr::null_mut();
-
-/// Semaphore handle - for signaling between tasks
-static mut SEMAPHORE_HANDLE: QueueHandle_t = ptr::null_mut();
-
-/// Timer handle - periodic timer
-static mut TIMER_HANDLE: TimerHandle_t = ptr::null_mut();
-
-/// Shared counter protected by mutex
-static mut SHARED_COUNTER: u32 = 0;
-
-/// Timer tick counter
+static mut MUTEX: Option<Mutex<u32>> = None;
+static mut SEMAPHORE: Option<BinarySemaphore> = None;
+static mut TIMER: Option<Timer> = None;
 static mut TIMER_TICKS: u32 = 0;
 
 // =============================================================================
@@ -112,9 +90,8 @@ const PRIORITY_HIGH: UBaseType_t = 3;
 // Task Stack Sizes (in words, not bytes)
 // =============================================================================
 
-const STACK_SIZE: usize = 256; // 1KB per task (RISC-V needs larger stacks)
+const STACK_SIZE: usize = 256;
 
-// Static task stacks and TCBs
 static mut LOW_TASK_STACK: [StackType_t; STACK_SIZE] = [0; STACK_SIZE];
 static mut LOW_TASK_TCB: StaticTask_t = StaticTask_t::new();
 
@@ -135,22 +112,15 @@ fn main() -> ! {
     println("========================================");
     println("");
 
-    // Create synchronization primitives
     create_sync_primitives();
-
-    // Create tasks
     create_tasks();
-
-    // Create software timer
     create_timer();
 
     println("[Main] Starting scheduler...");
     println("");
 
-    // Start the scheduler - this never returns
-    vTaskStartScheduler();
+    start_scheduler();
 
-    // Should never reach here
     println("[Main] ERROR: Scheduler returned!");
     loop {
         unsafe { core::arch::asm!("wfi"); }
@@ -165,22 +135,22 @@ fn create_sync_primitives() {
     println("[Init] Creating mutex...");
 
     unsafe {
-        MUTEX_HANDLE = xSemaphoreCreateMutex();
-        if MUTEX_HANDLE.is_null() {
-            println("[Init] ERROR: Failed to create mutex!");
-        } else {
+        MUTEX = Mutex::new(0);
+        if MUTEX.is_some() {
             println("[Init] Mutex created successfully");
+        } else {
+            println("[Init] ERROR: Failed to create mutex!");
         }
     }
 
     println("[Init] Creating binary semaphore...");
 
     unsafe {
-        SEMAPHORE_HANDLE = xSemaphoreCreateBinary();
-        if SEMAPHORE_HANDLE.is_null() {
-            println("[Init] ERROR: Failed to create semaphore!");
-        } else {
+        SEMAPHORE = BinarySemaphore::new();
+        if SEMAPHORE.is_some() {
             println("[Init] Semaphore created successfully");
+        } else {
+            println("[Init] ERROR: Failed to create semaphore!");
         }
     }
 }
@@ -189,52 +159,43 @@ fn create_tasks() {
     println("[Init] Creating tasks...");
 
     unsafe {
-        // Low priority task
-        let result = xTaskCreateStatic(
-            task_low_priority,
-            b"LowTask\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
+        let result = TaskHandle::spawn_static(
+            b"LowTask\0",
+            &mut LOW_TASK_STACK,
+            &mut LOW_TASK_TCB,
             PRIORITY_LOW,
-            LOW_TASK_STACK.as_mut_ptr(),
-            &mut LOW_TASK_TCB as *mut StaticTask_t,
+            task_low_priority,
         );
-        if result.is_null() {
-            println("[Init] ERROR: Failed to create low priority task!");
-        } else {
+        if result.is_some() {
             println("[Init] Low priority task created");
+        } else {
+            println("[Init] ERROR: Failed to create low priority task!");
         }
 
-        // Medium priority task
-        let result = xTaskCreateStatic(
-            task_medium_priority,
-            b"MedTask\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
+        let result = TaskHandle::spawn_static(
+            b"MedTask\0",
+            &mut MEDIUM_TASK_STACK,
+            &mut MEDIUM_TASK_TCB,
             PRIORITY_MEDIUM,
-            MEDIUM_TASK_STACK.as_mut_ptr(),
-            &mut MEDIUM_TASK_TCB as *mut StaticTask_t,
+            task_medium_priority,
         );
-        if result.is_null() {
-            println("[Init] ERROR: Failed to create medium priority task!");
-        } else {
+        if result.is_some() {
             println("[Init] Medium priority task created");
+        } else {
+            println("[Init] ERROR: Failed to create medium priority task!");
         }
 
-        // High priority task
-        let result = xTaskCreateStatic(
-            task_high_priority,
-            b"HighTask\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
+        let result = TaskHandle::spawn_static(
+            b"HighTask\0",
+            &mut HIGH_TASK_STACK,
+            &mut HIGH_TASK_TCB,
             PRIORITY_HIGH,
-            HIGH_TASK_STACK.as_mut_ptr(),
-            &mut HIGH_TASK_TCB as *mut StaticTask_t,
+            task_high_priority,
         );
-        if result.is_null() {
-            println("[Init] ERROR: Failed to create high priority task!");
-        } else {
+        if result.is_some() {
             println("[Init] High priority task created");
+        } else {
+            println("[Init] ERROR: Failed to create high priority task!");
         }
     }
 }
@@ -243,19 +204,17 @@ fn create_timer() {
     println("[Init] Creating software timer...");
 
     unsafe {
-        TIMER_HANDLE = xTimerCreate(
-            b"Timer1\0".as_ptr(),
-            pdMS_TO_TICKS(1000), // 1 second period
-            pdTRUE,              // Auto-reload
-            ptr::null_mut(),     // Timer ID
+        TIMER = Timer::new_periodic(
+            b"Timer1\0",
+            pdMS_TO_TICKS(1000),
             timer_callback,
         );
 
-        if TIMER_HANDLE.is_null() {
-            println("[Init] ERROR: Failed to create timer!");
-        } else {
+        if let Some(ref timer) = TIMER {
             println("[Init] Timer created successfully");
-            xTimerStart(TIMER_HANDLE, 0);
+            timer.start();
+        } else {
+            println("[Init] ERROR: Failed to create timer!");
         }
     }
 }
@@ -265,9 +224,7 @@ fn create_timer() {
 // =============================================================================
 
 extern "C" fn timer_callback(_xTimer: TimerHandle_t) {
-    unsafe {
-        TIMER_TICKS += 1;
-    }
+    unsafe { TIMER_TICKS += 1; }
     println("[Timer] Tick!");
 }
 
@@ -280,19 +237,20 @@ extern "C" fn task_low_priority(_pvParameters: *mut c_void) {
         println("[Low] Taking mutex...");
 
         unsafe {
-            if xSemaphoreTake(MUTEX_HANDLE, portMAX_DELAY) == pdTRUE {
+            if let Some(ref mutex) = MUTEX {
+                let mut guard = mutex.lock();
                 println("[Low] Mutex acquired!");
 
-                SHARED_COUNTER += 1;
+                *guard += 1;
                 println("[Low] Working...");
 
                 vTaskDelay(pdMS_TO_TICKS(200));
 
-                // Signal semaphore
-                xSemaphoreGive(SEMAPHORE_HANDLE);
+                if let Some(ref sem) = SEMAPHORE {
+                    sem.give();
+                }
 
                 println("[Low] Releasing mutex");
-                xSemaphoreGive(MUTEX_HANDLE);
             }
         }
 
@@ -316,36 +274,16 @@ extern "C" fn task_high_priority(_pvParameters: *mut c_void) {
         println("[High] Taking mutex...");
 
         unsafe {
-            if xSemaphoreTake(MUTEX_HANDLE, portMAX_DELAY) == pdTRUE {
+            if let Some(ref mutex) = MUTEX {
+                let mut guard = mutex.lock();
                 println("[High] Mutex acquired!");
 
-                SHARED_COUNTER += 10;
+                *guard += 10;
 
                 println("[High] Releasing mutex");
-                xSemaphoreGive(MUTEX_HANDLE);
             }
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-}
-
-// =============================================================================
-// Semaphore Helper Functions
-// =============================================================================
-
-unsafe fn xSemaphoreCreateMutex() -> QueueHandle_t {
-    xQueueCreateMutex(queueQUEUE_TYPE_MUTEX)
-}
-
-unsafe fn xSemaphoreCreateBinary() -> QueueHandle_t {
-    xQueueGenericCreate(1, 0, queueQUEUE_TYPE_BINARY_SEMAPHORE)
-}
-
-unsafe fn xSemaphoreTake(xSemaphore: QueueHandle_t, xBlockTime: TickType_t) -> BaseType_t {
-    xQueueSemaphoreTake(xSemaphore, xBlockTime)
-}
-
-unsafe fn xSemaphoreGive(xSemaphore: QueueHandle_t) -> BaseType_t {
-    xQueueGenericSend(xSemaphore, ptr::null(), 0, queueSEND_TO_BACK)
 }

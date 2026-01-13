@@ -80,3 +80,35 @@ pub mod sync;
 // Re-export commonly used items at crate root (like FreeRTOS.h does)
 pub use config::*;
 pub use types::*;
+
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
+/// Delays the current task for the specified number of ticks.
+///
+/// This is a safe wrapper around `vTaskDelay`.
+#[inline]
+pub fn delay(ticks: TickType_t) {
+    kernel::tasks::vTaskDelay(ticks);
+}
+
+/// Delays the current task for the specified number of milliseconds.
+///
+/// Converts milliseconds to ticks using the configured tick rate.
+#[inline]
+pub fn delay_ms(ms: u32) {
+    kernel::tasks::vTaskDelay(pdMS_TO_TICKS(ms as TickType_t));
+}
+
+/// Starts the FreeRTOS scheduler.
+///
+/// This function does not return under normal operation. Tasks must be
+/// created before calling this function.
+#[inline]
+pub fn start_scheduler() -> ! {
+    kernel::tasks::vTaskStartScheduler();
+    // vTaskStartScheduler only returns if there's insufficient memory
+    // for the idle task. In that case, loop forever.
+    loop {}
+}

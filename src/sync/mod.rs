@@ -23,6 +23,8 @@ mod event_group;
 mod mutex;
 mod queue;
 mod semaphore;
+#[cfg(feature = "stream-buffers")]
+mod stream_buffer;
 #[cfg(feature = "timers")]
 mod timer;
 
@@ -30,5 +32,7 @@ pub use event_group::EventGroup;
 pub use mutex::{Mutex, MutexGuard};
 pub use queue::Queue;
 pub use semaphore::{BinarySemaphore, CountingSemaphore};
+#[cfg(feature = "stream-buffers")]
+pub use stream_buffer::StreamBuffer;
 #[cfg(feature = "timers")]
 pub use timer::Timer;

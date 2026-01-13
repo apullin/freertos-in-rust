@@ -22,7 +22,11 @@
 mod mutex;
 mod queue;
 mod semaphore;
+#[cfg(feature = "timers")]
+mod timer;
 
 pub use mutex::{Mutex, MutexGuard};
 pub use queue::Queue;
 pub use semaphore::{BinarySemaphore, CountingSemaphore};
+#[cfg(feature = "timers")]
+pub use timer::Timer;

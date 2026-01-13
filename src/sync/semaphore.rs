@@ -4,10 +4,15 @@
 //! Unlike mutexes, semaphores don't have priority inheritance and
 //! can be given from ISR context.
 
+use core::ptr;
+
 use crate::kernel::queue::{
-    queueQUEUE_TYPE_BINARY_SEMAPHORE, queueSEND_TO_BACK, xQueueGenericCreate, xQueueGenericSend,
-    xQueueSemaphoreTake, QueueHandle_t,
+    queueQUEUE_TYPE_BINARY_SEMAPHORE, queueSEND_TO_BACK, xQueueCreateCountingSemaphoreStatic,
+    xQueueGenericCreateStatic, xQueueGenericSend, xQueueSemaphoreTake, QueueHandle_t,
+    StaticQueue_t,
 };
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::kernel::queue::xQueueGenericCreate;
 use crate::types::*;
 
 /// A binary semaphore for task synchronization.
@@ -43,8 +48,38 @@ impl BinarySemaphore {
     /// Returns `None` if creation failed (e.g., out of memory).
     #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     pub fn new() -> Option<Self> {
-        let handle =
-            unsafe { xQueueGenericCreate(1, 0, queueQUEUE_TYPE_BINARY_SEMAPHORE) };
+        let handle = unsafe { xQueueGenericCreate(1, 0, queueQUEUE_TYPE_BINARY_SEMAPHORE) };
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self { handle })
+        }
+    }
+
+    /// Creates a binary semaphore using static storage.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use freertos_in_rust::sync::BinarySemaphore;
+    /// use freertos_in_rust::kernel::queue::StaticQueue_t;
+    ///
+    /// static mut SEM_BUF: StaticQueue_t = StaticQueue_t::new();
+    ///
+    /// let sem = BinarySemaphore::new_static(
+    ///     unsafe { &mut SEM_BUF },
+    /// ).expect("Failed to create semaphore");
+    /// ```
+    pub fn new_static(sem_buffer: &'static mut StaticQueue_t) -> Option<Self> {
+        let handle = unsafe {
+            xQueueGenericCreateStatic(
+                1,
+                0,
+                ptr::null_mut(),
+                sem_buffer as *mut StaticQueue_t,
+                queueQUEUE_TYPE_BINARY_SEMAPHORE,
+            )
+        };
         if handle.is_null() {
             None
         } else {
@@ -128,6 +163,42 @@ impl CountingSemaphore {
     pub fn new(max_count: UBaseType_t, initial_count: UBaseType_t) -> Option<Self> {
         let handle = unsafe {
             crate::kernel::queue::xQueueCreateCountingSemaphore(max_count, initial_count)
+        };
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self { handle })
+        }
+    }
+
+    /// Creates a counting semaphore using static storage.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use freertos_in_rust::sync::CountingSemaphore;
+    /// use freertos_in_rust::kernel::queue::StaticQueue_t;
+    ///
+    /// static mut SEM_BUF: StaticQueue_t = StaticQueue_t::new();
+    ///
+    /// // Max count 5, initial count 3
+    /// let pool = CountingSemaphore::new_static(
+    ///     5,
+    ///     3,
+    ///     unsafe { &mut SEM_BUF },
+    /// ).expect("Failed to create semaphore");
+    /// ```
+    pub fn new_static(
+        max_count: UBaseType_t,
+        initial_count: UBaseType_t,
+        sem_buffer: &'static mut StaticQueue_t,
+    ) -> Option<Self> {
+        let handle = unsafe {
+            xQueueCreateCountingSemaphoreStatic(
+                max_count,
+                initial_count,
+                sem_buffer as *mut StaticQueue_t,
+            )
         };
         if handle.is_null() {
             None

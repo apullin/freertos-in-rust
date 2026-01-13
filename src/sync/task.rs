@@ -11,12 +11,13 @@
 use core::ffi::c_void;
 use core::ptr;
 
-use crate::kernel::tasks::{
-    vTaskDelete, vTaskResume, vTaskSuspend, xTaskGetCurrentTaskHandle, StaticTask_t,
-};
+use crate::kernel::tasks::{xTaskGetCurrentTaskHandle, xTaskCreateStatic, StaticTask_t};
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 use crate::kernel::tasks::xTaskCreate;
-use crate::kernel::tasks::xTaskCreateStatic;
+#[cfg(feature = "task-delete")]
+use crate::kernel::tasks::vTaskDelete;
+#[cfg(feature = "task-suspend")]
+use crate::kernel::tasks::{vTaskResume, vTaskSuspend};
 use crate::types::*;
 
 /// A handle to a FreeRTOS task.

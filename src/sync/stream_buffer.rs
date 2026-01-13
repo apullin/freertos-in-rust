@@ -8,12 +8,15 @@
 //! Multiple writers or readers require external synchronization.
 
 use core::ffi::c_void;
+use core::mem::{size_of, MaybeUninit};
 
 use crate::kernel::stream_buffer::{
-    xStreamBufferBytesAvailable, xStreamBufferCreate, xStreamBufferIsEmpty, xStreamBufferIsFull,
-    xStreamBufferReceive, xStreamBufferReset, xStreamBufferSend, xStreamBufferSpacesAvailable,
-    StreamBufferHandle_t,
+    sbTYPE_STREAM_BUFFER, xStreamBufferBytesAvailable, xStreamBufferGenericCreateStatic,
+    xStreamBufferIsEmpty, xStreamBufferIsFull, xStreamBufferReceive, xStreamBufferReset,
+    xStreamBufferSend, xStreamBufferSpacesAvailable, StaticStreamBuffer_t, StreamBufferHandle_t,
 };
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::kernel::stream_buffer::xStreamBufferCreate;
 use crate::types::*;
 
 /// A byte stream buffer for efficient task-to-task data transfer.
@@ -53,6 +56,52 @@ impl StreamBuffer {
     #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     pub fn new(size: usize, trigger_level: usize) -> Option<Self> {
         let handle = unsafe { xStreamBufferCreate(size, trigger_level) };
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self { handle })
+        }
+    }
+
+    /// Creates a stream buffer using static storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Static byte buffer for data
+    /// * `trigger_level` - Minimum bytes before reader unblocks (1 = immediate)
+    /// * `stream_buffer` - Static control structure
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use freertos_in_rust::sync::StreamBuffer;
+    /// use freertos_in_rust::kernel::stream_buffer::StaticStreamBuffer_t;
+    ///
+    /// static mut STORAGE: [u8; 128] = [0; 128];
+    /// static mut SB_BUF: StaticStreamBuffer_t = StaticStreamBuffer_t::new();
+    ///
+    /// let stream = StreamBuffer::new_static(
+    ///     unsafe { &mut STORAGE },
+    ///     1,  // trigger level
+    ///     unsafe { &mut SB_BUF },
+    /// ).expect("Failed to create stream buffer");
+    /// ```
+    pub fn new_static(
+        storage: &'static mut [u8],
+        trigger_level: usize,
+        stream_buffer: &'static mut StaticStreamBuffer_t,
+    ) -> Option<Self> {
+        let handle = unsafe {
+            xStreamBufferGenericCreateStatic(
+                storage.len(),
+                trigger_level,
+                sbTYPE_STREAM_BUFFER,
+                storage.as_mut_ptr(),
+                stream_buffer as *mut StaticStreamBuffer_t,
+                None,
+                None,
+            )
+        };
         if handle.is_null() {
             None
         } else {
@@ -130,6 +179,79 @@ impl StreamBuffer {
                 buf.len(),
                 ticks,
             )
+        }
+    }
+
+    // =========================================================================
+    // Typed Send
+    // =========================================================================
+
+    /// Sends a typed value to the stream, blocking until space is available.
+    ///
+    /// Returns `true` if all bytes were sent, `false` otherwise.
+    ///
+    /// # Note
+    ///
+    /// Stream buffers may send partial data if the buffer is too small.
+    /// This method only returns `true` if ALL bytes of the value were sent.
+    pub fn send_val<T: Copy>(&self, value: &T) -> bool {
+        self.send_val_timeout(value, portMAX_DELAY)
+    }
+
+    /// Attempts to send a typed value without blocking.
+    pub fn try_send_val<T: Copy>(&self, value: &T) -> bool {
+        self.send_val_timeout(value, 0)
+    }
+
+    /// Sends a typed value with a timeout.
+    ///
+    /// Returns `true` if all bytes were sent within the timeout.
+    pub fn send_val_timeout<T: Copy>(&self, value: &T, ticks: TickType_t) -> bool {
+        let data =
+            unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) };
+        self.send_timeout(data, ticks) == size_of::<T>()
+    }
+
+    // =========================================================================
+    // Typed Receive
+    // =========================================================================
+
+    /// Receives a typed value from the stream, blocking until data is available.
+    ///
+    /// Returns `Some(value)` if exactly `size_of::<T>()` bytes were received,
+    /// `None` otherwise.
+    ///
+    /// # Note
+    ///
+    /// Stream buffers may receive partial data. This method only returns
+    /// `Some` if ALL bytes of the type were received.
+    pub fn receive_val<T: Copy>(&self) -> Option<T> {
+        self.receive_val_timeout(portMAX_DELAY)
+    }
+
+    /// Attempts to receive a typed value without blocking.
+    pub fn try_receive_val<T: Copy>(&self) -> Option<T> {
+        self.receive_val_timeout(0)
+    }
+
+    /// Receives a typed value with a timeout.
+    ///
+    /// Returns `Some(value)` if exactly `size_of::<T>()` bytes were received
+    /// within the timeout, `None` otherwise.
+    pub fn receive_val_timeout<T: Copy>(&self, ticks: TickType_t) -> Option<T> {
+        let mut value = MaybeUninit::<T>::uninit();
+        let received = unsafe {
+            xStreamBufferReceive(
+                self.handle,
+                value.as_mut_ptr() as *mut c_void,
+                size_of::<T>(),
+                ticks,
+            )
+        };
+        if received == size_of::<T>() {
+            Some(unsafe { value.assume_init() })
+        } else {
+            None
         }
     }
 

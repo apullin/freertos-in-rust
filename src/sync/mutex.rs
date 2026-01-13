@@ -8,9 +8,11 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 
 use crate::kernel::queue::{
-    queueQUEUE_TYPE_MUTEX, xQueueCreateMutex, xQueueGenericSend, xQueueSemaphoreTake,
-    QueueHandle_t, queueSEND_TO_BACK,
+    queueQUEUE_TYPE_MUTEX, xQueueCreateMutexStatic, xQueueGenericSend, xQueueSemaphoreTake,
+    QueueHandle_t, StaticQueue_t, queueSEND_TO_BACK,
 };
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::kernel::queue::xQueueCreateMutex;
 use crate::types::*;
 
 /// A mutual exclusion primitive with priority inheritance.
@@ -64,6 +66,34 @@ impl<T> Mutex<T> {
     #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     pub fn new(value: T) -> Option<Self> {
         let handle = unsafe { xQueueCreateMutex(queueQUEUE_TYPE_MUTEX) };
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self {
+                handle,
+                data: UnsafeCell::new(value),
+            })
+        }
+    }
+
+    /// Creates a mutex using static storage.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use freertos_in_rust::sync::Mutex;
+    /// use freertos_in_rust::kernel::queue::StaticQueue_t;
+    ///
+    /// static mut MUTEX_BUF: StaticQueue_t = StaticQueue_t::new();
+    ///
+    /// let mutex: Mutex<u32> = Mutex::new_static(
+    ///     42,
+    ///     unsafe { &mut MUTEX_BUF },
+    /// ).expect("Failed to create mutex");
+    /// ```
+    pub fn new_static(value: T, mutex_buffer: &'static mut StaticQueue_t) -> Option<Self> {
+        let handle =
+            unsafe { xQueueCreateMutexStatic(queueQUEUE_TYPE_MUTEX, mutex_buffer as *mut StaticQueue_t) };
         if handle.is_null() {
             None
         } else {

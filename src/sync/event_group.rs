@@ -4,9 +4,11 @@
 //! Event groups allow tasks to wait on combinations of event bits.
 
 use crate::kernel::event_groups::{
-    xEventGroupClearBits, xEventGroupCreate, xEventGroupGetBits, xEventGroupSetBits,
-    xEventGroupSync, xEventGroupWaitBits, EventBits_t,
+    xEventGroupClearBits, xEventGroupCreateStatic, xEventGroupGetBits, xEventGroupSetBits,
+    xEventGroupSync, xEventGroupWaitBits, EventBits_t, StaticEventGroup_t,
 };
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::kernel::event_groups::xEventGroupCreate;
 use crate::types::*;
 
 /// An event group for synchronizing tasks using bit flags.
@@ -37,6 +39,29 @@ impl EventGroup {
     #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     pub fn new() -> Option<Self> {
         let handle = xEventGroupCreate();
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self { handle })
+        }
+    }
+
+    /// Creates an event group using static storage.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use freertos_in_rust::sync::EventGroup;
+    /// use freertos_in_rust::kernel::event_groups::StaticEventGroup_t;
+    ///
+    /// static mut EG_BUF: StaticEventGroup_t = StaticEventGroup_t::new();
+    ///
+    /// let events = EventGroup::new_static(
+    ///     unsafe { &mut EG_BUF },
+    /// ).expect("Failed to create event group");
+    /// ```
+    pub fn new_static(event_group_buffer: &'static mut StaticEventGroup_t) -> Option<Self> {
+        let handle = xEventGroupCreateStatic(event_group_buffer as *mut StaticEventGroup_t);
         if handle.is_null() {
             None
         } else {

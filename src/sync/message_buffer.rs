@@ -11,11 +11,13 @@ use core::ffi::c_void;
 use core::mem::{size_of, MaybeUninit};
 
 use crate::kernel::stream_buffer::{
-    sbTYPE_MESSAGE_BUFFER, xStreamBufferBytesAvailable, xStreamBufferGenericCreate,
+    sbTYPE_MESSAGE_BUFFER, xStreamBufferBytesAvailable, xStreamBufferGenericCreateStatic,
     xStreamBufferIsEmpty, xStreamBufferIsFull, xStreamBufferNextMessageLengthBytes,
     xStreamBufferReceive, xStreamBufferReset, xStreamBufferSend, xStreamBufferSpacesAvailable,
-    StreamBufferHandle_t,
+    StaticStreamBuffer_t, StreamBufferHandle_t,
 };
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::kernel::stream_buffer::xStreamBufferGenericCreate;
 use crate::types::*;
 
 /// A message buffer for transferring discrete, variable-length messages.
@@ -54,6 +56,49 @@ impl MessageBuffer {
     pub fn new(size: usize) -> Option<Self> {
         let handle =
             unsafe { xStreamBufferGenericCreate(size, 1, sbTYPE_MESSAGE_BUFFER, None, None) };
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self { handle })
+        }
+    }
+
+    /// Creates a message buffer using static storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Static byte buffer for messages (must hold at least one message + 4 bytes)
+    /// * `msg_buffer` - Static control structure
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use freertos_in_rust::sync::MessageBuffer;
+    /// use freertos_in_rust::kernel::stream_buffer::StaticStreamBuffer_t;
+    ///
+    /// static mut STORAGE: [u8; 256] = [0; 256];
+    /// static mut MB_BUF: StaticStreamBuffer_t = StaticStreamBuffer_t::new();
+    ///
+    /// let msgs = MessageBuffer::new_static(
+    ///     unsafe { &mut STORAGE },
+    ///     unsafe { &mut MB_BUF },
+    /// ).expect("Failed to create message buffer");
+    /// ```
+    pub fn new_static(
+        storage: &'static mut [u8],
+        msg_buffer: &'static mut StaticStreamBuffer_t,
+    ) -> Option<Self> {
+        let handle = unsafe {
+            xStreamBufferGenericCreateStatic(
+                storage.len(),
+                1, // trigger level (1 for message buffers)
+                sbTYPE_MESSAGE_BUFFER,
+                storage.as_mut_ptr(),
+                msg_buffer as *mut StaticStreamBuffer_t,
+                None,
+                None,
+            )
+        };
         if handle.is_null() {
             None
         } else {

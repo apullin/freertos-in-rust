@@ -9,9 +9,11 @@ use core::marker::PhantomData;
 use core::mem::{size_of, MaybeUninit};
 
 use crate::kernel::queue::{
-    queueQUEUE_TYPE_BASE, queueSEND_TO_BACK, queueSEND_TO_FRONT, xQueueGenericCreate,
-    xQueueGenericSend, xQueuePeek, xQueueReceive, QueueHandle_t,
+    queueQUEUE_TYPE_BASE, queueSEND_TO_BACK, queueSEND_TO_FRONT, xQueueGenericCreateStatic,
+    xQueueGenericSend, xQueuePeek, xQueueReceive, QueueHandle_t, StaticQueue_t,
 };
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::kernel::queue::xQueueGenericCreate;
 use crate::types::*;
 
 /// A type-safe FIFO queue for inter-task communication.
@@ -65,6 +67,55 @@ impl<T: Copy> Queue<T> {
         let item_size = size_of::<T>() as UBaseType_t;
         let handle =
             unsafe { xQueueGenericCreate(length as UBaseType_t, item_size, queueQUEUE_TYPE_BASE) };
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self {
+                handle,
+                _marker: PhantomData,
+            })
+        }
+    }
+
+    /// Creates a queue using statically allocated storage.
+    ///
+    /// This is the preferred method for embedded systems where dynamic
+    /// allocation should be avoided.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Static buffer for queue items (must hold at least `length` items)
+    /// * `queue_buffer` - Static queue control structure
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use freertos_in_rust::sync::Queue;
+    /// use freertos_in_rust::kernel::queue::StaticQueue_t;
+    ///
+    /// static mut STORAGE: [u32; 10] = [0; 10];
+    /// static mut QUEUE_BUF: StaticQueue_t = StaticQueue_t::new();
+    ///
+    /// let queue: Queue<u32> = Queue::new_static(
+    ///     unsafe { &mut STORAGE },
+    ///     unsafe { &mut QUEUE_BUF },
+    /// ).expect("Failed to create queue");
+    /// ```
+    pub fn new_static(
+        storage: &'static mut [T],
+        queue_buffer: &'static mut StaticQueue_t,
+    ) -> Option<Self> {
+        let length = storage.len();
+        let item_size = size_of::<T>();
+        let handle = unsafe {
+            xQueueGenericCreateStatic(
+                length as UBaseType_t,
+                item_size as UBaseType_t,
+                storage.as_mut_ptr() as *mut u8,
+                queue_buffer as *mut StaticQueue_t,
+                queueQUEUE_TYPE_BASE,
+            )
+        };
         if handle.is_null() {
             None
         } else {

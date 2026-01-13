@@ -3,11 +3,15 @@
 //! Provides a safe wrapper around FreeRTOS software timers.
 //! Timers run callbacks in the timer daemon task context.
 
+use core::ffi::c_void;
+
 use crate::kernel::timers::{
-    xTimerChangePeriod, xTimerCreate, xTimerGetExpiryTime, xTimerGetPeriod,
-    xTimerGetTimerDaemonTaskHandle, xTimerIsTimerActive, xTimerReset, xTimerStart, xTimerStop,
-    TimerCallbackFunction_t,
+    pvTimerGetTimerID, vTimerSetTimerID, xTimerChangePeriod, xTimerCreateStatic,
+    xTimerGetExpiryTime, xTimerGetPeriod, xTimerGetTimerDaemonTaskHandle, xTimerIsTimerActive,
+    xTimerReset, xTimerStart, xTimerStop, StaticTimer_t, TimerCallbackFunction_t,
 };
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::kernel::timers::xTimerCreate;
 use crate::types::*;
 
 /// A software timer that executes a callback after a specified period.
@@ -64,7 +68,7 @@ impl Timer {
     /// # Returns
     ///
     /// `Some(Timer)` on success, `None` if creation failed.
-    #[cfg(feature = "timers")]
+    #[cfg(all(feature = "timers", any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
     pub fn new_periodic(
         name: &[u8],
         period_ticks: TickType_t,
@@ -83,7 +87,7 @@ impl Timer {
     /// * `name` - Null-terminated name for debugging
     /// * `period_ticks` - Delay before callback in ticks
     /// * `callback` - Function called when timer expires
-    #[cfg(feature = "timers")]
+    #[cfg(all(feature = "timers", any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
     pub fn new_oneshot(
         name: &[u8],
         period_ticks: TickType_t,
@@ -92,7 +96,7 @@ impl Timer {
         Self::new_internal(name, period_ticks, false, callback)
     }
 
-    #[cfg(feature = "timers")]
+    #[cfg(all(feature = "timers", any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
     fn new_internal(
         name: &[u8],
         period_ticks: TickType_t,
@@ -105,6 +109,74 @@ impl Timer {
             if auto_reload { pdTRUE } else { pdFALSE },
             core::ptr::null_mut(), // pvTimerID - user can set later if needed
             callback,
+        );
+
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self { handle })
+        }
+    }
+
+    // =========================================================================
+    // Static Allocation
+    // =========================================================================
+
+    /// Creates a periodic timer using static storage.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use freertos_in_rust::sync::Timer;
+    /// use freertos_in_rust::kernel::timers::StaticTimer_t;
+    ///
+    /// static mut TIMER_BUF: StaticTimer_t = StaticTimer_t::new();
+    ///
+    /// extern "C" fn callback(_timer: TimerHandle_t) { /* ... */ }
+    ///
+    /// let timer = Timer::new_periodic_static(
+    ///     b"MyTimer\0",
+    ///     1000,
+    ///     callback,
+    ///     unsafe { &mut TIMER_BUF },
+    /// ).expect("Failed to create timer");
+    /// ```
+    #[cfg(feature = "timers")]
+    pub fn new_periodic_static(
+        name: &[u8],
+        period_ticks: TickType_t,
+        callback: TimerCallbackFunction_t,
+        timer_buffer: &'static mut StaticTimer_t,
+    ) -> Option<Self> {
+        Self::new_static_internal(name, period_ticks, true, callback, timer_buffer)
+    }
+
+    /// Creates a one-shot timer using static storage.
+    #[cfg(feature = "timers")]
+    pub fn new_oneshot_static(
+        name: &[u8],
+        period_ticks: TickType_t,
+        callback: TimerCallbackFunction_t,
+        timer_buffer: &'static mut StaticTimer_t,
+    ) -> Option<Self> {
+        Self::new_static_internal(name, period_ticks, false, callback, timer_buffer)
+    }
+
+    #[cfg(feature = "timers")]
+    fn new_static_internal(
+        name: &[u8],
+        period_ticks: TickType_t,
+        auto_reload: bool,
+        callback: TimerCallbackFunction_t,
+        timer_buffer: &'static mut StaticTimer_t,
+    ) -> Option<Self> {
+        let handle = xTimerCreateStatic(
+            name.as_ptr(),
+            period_ticks,
+            if auto_reload { pdTRUE } else { pdFALSE },
+            core::ptr::null_mut(),
+            callback,
+            timer_buffer as *mut StaticTimer_t,
         );
 
         if handle.is_null() {
@@ -195,9 +267,82 @@ impl Timer {
         xTimerGetExpiryTime(self.handle)
     }
 
+    // =========================================================================
+    // Timer ID (Context)
+    // =========================================================================
+
+    /// Sets the timer's ID to a typed pointer.
+    ///
+    /// The timer ID is typically used to pass context to the timer callback.
+    /// This is useful when multiple timers share the same callback function.
+    ///
+    /// # Safety Note
+    ///
+    /// The pointed-to data must outlive the timer. The timer stores a raw
+    /// pointer, so Rust's lifetime system cannot enforce this.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// struct TimerContext { counter: u32 }
+    /// static mut CTX: TimerContext = TimerContext { counter: 0 };
+    ///
+    /// // In setup:
+    /// timer.set_id(unsafe { &mut CTX });
+    ///
+    /// // In callback:
+    /// extern "C" fn callback(timer_handle: TimerHandle_t) {
+    ///     let timer = unsafe { Timer::from_raw(timer_handle) };
+    ///     if let Some(ctx) = timer.get_id::<TimerContext>() {
+    ///         unsafe { (*ctx).counter += 1; }
+    ///     }
+    /// }
+    /// ```
+    #[cfg(feature = "timers")]
+    pub fn set_id<T>(&self, id: *mut T) {
+        vTimerSetTimerID(self.handle, id as *mut c_void);
+    }
+
+    /// Gets the timer's ID as a typed pointer.
+    ///
+    /// Returns `None` if the ID was never set (is null).
+    /// Returns `Some(ptr)` otherwise - caller must ensure the type matches
+    /// what was set.
+    #[cfg(feature = "timers")]
+    pub fn get_id<T>(&self) -> Option<*mut T> {
+        let id = pvTimerGetTimerID(self.handle);
+        if id.is_null() {
+            None
+        } else {
+            Some(id as *mut T)
+        }
+    }
+
+    /// Gets the timer's raw ID pointer.
+    ///
+    /// This is the low-level version that returns the raw `*mut c_void`.
+    #[cfg(feature = "timers")]
+    pub fn get_id_raw(&self) -> *mut c_void {
+        pvTimerGetTimerID(self.handle)
+    }
+
+    // =========================================================================
+    // Interop
+    // =========================================================================
+
     /// Returns the raw FreeRTOS handle for interop.
     pub unsafe fn raw_handle(&self) -> TimerHandle_t {
         self.handle
+    }
+
+    /// Creates a Timer from a raw FreeRTOS handle.
+    ///
+    /// # Safety
+    ///
+    /// The handle must be a valid FreeRTOS timer handle.
+    /// This is useful in timer callbacks to access the Timer wrapper.
+    pub unsafe fn from_raw(handle: TimerHandle_t) -> Self {
+        Self { handle }
     }
 
     /// Returns a handle to the timer daemon task.

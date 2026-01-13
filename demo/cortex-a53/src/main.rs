@@ -1,13 +1,14 @@
 //! Minimal FreeRusTOS Demo - ARM Cortex-A53 (AArch64)
 //!
-//! A simple demo using safe Rust wrappers:
+//! A simple demo using safe Rust wrappers with idiomatic patterns:
+//! - .expect() for error handling on creation
 //! - TaskHandle::spawn_static() for task creation
 //! - vTaskDelay via convenience functions
 
 #![no_std]
 #![no_main]
 #![allow(non_snake_case)]
-#![allow(static_mut_refs)]
+#![allow(static_mut_refs)] // Task stacks/TCBs must be static mut for FreeRTOS
 
 use core::arch::global_asm;
 use core::ffi::c_void;
@@ -262,19 +263,15 @@ pub extern "C" fn main() -> ! {
 
     println("[Init] Creating task...");
     unsafe {
-        let result = TaskHandle::spawn_static(
+        TaskHandle::spawn_static(
             b"Task\0",
             &mut TASK_STACK.0,
             &mut TASK_TCB,
             1,
             simple_task,
-        );
-
-        if result.is_none() {
-            println("[Init] Task creation FAILED!");
-            loop { core::arch::asm!("wfi"); }
-        }
+        ).expect("Failed to create task");
     }
+    println("[Init] Task created successfully");
 
     println("[Init] Starting scheduler...");
     unsafe { core::arch::asm!("msr daifclr, #2"); }

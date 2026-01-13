@@ -1,11 +1,10 @@
 //! FreeRusTOS Demo Application - ARM Cortex-A9
 //!
 //! This demo demonstrates the FreeRTOS kernel running on Cortex-A9
-//! using the safe Rust wrappers:
-//! - Task creation with TaskHandle::spawn_static()
-//! - Mutex<T> with priority inheritance
-//! - BinarySemaphore for signaling
-//! - Timer for periodic callbacks
+//! using the safe Rust wrappers with idiomatic Rust patterns:
+//! - Static initialization with contained unsafe blocks
+//! - .expect() for error handling on creation
+//! - RAII guards for mutex access
 //!
 //! Target: QEMU vexpress-a9 machine
 //! Output is via UART0 (PL011).
@@ -13,7 +12,7 @@
 #![no_std]
 #![no_main]
 #![allow(non_snake_case)]
-#![allow(static_mut_refs)]
+#![allow(static_mut_refs)] // Task stacks/TCBs must be static mut for FreeRTOS
 
 use core::ffi::c_void;
 use core::panic::PanicInfo;
@@ -174,13 +173,30 @@ pub extern "C" fn vApplicationFPUSafeIRQHandler(ulICCIAR: u32) {
 }
 
 // =============================================================================
-// Shared Resources (using safe wrappers)
+// Shared Resources
+//
+// These are initialized once before the scheduler starts, then accessed
+// read-only by tasks. The unsafe block for initialization is contained to
+// the init functions; subsequent access through the wrappers is safe.
 // =============================================================================
 
-static mut MUTEX: Option<Mutex<u32>> = None;
+static mut COUNTER_MUTEX: Option<Mutex<u32>> = None;
 static mut SEMAPHORE: Option<BinarySemaphore> = None;
 static mut TIMER: Option<Timer> = None;
 static mut TIMER_TICKS: u32 = 0;
+
+// Helper macros for safe access to initialized resources
+macro_rules! get_mutex {
+    () => {
+        unsafe { COUNTER_MUTEX.as_ref().expect("Mutex not initialized") }
+    };
+}
+
+macro_rules! get_semaphore {
+    () => {
+        unsafe { SEMAPHORE.as_ref().expect("Semaphore not initialized") }
+    };
+}
 
 // =============================================================================
 // Task Priorities and Stack
@@ -246,88 +262,59 @@ pub extern "C" fn main() -> ! {
 
 fn create_sync_primitives() {
     println("[Init] Creating mutex...");
-    unsafe {
-        MUTEX = Mutex::new(0);
-        if MUTEX.is_some() {
-            println("[Init] Mutex created successfully");
-        } else {
-            println("[Init] ERROR: Failed to create mutex!");
-        }
-    }
+    let mutex = Mutex::new(0).expect("Failed to create mutex");
+    unsafe { COUNTER_MUTEX = Some(mutex); }
+    println("[Init] Mutex created successfully");
 
     println("[Init] Creating binary semaphore...");
-    unsafe {
-        SEMAPHORE = BinarySemaphore::new();
-        if SEMAPHORE.is_some() {
-            println("[Init] Semaphore created successfully");
-        } else {
-            println("[Init] ERROR: Failed to create semaphore!");
-        }
-    }
+    let sem = BinarySemaphore::new().expect("Failed to create semaphore");
+    unsafe { SEMAPHORE = Some(sem); }
+    println("[Init] Semaphore created successfully");
 }
 
 fn create_tasks() {
     println("[Init] Creating tasks...");
 
     unsafe {
-        let result = TaskHandle::spawn_static(
+        TaskHandle::spawn_static(
             b"LowTask\0",
             &mut LOW_TASK_STACK,
             &mut LOW_TASK_TCB,
             PRIORITY_LOW,
             task_low_priority,
-        );
-        if result.is_some() {
-            println("[Init] Low priority task created");
-        } else {
-            println("[Init] ERROR: Failed to create low priority task!");
-        }
+        ).expect("Failed to create low priority task");
+        println("[Init] Low priority task created");
 
-        let result = TaskHandle::spawn_static(
+        TaskHandle::spawn_static(
             b"MedTask\0",
             &mut MEDIUM_TASK_STACK,
             &mut MEDIUM_TASK_TCB,
             PRIORITY_MEDIUM,
             task_medium_priority,
-        );
-        if result.is_some() {
-            println("[Init] Medium priority task created");
-        } else {
-            println("[Init] ERROR: Failed to create medium priority task!");
-        }
+        ).expect("Failed to create medium priority task");
+        println("[Init] Medium priority task created");
 
-        let result = TaskHandle::spawn_static(
+        TaskHandle::spawn_static(
             b"HighTask\0",
             &mut HIGH_TASK_STACK,
             &mut HIGH_TASK_TCB,
             PRIORITY_HIGH,
             task_high_priority,
-        );
-        if result.is_some() {
-            println("[Init] High priority task created");
-        } else {
-            println("[Init] ERROR: Failed to create high priority task!");
-        }
+        ).expect("Failed to create high priority task");
+        println("[Init] High priority task created");
     }
 }
 
 fn create_timer() {
     println("[Init] Creating software timer...");
-
-    unsafe {
-        TIMER = Timer::new_periodic(
-            b"Timer1\0",
-            pdMS_TO_TICKS(1000),
-            timer_callback,
-        );
-
-        if let Some(ref timer) = TIMER {
-            println("[Init] Timer created successfully");
-            timer.start();
-        } else {
-            println("[Init] ERROR: Failed to create timer!");
-        }
-    }
+    let timer = Timer::new_periodic(
+        b"Timer1\0",
+        pdMS_TO_TICKS(1000),
+        timer_callback,
+    ).expect("Failed to create timer");
+    timer.start();
+    unsafe { TIMER = Some(timer); }
+    println("[Init] Timer created successfully");
 }
 
 // =============================================================================
@@ -344,25 +331,24 @@ extern "C" fn timer_callback(_xTimer: TimerHandle_t) {
 // =============================================================================
 
 extern "C" fn task_low_priority(_pvParameters: *mut c_void) {
+    let mutex = get_mutex!();
+    let semaphore = get_semaphore!();
+
     loop {
         println("[Low] Taking mutex...");
 
-        unsafe {
-            if let Some(ref mutex) = MUTEX {
-                let mut guard = mutex.lock();
-                println("[Low] Mutex acquired!");
+        {
+            let mut guard = mutex.lock();
+            println("[Low] Mutex acquired!");
 
-                *guard += 1;
-                println("[Low] Working...");
+            *guard += 1;
+            println("[Low] Working...");
 
-                vTaskDelay(pdMS_TO_TICKS(200));
+            vTaskDelay(pdMS_TO_TICKS(200));
 
-                if let Some(ref sem) = SEMAPHORE {
-                    sem.give();
-                }
+            semaphore.give();
 
-                println("[Low] Releasing mutex");
-            }
+            println("[Low] Releasing mutex");
         }
 
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -379,20 +365,20 @@ extern "C" fn task_medium_priority(_pvParameters: *mut c_void) {
 }
 
 extern "C" fn task_high_priority(_pvParameters: *mut c_void) {
+    let mutex = get_mutex!();
+
     loop {
         vTaskDelay(pdMS_TO_TICKS(150));
 
         println("[High] Taking mutex...");
 
-        unsafe {
-            if let Some(ref mutex) = MUTEX {
-                let mut guard = mutex.lock();
-                println("[High] Mutex acquired!");
+        {
+            let mut guard = mutex.lock();
+            println("[High] Mutex acquired!");
 
-                *guard += 10;
+            *guard += 10;
 
-                println("[High] Releasing mutex");
-            }
+            println("[High] Releasing mutex");
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));

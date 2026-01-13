@@ -20,7 +20,9 @@
 //! ```
 
 mod mutex;
+mod queue;
 mod semaphore;
 
 pub use mutex::{Mutex, MutexGuard};
+pub use queue::Queue;
 pub use semaphore::{BinarySemaphore, CountingSemaphore};

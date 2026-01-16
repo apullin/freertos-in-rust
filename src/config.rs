@@ -8,14 +8,34 @@
  * Configuration is done via:
  * - Cargo features for major toggles
  * - Constants in this module for numeric values
- * - Users can override by shadowing these in their own config module
+ * - `user-config` feature for user-provided hardware-specific values
  */
 
 //! FreeRTOS Configuration
 //!
 //! This module provides the Rust equivalent of `FreeRTOSConfig.h`.
-//! Configuration values are exposed as constants and can be overridden
-//! by users in their own configuration.
+//!
+//! # Hardware-Specific Configuration
+//!
+//! **WARNING**: By default, this crate uses a placeholder CPU clock frequency
+//! (80MHz) which is almost certainly WRONG for your hardware! SysTick timing
+//! will be incorrect without proper configuration.
+//!
+//! To provide the correct CPU clock for your hardware, enable the `user-config`
+//! feature and define the required symbol in your crate:
+//!
+//! ```ignore
+//! // In your main.rs or lib.rs:
+//! #[no_mangle]
+//! pub static FREERTOS_CONFIG_CPU_CLOCK_HZ: u32 = 32_000_000;  // Your CPU clock
+//!
+//! // For RISC-V, also provide the MTIME frequency:
+//! #[no_mangle]
+//! pub static FREERTOS_CONFIG_MTIME_HZ: u32 = 10_000_000;  // Your timer frequency
+//! ```
+//!
+//! The tick rate (`configTICK_RATE_HZ`) is fixed at 1000Hz (1ms ticks), which is
+//! standard for most FreeRTOS applications.
 
 use crate::types::*;
 
@@ -32,21 +52,42 @@ pub const configMAX_PRIORITIES: UBaseType_t = 5;
 /// Stack size for the idle task (in words, not bytes)
 pub const configMINIMAL_STACK_SIZE: usize = 128;
 
-/// Tick rate in Hz
+/// Tick rate in Hz (1000 = 1ms ticks, standard for most applications)
 pub const configTICK_RATE_HZ: TickType_t = 1000;
 
+// =============================================================================
+// Hardware-Specific Configuration (user-provided or defaults)
+// =============================================================================
+
 /// CPU clock frequency in Hz
-/// [AMENDMENT] This should be set to match your target hardware.
-/// Default: 80 MHz (common for Cortex-M4F parts like STM32L4, TI TM4C)
+/// [AMENDMENT] Default: 80 MHz - almost certainly WRONG for your hardware!
+/// Enable `user-config` feature and provide FREERTOS_CONFIG_CPU_CLOCK_HZ.
+#[cfg(not(feature = "user-config"))]
 pub const configCPU_CLOCK_HZ: u32 = 80_000_000;
+
+// When user-config is enabled, CPU clock comes from user-provided symbol
+#[cfg(feature = "user-config")]
+extern "Rust" {
+    /// User-provided CPU clock frequency in Hz.
+    /// Define in your crate: `#[no_mangle] pub static FREERTOS_CONFIG_CPU_CLOCK_HZ: u32 = ...;`
+    #[link_name = "FREERTOS_CONFIG_CPU_CLOCK_HZ"]
+    pub static configCPU_CLOCK_HZ: u32;
+}
 
 /// RISC-V MTIME timer frequency in Hz
 /// [AMENDMENT] For RISC-V ports, the CLINT timer (MTIME) may run at a
-/// different frequency than the CPU clock.
-/// QEMU sifive_e: Timer is instruction-based (~1 tick per 6500 instructions).
-/// Using 32768 Hz as effective rate for QEMU testing.
-#[cfg(feature = "port-riscv32")]
-pub const configMTIME_HZ: u32 = 32_768; // ~33 ticks per ms in QEMU
+/// different frequency than the CPU clock. Default is 32768 Hz (QEMU sifive_e).
+/// Enable `user-config` feature and provide FREERTOS_CONFIG_MTIME_HZ for your hardware.
+#[cfg(all(feature = "port-riscv32", not(feature = "user-config")))]
+pub const configMTIME_HZ: u32 = 32_768;
+
+#[cfg(all(feature = "port-riscv32", feature = "user-config"))]
+extern "Rust" {
+    /// User-provided MTIME timer frequency in Hz.
+    /// Define in your crate: `#[no_mangle] pub static FREERTOS_CONFIG_MTIME_HZ: u32 = ...;`
+    #[link_name = "FREERTOS_CONFIG_MTIME_HZ"]
+    pub static configMTIME_HZ: u32;
+}
 
 /// Maximum syscall interrupt priority
 /// Interrupts with priority >= this value can call FreeRTOS "FromISR" APIs.

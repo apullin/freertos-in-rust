@@ -60,6 +60,9 @@ abort-delay = []          # INCLUDE_xTaskAbortDelay
 task-priority-set = []    # INCLUDE_vTaskPrioritySet
 stack-high-water-mark = [] # INCLUDE_uxTaskGetStackHighWaterMark
 
+# Configuration
+user-config = []              # User provides hardware-specific config (CPU clock, etc.)
+
 # Kernel features
 use-mutexes = []              # configUSE_MUTEXES
 timers = []                   # configUSE_TIMERS

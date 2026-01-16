@@ -84,6 +84,27 @@ pub const configTIMER_TASK_PRIORITY: UBaseType_t = 2;
 // ... etc
 ```
 
+**Hardware-specific values** (CPU clock frequency) require the `user-config` feature:
+
+```toml
+[dependencies]
+freertos-in-rust = { version = "0.1", features = ["user-config", ...] }
+```
+
+Then define the required symbols in your crate:
+
+```rust
+// In your main.rs or lib.rs
+#[no_mangle]
+pub static FREERTOS_CONFIG_CPU_CLOCK_HZ: u32 = 32_000_000;  // Your CPU clock
+
+// For RISC-V, also provide:
+#[no_mangle]
+pub static FREERTOS_CONFIG_MTIME_HZ: u32 = 10_000_000;  // Timer frequency
+```
+
+Without `user-config`, defaults are used (80MHz CPU clock) which will cause incorrect SysTick timing.
+
 ## Feature Support
 
 | Feature | Status | Notes |

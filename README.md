@@ -8,8 +8,8 @@ A line-by-line port of the FreeRTOS kernel from C to Rust.
 
 This project is published on [crates.io](https://crates.io/crates/freertos-in-rust). Note that the project is still in active development and the API/feature set may evolve.
 
-- **0.1.0** — Direct port from `master` branch. Closely mirrors C FreeRTOS semantics; uses `unsafe` throughout.
-- **0.1.1** — From `safe_shim` branch. Adds Rust-idiomatic safe wrappers that reduce `unsafe` usage.
+- **0.1.x** — Direct port from `master` branch. Closely mirrors C FreeRTOS semantics; uses `unsafe` throughout.
+- **0.2.x** — From `safe_shim` branch. Adds Rust-idiomatic safe wrappers that reduce `unsafe` usage.
 
 ## Intent
 

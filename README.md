@@ -4,6 +4,13 @@
 
 A line-by-line port of the FreeRTOS kernel from C to Rust.
 
+## Crate
+
+This project is published on [crates.io](https://crates.io/crates/freertos-in-rust). Note that the project is still in active development and the API/feature set may evolve.
+
+- **0.1.0** — Direct port from `master` branch. Closely mirrors C FreeRTOS semantics; uses `unsafe` throughout.
+- **0.1.1** — From `safe_shim` branch. Adds Rust-idiomatic safe wrappers that reduce `unsafe` usage.
+
 ## Intent
 
 The goal here is to duplicate the FreeRTOS C implementation in Rust, as closely as possible. Ideally, this gives us a package that runs fully in Rust (plus minimal assembly for context switching), while retaining FreeRTOS usage semantics and API structure.

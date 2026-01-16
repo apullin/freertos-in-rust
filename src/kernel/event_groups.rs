@@ -141,10 +141,38 @@ pub struct StaticEventGroup_t {
     pub ucDummy4: u8,
 }
 
+impl StaticEventGroup_t {
+    /// Create a zeroed StaticEventGroup_t for use in static allocation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// static mut EVENT_GROUP: StaticEventGroup_t = StaticEventGroup_t::new();
+    /// ```
+    pub const fn new() -> Self {
+        StaticEventGroup_t {
+            xDummy1: 0,
+            xDummy2: StaticList_t::new(),
+            #[cfg(feature = "trace-facility")]
+            uxDummy3: 0,
+            #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+            ucDummy4: 0,
+        }
+    }
+}
+
 /// Static list placeholder type
 #[repr(C)]
 pub struct StaticList_t {
     _data: List_t,
+}
+
+impl StaticList_t {
+    /// Create a zeroed StaticList_t for use in static allocation.
+    pub const fn new() -> Self {
+        StaticList_t {
+            _data: List_t::new(),
+        }
+    }
 }
 
 // =============================================================================

@@ -238,6 +238,44 @@ pub struct StaticQueue_t {
     _data: xQUEUE,
 }
 
+impl StaticQueue_t {
+    /// Create a zeroed StaticQueue_t for use in static allocation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// static mut QUEUE_STORAGE: StaticQueue_t = StaticQueue_t::new();
+    /// ```
+    pub const fn new() -> Self {
+        StaticQueue_t {
+            _data: xQUEUE {
+                pcHead: core::ptr::null_mut(),
+                pcWriteTo: core::ptr::null_mut(),
+                u: QueueUnion_t {
+                    xQueue: QueuePointers_t {
+                        pcTail: core::ptr::null_mut(),
+                        pcReadFrom: core::ptr::null_mut(),
+                    },
+                },
+                xTasksWaitingToSend: List_t::new(),
+                xTasksWaitingToReceive: List_t::new(),
+                uxMessagesWaiting: 0,
+                uxLength: 0,
+                uxItemSize: 0,
+                cRxLock: 0,
+                cTxLock: 0,
+                #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+                ucStaticallyAllocated: 0,
+                #[cfg(feature = "queue-sets")]
+                pxQueueSetContainer: core::ptr::null_mut(),
+                #[cfg(feature = "trace-facility")]
+                uxQueueNumber: 0,
+                #[cfg(feature = "trace-facility")]
+                ucQueueType: 0,
+            },
+        }
+    }
+}
+
 // =============================================================================
 // Helper Macros as Functions
 // =============================================================================

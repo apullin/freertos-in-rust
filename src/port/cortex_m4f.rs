@@ -508,6 +508,9 @@ pub fn portMEMORY_BARRIER() {
 // =============================================================================
 
 /// Architecture name string for this port
+#[cfg(all(feature = "port-cortex-m7", not(feature = "port-cortex-m4f")))]
+pub const portARCH_NAME: &str = "ARM Cortex-M7";
+#[cfg(not(all(feature = "port-cortex-m7", not(feature = "port-cortex-m4f"))))]
 pub const portARCH_NAME: &str = "ARM Cortex-M4F";
 
 // =============================================================================

@@ -60,8 +60,12 @@ pub const portARCH_NAME: &str = "ARM Cortex-A53 (AArch64)";
 // AArch64 Constants
 // =============================================================================
 
-/// Initial PSTATE: EL1h (EL1, SP_EL1)
-const portINITIAL_PSTATE: StackType_t = 0x05; // EL1h, interrupts enabled
+/// Initial PSTATE: EL1t (EL1, SP_EL0)
+///
+/// Tasks must execute using SP_EL0 because `portSAVE_CONTEXT` stores SP_EL0 in
+/// the TCB.  Exception handlers temporarily select SP_EL1 after the task
+/// context has been saved.  This matches the upstream ARM_AARCH64 guest port.
+const portINITIAL_PSTATE: StackType_t = 0x04; // EL1t, interrupts enabled
 
 /// No critical nesting value
 const portNO_CRITICAL_NESTING: u64 = 0;
@@ -150,6 +154,9 @@ pub static mut ullMaxAPIPriorityMask: u64 = 0;
 /// Configure GIC addresses - call before starting scheduler
 #[no_mangle]
 pub extern "C" fn vPortConfigureGIC(gic_dist_base: u64, gic_cpu_base: u64, max_api_priority: u32) {
+    configASSERT(max_api_priority > configUNIQUE_INTERRUPT_PRIORITIES / 2);
+    configASSERT(max_api_priority <= configUNIQUE_INTERRUPT_PRIORITIES);
+
     unsafe {
         ulGICDistributorBase = gic_dist_base;
         ulGICCPUInterfaceBase = gic_cpu_base;
@@ -229,14 +236,26 @@ pub extern "C" fn vPortExitCritical() {
 
 /// Disable interrupts
 #[inline(always)]
-pub fn portDISABLE_INTERRUPTS() -> UBaseType_t {
-    ulPortSetInterruptMask()
+pub fn portDISABLE_INTERRUPTS() {
+    unsafe {
+        // The interrupt transition is also a compiler memory barrier, matching
+        // the upstream port's `"memory"` clobber.
+        core::arch::asm!("msr daifset, #2", options(nostack));
+        core::arch::asm!("dsb sy", options(nomem, nostack));
+        core::arch::asm!("isb sy", options(nomem, nostack));
+    }
 }
 
 /// Enable interrupts
 #[inline(always)]
 pub fn portENABLE_INTERRUPTS() {
-    vPortClearInterruptMask(0);
+    unsafe {
+        // See portDISABLE_INTERRUPTS: task/ISR memory accesses must not move
+        // across the point at which interrupts become observable.
+        core::arch::asm!("msr daifclr, #2", options(nostack));
+        core::arch::asm!("dsb sy", options(nomem, nostack));
+        core::arch::asm!("isb sy", options(nomem, nostack));
+    }
 }
 
 /// Set interrupt mask
@@ -245,10 +264,8 @@ pub extern "C" fn ulPortSetInterruptMask() -> u64 {
     let ulReturn: u64;
 
     unsafe {
-        // Disable IRQ
-        core::arch::asm!("msr daifset, #2", options(nomem, nostack));
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        // Disable IRQ while updating the GIC priority mask.
+        portDISABLE_INTERRUPTS();
 
         let iccpmr = get_iccpmr_address();
         let mask_value = get_max_api_priority_mask();
@@ -263,10 +280,7 @@ pub extern "C" fn ulPortSetInterruptMask() -> u64 {
             core::arch::asm!("isb sy", options(nomem, nostack));
         }
 
-        // Re-enable IRQ
-        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        portENABLE_INTERRUPTS();
     }
 
     ulReturn
@@ -284,16 +298,14 @@ pub extern "C" fn vPortClearInterruptMask(ulNewMaskValue: u64) {
 #[inline(always)]
 fn portCLEAR_INTERRUPT_MASK() {
     unsafe {
-        core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+        portDISABLE_INTERRUPTS();
 
         let iccpmr = get_iccpmr_address();
         core::ptr::write_volatile(iccpmr, portUNMASK_VALUE);
 
         core::arch::asm!("dsb sy", options(nomem, nostack));
         core::arch::asm!("isb sy", options(nomem, nostack));
-        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        portENABLE_INTERRUPTS();
     }
 }
 
@@ -317,7 +329,9 @@ pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus: UBaseType_t) {
 #[inline(always)]
 pub fn portYIELD() {
     unsafe {
-        core::arch::asm!("svc 0", options(nomem, nostack));
+        // A yield can run a different task which mutates arbitrary shared
+        // memory, so this must retain the upstream compiler memory clobber.
+        core::arch::asm!("svc 0", options(nostack));
     }
 }
 
@@ -497,8 +511,18 @@ fn prvTaskExitError() -> ! {
 #[no_mangle]
 pub extern "C" fn xPortStartScheduler() -> BaseType_t {
     unsafe {
+        let current_el: u64;
+        core::arch::asm!("mrs {}, CurrentEL", out(reg) current_el);
+        configASSERT((current_el & 0x0c) == 0x04);
+        configASSERT(ullICCPMR != 0 && ullICCIAR != 0 && ullICCEOIR != 0);
+
+        let binary_point = core::ptr::read_volatile(
+            (ulGICCPUInterfaceBase as usize + portICCBPR_BINARY_POINT_OFFSET) as *const u32,
+        );
+        configASSERT((binary_point & 0x03) <= portMAX_BINARY_POINT_VALUE);
+
         // Disable interrupts
-        core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+        portDISABLE_INTERRUPTS();
 
         // Start first task
         vPortRestoreTaskContext();
@@ -582,7 +606,7 @@ pub fn portNOP() {
 #[inline(always)]
 pub fn portMEMORY_BARRIER() {
     unsafe {
-        core::arch::asm!("dmb sy", options(nomem, nostack));
+        core::arch::asm!("dmb sy", options(nostack));
     }
 }
 
@@ -631,10 +655,6 @@ static mut ulTimerCountsForOneTick: u64 = 0;
 #[cfg(feature = "tickless-idle")]
 static mut ulMaximumPossibleSuppressedTicks: TickType_t = 0;
 
-/// Compensation for time spent stopping/starting timer
-#[cfg(feature = "tickless-idle")]
-const ulStoppedTimerCompensation: u64 = 100;
-
 /// Configure tickless idle - must be called before starting scheduler
 #[cfg(feature = "tickless-idle")]
 #[no_mangle]
@@ -660,7 +680,7 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
     unsafe {
         // Check if timer is configured
-        if ulTimerCountsForOneTick == 0 {
+        if ulTimerCountsForOneTick == 0 || xExpectedIdleTime < 2 {
             return;
         }
 
@@ -672,13 +692,13 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         }
 
         // Disable interrupts via DAIF
-        core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+        core::arch::asm!("msr daifset, #2", options(nostack));
         core::arch::asm!("dsb sy", options(nomem, nostack));
         core::arch::asm!("isb sy", options(nomem, nostack));
 
         // Check if sleep should be aborted
         if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
-            core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+            core::arch::asm!("msr daifclr, #2", options(nostack));
             return;
         }
 
@@ -703,13 +723,6 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
             + ulCountsRemaining
             + (ulTimerCountsForOneTick * (xExpectedIdleTime as u64 - 1));
 
-        // Apply compensation for time spent in this function
-        let ulNewCompare = if ulNewCompare > ulStoppedTimerCompensation {
-            ulNewCompare - ulStoppedTimerCompensation
-        } else {
-            ulNewCompare
-        };
-
         // Set new compare value
         core::arch::asm!("msr cntp_cval_el0, {}", in(reg) ulNewCompare);
         core::arch::asm!("dsb sy", options(nomem, nostack));
@@ -719,29 +732,39 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::arch::asm!("wfi", options(nomem, nostack));
         core::arch::asm!("isb sy", options(nomem, nostack));
 
+        /* Snapshot elapsed time before servicing the wake interrupt.  The
+         * timer ISR reloads the compare register and can take an unbounded
+         * amount of application-handler time; charging that handler time to
+         * the suppressed interval could step beyond xNextTaskUnblockTime. */
+        let ulTimerCountAtWake: u64;
+        core::arch::asm!("mrs {}, cntpct_el0", out(reg) ulTimerCountAtWake);
+
         // Re-enable interrupts briefly to let the wake interrupt execute
-        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+        core::arch::asm!("msr daifclr, #2", options(nostack));
         core::arch::asm!("dsb sy", options(nomem, nostack));
         core::arch::asm!("isb sy", options(nomem, nostack));
 
         // Disable interrupts again for tick compensation
-        core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+        core::arch::asm!("msr daifset, #2", options(nostack));
         core::arch::asm!("dsb sy", options(nomem, nostack));
         core::arch::asm!("isb sy", options(nomem, nostack));
 
-        // Read current counter to see how much time elapsed
-        let ulTimerCountNow: u64;
-        core::arch::asm!("mrs {}, cntpct_el0", out(reg) ulTimerCountNow);
-
         // Calculate how many complete ticks elapsed
-        let ulElapsedCounts = if ulTimerCountNow > ulCurrentCount {
-            ulTimerCountNow - ulCurrentCount
+        let ulElapsedCounts = if ulTimerCountAtWake > ulCurrentCount {
+            ulTimerCountAtWake - ulCurrentCount
         } else {
             // Counter wrapped (very unlikely with 64-bit counter)
             0
         };
 
-        let ulCompletedTicks = ulElapsedCounts / ulTimerCountsForOneTick;
+        /* The interrupt which ended a full timer sleep has already run while
+         * IRQs were briefly unmasked.  Because the scheduler is suspended it
+         * contributes one pended tick.  Step at most expected-1 ticks here so
+         * the pended tick reaches, rather than passes, the unblock deadline. */
+        let ulCompletedTicks = core::cmp::min(
+            ulElapsedCounts / ulTimerCountsForOneTick,
+            xExpectedIdleTime.saturating_sub(1) as u64,
+        );
 
         // Step the tick count forward
         if ulCompletedTicks > 0 {
@@ -753,13 +776,13 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
             ulTimerCountsForOneTick - (ulElapsedCounts % ulTimerCountsForOneTick);
 
         // Set compare value for next tick
-        let ulNextCompare = ulTimerCountNow + ulRemainingCounts;
+        let ulNextCompare = ulTimerCountAtWake + ulRemainingCounts;
         core::arch::asm!("msr cntp_cval_el0, {}", in(reg) ulNextCompare);
         core::arch::asm!("dsb sy", options(nomem, nostack));
         core::arch::asm!("isb sy", options(nomem, nostack));
 
         // Re-enable interrupts
-        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+        core::arch::asm!("msr daifclr, #2", options(nostack));
     }
 }
 
@@ -924,8 +947,16 @@ global_asm!(
     ".align 8",
     "FreeRTOS_SWI_Handler:",
     "portSAVE_CONTEXT",
+    // Only SVC exceptions are valid scheduler yields.  Other synchronous
+    // exceptions must not be mistaken for context-switch requests.
+    "mrs x0, esr_el1",
+    "lsr x1, x0, #26",
+    "cmp x1, #0x15",
+    "b.ne FreeRTOS_Abort",
     "bl vTaskSwitchContext",
     "portRESTORE_CONTEXT",
+    "FreeRTOS_Abort:",
+    "b FreeRTOS_Abort",
     // ==========================================================================
     // vPortRestoreTaskContext - Start First Task
     // ==========================================================================
@@ -1054,26 +1085,28 @@ global_asm!(
     ".global _freertos_vector_table",
     ".balign 2048",
     "_freertos_vector_table:",
-    // Current EL with SP_EL0 (not used by FreeRTOS)
+    // FreeRTOS tasks run at the current EL using SP_EL0 (EL1t).  These are the
+    // entries selected for task-generated SVCs and task-preempting IRQs.
     ".balign 128",
     "curr_el_sp0_sync:",
-    "b .",
+    "b FreeRTOS_SWI_Handler",
     ".balign 128",
     "curr_el_sp0_irq:",
-    "b .",
+    "b FreeRTOS_IRQ_Handler",
     ".balign 128",
     "curr_el_sp0_fiq:",
     "b .",
     ".balign 128",
     "curr_el_sp0_serror:",
     "b .",
-    // Current EL with SP_ELx (EL1)
+    // Exceptions taken while the kernel is using SP_EL1 are not valid task
+    // yields/IRQs.  Interrupts are masked across those short kernel windows.
     ".balign 128",
     "curr_el_spx_sync:",
-    "b FreeRTOS_SWI_Handler",
+    "b .",
     ".balign 128",
     "curr_el_spx_irq:",
-    "b FreeRTOS_IRQ_Handler",
+    "b .",
     ".balign 128",
     "curr_el_spx_fiq:",
     "b .",

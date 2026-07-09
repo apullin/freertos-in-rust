@@ -31,4 +31,5 @@ pub mod queue;
 #[cfg(feature = "stream-buffers")]
 pub mod stream_buffer;
 pub mod tasks;
+#[cfg(feature = "timers")]
 pub mod timers;

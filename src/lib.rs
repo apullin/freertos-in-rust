@@ -43,8 +43,15 @@
 //! - `tick-32bit` - 32-bit tick counter (default)
 //! - `tick-64bit` - 64-bit tick counter
 //! - `alloc` - Enable memory allocation via Rust's global allocator
-//! - `std` - Enable std for testing (implies `alloc`)
+//! - `std` - Enable std for host testing (allocation is selected independently)
+//! - `port-test` - Deterministic host test port
+//! - `all-kernel-features` - Enable kernel capabilities without selecting a port,
+//!   integer width, allocator, or SMP mode
 //! - `list-data-integrity-check` - Enable list data integrity checks
+//!
+//! Production targets must set `default-features = false` and enable exactly
+//! one hardware port. The default `port-dummy` selection is compile-only and
+//! cannot start a scheduler.
 
 #![no_std]
 #![allow(non_snake_case)]

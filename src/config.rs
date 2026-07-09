@@ -164,7 +164,10 @@ pub const configUSE_TASK_NOTIFICATIONS: BaseType_t = 1;
 pub const configTASK_NOTIFICATION_ARRAY_ENTRIES: usize = 1;
 
 /// Use timers
+#[cfg(feature = "timers")]
 pub const configUSE_TIMERS: BaseType_t = 1;
+#[cfg(not(feature = "timers"))]
+pub const configUSE_TIMERS: BaseType_t = 0;
 
 /// Timer task priority
 pub const configTIMER_TASK_PRIORITY: UBaseType_t = 2;
@@ -195,15 +198,31 @@ pub const configUSE_LIST_DATA_INTEGRITY_CHECK_BYTES: BaseType_t = 0;
 // =============================================================================
 
 /// configASSERT macro equivalent
-/// [AMENDMENT] In Rust, we use debug_assert! or panic! depending on context.
-/// This constant controls whether asserts are active.
+/// [AMENDMENT] Assertions remain active in release builds because FreeRTOS
+/// relies on them to enforce API and kernel invariants.
 pub const configASSERT_DEFINED: BaseType_t = 1;
 
 /// Macro-like function for configASSERT
 #[inline(always)]
 pub fn configASSERT(condition: bool) {
     if configASSERT_DEFINED != 0 {
-        debug_assert!(condition, "FreeRTOS assertion failed");
+        assert!(condition, "FreeRTOS assertion failed");
+    }
+}
+
+#[cfg(test)]
+mod config_assert_tests {
+    use super::configASSERT;
+
+    #[test]
+    fn config_assert_accepts_true() {
+        configASSERT(true);
+    }
+
+    #[test]
+    #[should_panic(expected = "FreeRTOS assertion failed")]
+    fn config_assert_rejects_false_in_release_too() {
+        configASSERT(false);
     }
 }
 

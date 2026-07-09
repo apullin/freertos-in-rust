@@ -32,13 +32,11 @@
 //!
 //! Enable with `--features port-cortex-a9` and compile for `armv7a-none-eabi`.
 //!
-//! ## Configuration Required
+//! ## Platform Configuration
 //!
-//! Users must define the following in their configuration:
-//! - `configINTERRUPT_CONTROLLER_BASE_ADDRESS` - GIC base address
-//! - `configINTERRUPT_CONTROLLER_CPU_INTERFACE_OFFSET` - Offset to CPU interface
-//! - `configUNIQUE_INTERRUPT_PRIORITIES` - Number of priority levels (16, 32, 64, etc.)
-//! - `configMAX_API_CALL_INTERRUPT_PRIORITY` - Max priority for FreeRTOS API calls
+//! The current implementation uses the QEMU vexpress-a9 GIC addresses and
+//! priority layout below. Supporting another Cortex-A9 platform requires a
+//! proper configuration interface rather than undeclared Cargo features.
 //!
 //! ## Vector Table
 //!
@@ -112,32 +110,13 @@ const portICCEOIR_END_OF_INTERRUPT_OFFSET: usize = 0x10;
 const portICCBPR_BINARY_POINT_OFFSET: usize = 0x08;
 const portICCRPR_RUNNING_PRIORITY_OFFSET: usize = 0x14;
 
-/// Number of unique interrupt priorities (must be defined by user config)
-/// Default to 32 if not specified (common for GICv1/v2)
-#[cfg(not(any(
-    feature = "gic-priorities-16",
-    feature = "gic-priorities-64",
-    feature = "gic-priorities-128",
-    feature = "gic-priorities-256"
-)))]
+/// Number of unique interrupt priorities implemented by QEMU vexpress-a9.
 pub const configUNIQUE_INTERRUPT_PRIORITIES: u32 = 32;
 
 /// Priority shift based on number of implemented priority bits
-#[cfg(not(any(
-    feature = "gic-priorities-16",
-    feature = "gic-priorities-64",
-    feature = "gic-priorities-128",
-    feature = "gic-priorities-256"
-)))]
 const portPRIORITY_SHIFT: u32 = 3; // 32 priorities = 5 bits, shift by 3
 
 /// Binary point maximum value
-#[cfg(not(any(
-    feature = "gic-priorities-16",
-    feature = "gic-priorities-64",
-    feature = "gic-priorities-128",
-    feature = "gic-priorities-256"
-)))]
 const portMAX_BINARY_POINT_VALUE: u32 = 2;
 
 /// Lowest interrupt priority
@@ -150,20 +129,14 @@ pub const portLOWEST_USABLE_INTERRUPT_PRIORITY: u32 = portLOWEST_INTERRUPT_PRIOR
 // GIC Address Calculation
 // =============================================================================
 
-/// GIC base address - must be provided by user configuration
-/// For QEMU vexpress-a9: 0x1E000000
-/// Users should define this in their config or pass via build script
-#[cfg(not(feature = "gic-base-custom"))]
+/// GIC base address for QEMU vexpress-a9.
 pub const configINTERRUPT_CONTROLLER_BASE_ADDRESS: usize = 0x1E00_0000;
 
-/// GIC CPU interface offset from base
-/// For most GICv1/v2: 0x100
-#[cfg(not(feature = "gic-base-custom"))]
+/// GIC CPU interface offset from the QEMU vexpress-a9 base.
 pub const configINTERRUPT_CONTROLLER_CPU_INTERFACE_OFFSET: usize = 0x100;
 
 /// Maximum API call interrupt priority (must be > UNIQUE_PRIORITIES / 2)
 /// Interrupts at this priority or lower can call FreeRTOS FromISR APIs
-#[cfg(not(feature = "gic-base-custom"))]
 pub const configMAX_API_CALL_INTERRUPT_PRIORITY: u32 = 18;
 
 /// Computed GIC CPU interface address

@@ -1,0 +1,48 @@
+//! Safe synchronization primitives for FreeRTOS
+//!
+//! This module provides Rust-idiomatic wrappers around FreeRTOS synchronization
+//! primitives. These wrappers use RAII patterns and provide memory safety
+//! guarantees on top of the raw FreeRTOS API.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use freertos_in_rust::sync::Mutex;
+//!
+//! // Create a mutex protecting a counter
+//! let counter: Mutex<u32> = Mutex::new(0).unwrap();
+//!
+//! // Lock and modify - automatically released when guard drops
+//! {
+//!     let mut guard = counter.lock();
+//!     *guard += 1;
+//! } // mutex released here
+//! ```
+
+mod event_group;
+#[cfg(feature = "stream-buffers")]
+mod message_buffer;
+mod mutex;
+mod queue;
+mod semaphore;
+#[cfg(feature = "stream-buffers")]
+mod stream_buffer;
+mod task;
+#[cfg(feature = "timers")]
+mod timer;
+
+pub use event_group::EventGroup;
+#[cfg(feature = "stream-buffers")]
+pub use message_buffer::MessageBuffer;
+pub use mutex::{Mutex, MutexGuard};
+pub use queue::Queue;
+pub use semaphore::{BinarySemaphore, CountingSemaphore};
+#[cfg(feature = "stream-buffers")]
+pub use stream_buffer::StreamBuffer;
+pub use task::{TaskFn, TaskHandle};
+#[cfg(feature = "task-delete")]
+pub use task::delete_self;
+#[cfg(feature = "task-suspend")]
+pub use task::suspend_self;
+#[cfg(feature = "timers")]
+pub use timer::Timer;

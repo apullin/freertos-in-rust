@@ -317,6 +317,10 @@ unsafe fn prvLockQueue(pxQueue: *mut Queue_t) {
 
 /// Reset a queue to its initial state
 ///
+/// Note: Prefer using `sync::Queue::reset()` which provides a safe wrapper
+/// around this function. Direct use of xQueueGenericReset is only needed
+/// for interop with raw FreeRTOS code.
+///
 /// # Safety
 ///
 /// xQueue must be a valid queue handle
@@ -553,6 +557,11 @@ pub unsafe fn xQueueGenericGetStaticBuffers(
 
 /// Create a queue using dynamically allocated memory
 ///
+/// Note: Prefer using `sync::Queue::new()` which provides a type-safe wrapper.
+/// For mutexes, use `sync::Mutex::new()`. For semaphores, use
+/// `sync::BinarySemaphore::new()` or `sync::CountingSemaphore::new()`.
+/// Direct use of xQueueGenericCreate is only needed for raw FreeRTOS interop.
+///
 /// # Safety
 ///
 /// Requires the `alloc` feature for dynamic allocation
@@ -783,6 +792,11 @@ unsafe fn prvIsQueueFull(pxQueue: *const Queue_t) -> BaseType_t {
 // =============================================================================
 
 /// Send an item to a queue
+///
+/// Note: Prefer using `sync::Queue::send()` or `sync::Queue::send_to_front()`
+/// which provide type-safe wrappers. For mutex/semaphore operations, use the
+/// corresponding `sync::Mutex` or `sync::Semaphore` methods.
+/// Direct use of xQueueGenericSend is only needed for raw FreeRTOS interop.
 ///
 /// # Safety
 ///
@@ -2017,6 +2031,10 @@ pub unsafe fn vQueueWaitForMessageRestricted(
 
 /// Create a mutex using dynamic allocation
 ///
+/// Note: Prefer using `sync::Mutex::new()` which provides a safe, RAII-based
+/// wrapper with automatic unlock on drop. Direct use of xQueueCreateMutex
+/// is only needed for raw FreeRTOS interop.
+///
 /// Mutexes support priority inheritance - if a high priority task blocks
 /// on a mutex held by a low priority task, the low priority task inherits
 /// the high priority until it releases the mutex.
@@ -2204,6 +2222,10 @@ pub unsafe fn xQueueGiveMutexRecursive(xMutex: QueueHandle_t) -> BaseType_t {
 }
 
 /// Take a semaphore (or mutex)
+///
+/// Note: Prefer using `sync::Mutex::lock()`, `sync::BinarySemaphore::take()`,
+/// or `sync::CountingSemaphore::take()` which provide safe wrappers.
+/// Direct use of xQueueSemaphoreTake is only needed for raw FreeRTOS interop.
 ///
 /// This wraps xQueueReceive with mutex-specific handling for priority inheritance.
 #[inline(always)]

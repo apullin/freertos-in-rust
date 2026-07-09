@@ -163,15 +163,57 @@ mod alloc_impl {
     use alloc::alloc::{alloc, dealloc, Layout};
     use core::ffi::c_void;
     use core::ptr;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
     /// Track total allocated bytes (approximate, for xPortGetFreeHeapSize)
-    static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
+    ///
+    /// [AMENDMENT] This is protected by the port critical-section primitives
+    /// rather than atomic read-modify-write operations. ARMv6-M exposes atomic
+    /// loads and stores but not the `AtomicUsize::fetch_add/fetch_sub` operations
+    /// used by the original Rust wrapper.
+    static mut ALLOCATED_BYTES: usize = 0;
+
+    const ALLOCATION_ALIGNMENT: usize = {
+        let port_alignment = crate::port::portBYTE_ALIGNMENT;
+        let metadata_alignment = core::mem::align_of::<usize>();
+        if port_alignment > metadata_alignment {
+            port_alignment
+        } else {
+            metadata_alignment
+        }
+    };
+
+    const ALLOCATION_HEADER_SIZE: usize = {
+        let mask = ALLOCATION_ALIGNMENT - 1;
+        (core::mem::size_of::<usize>() + mask) & !mask
+    };
+
+    #[inline(always)]
+    unsafe fn add_allocated_bytes(size: usize) {
+        crate::port::portENTER_CRITICAL();
+        ALLOCATED_BYTES += size;
+        crate::port::portEXIT_CRITICAL();
+    }
+
+    #[inline(always)]
+    unsafe fn subtract_allocated_bytes(size: usize) {
+        crate::port::portENTER_CRITICAL();
+        ALLOCATED_BYTES -= size;
+        crate::port::portEXIT_CRITICAL();
+    }
+
+    #[inline(always)]
+    fn allocated_bytes() -> usize {
+        crate::port::portENTER_CRITICAL();
+        let allocated = unsafe { ALLOCATED_BYTES };
+        crate::port::portEXIT_CRITICAL();
+        allocated
+    }
 
     /// Allocate memory
     ///
-    /// [AMENDMENT] This wraps Rust's global allocator. The returned pointer
-    /// has 8-byte alignment (matching portBYTE_ALIGNMENT).
+    /// [AMENDMENT] This wraps Rust's global allocator. The allocation metadata
+    /// occupies a complete alignment unit, so the returned pointer retains
+    /// `portBYTE_ALIGNMENT` alignment on both 32-bit and 64-bit targets.
     pub unsafe fn pvPortMalloc(xWantedSize: usize) -> *mut c_void {
         if xWantedSize == 0 {
             return ptr::null_mut();
@@ -179,8 +221,11 @@ mod alloc_impl {
 
         // Create layout with proper alignment
         // We store the size at the beginning for deallocation
-        let total_size = xWantedSize + core::mem::size_of::<usize>();
-        let layout = match Layout::from_size_align(total_size, crate::port::portBYTE_ALIGNMENT) {
+        let total_size = match xWantedSize.checked_add(ALLOCATION_HEADER_SIZE) {
+            Some(size) => size,
+            None => return ptr::null_mut(),
+        };
+        let layout = match Layout::from_size_align(total_size, ALLOCATION_ALIGNMENT) {
             Ok(l) => l,
             Err(_) => return ptr::null_mut(),
         };
@@ -192,10 +237,10 @@ mod alloc_impl {
 
         // Store the size at the beginning
         *(ptr as *mut usize) = total_size;
-        ALLOCATED_BYTES.fetch_add(total_size, Ordering::Relaxed);
+        add_allocated_bytes(total_size);
 
-        // Return pointer after the size field
-        ptr.add(core::mem::size_of::<usize>()) as *mut c_void
+        // Return pointer after the padded metadata header.
+        ptr.add(ALLOCATION_HEADER_SIZE) as *mut c_void
     }
 
     /// Free previously allocated memory
@@ -205,12 +250,12 @@ mod alloc_impl {
         }
 
         // Get the original pointer (before size field)
-        let size_ptr = (pv as *mut u8).sub(core::mem::size_of::<usize>()) as *mut usize;
+        let size_ptr = (pv as *mut u8).sub(ALLOCATION_HEADER_SIZE) as *mut usize;
         let total_size = *size_ptr;
 
-        let layout = Layout::from_size_align_unchecked(total_size, crate::port::portBYTE_ALIGNMENT);
+        let layout = Layout::from_size_align_unchecked(total_size, ALLOCATION_ALIGNMENT);
 
-        ALLOCATED_BYTES.fetch_sub(total_size, Ordering::Relaxed);
+        subtract_allocated_bytes(total_size);
         dealloc(size_ptr as *mut u8, layout);
     }
 
@@ -219,7 +264,7 @@ mod alloc_impl {
     /// [AMENDMENT] With Rust's global allocator, we can't accurately report
     /// free heap. Returns a large placeholder value.
     pub fn xPortGetFreeHeapSize() -> usize {
-        usize::MAX - ALLOCATED_BYTES.load(Ordering::Relaxed)
+        usize::MAX - allocated_bytes()
     }
 
     /// Get minimum ever free heap size

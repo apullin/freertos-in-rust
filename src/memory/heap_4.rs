@@ -480,27 +480,71 @@ use core::alloc::{GlobalAlloc, Layout};
 /// ```
 pub struct FreeRtosAllocator;
 
+const GLOBAL_ALLOC_HEADER_SIZE: usize = core::mem::size_of::<*mut u8>();
+
+/// Allocate a Rust `Layout` from heap_4 while retaining the original pointer
+/// immediately before the aligned result for `dealloc`.
+///
+/// [AMENDMENT] `pvPortMalloc` only promises `portBYTE_ALIGNMENT`. Rust's
+/// `GlobalAlloc` contract permits callers to request a larger alignment, so an
+/// over-allocation and an unaligned metadata write are required here.
+unsafe fn prv_alloc_layout(layout: Layout) -> *mut u8 {
+    let alignment = layout.align().max(portBYTE_ALIGNMENT);
+    let allocation_size = match layout
+        .size()
+        .checked_add(GLOBAL_ALLOC_HEADER_SIZE)
+        .and_then(|size| size.checked_add(alignment - 1))
+    {
+        Some(size) => size,
+        None => return ptr::null_mut(),
+    };
+
+    let raw = pvPortMalloc(allocation_size) as *mut u8;
+    if raw.is_null() {
+        return ptr::null_mut();
+    }
+
+    let unaligned_address = raw.add(GLOBAL_ALLOC_HEADER_SIZE) as usize;
+    let aligned_address = match unaligned_address.checked_add(alignment - 1) {
+        Some(address) => address & !(alignment - 1),
+        None => {
+            vPortFree(raw as *mut c_void);
+            return ptr::null_mut();
+        }
+    };
+    let aligned = aligned_address as *mut u8;
+
+    ptr::write_unaligned(aligned.sub(GLOBAL_ALLOC_HEADER_SIZE) as *mut *mut u8, raw);
+    aligned
+}
+
+unsafe fn prv_free_layout(ptr: *mut u8) {
+    if !ptr.is_null() {
+        let raw = ptr::read_unaligned(ptr.sub(GLOBAL_ALLOC_HEADER_SIZE) as *const *mut u8);
+        vPortFree(raw as *mut c_void);
+    }
+}
+
 unsafe impl GlobalAlloc for FreeRtosAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // heap_4 already aligns to portBYTE_ALIGNMENT (8 bytes)
-        // If larger alignment is requested, we may waste some space
-        // For now, just allocate the requested size
-        pvPortMalloc(layout.size()) as *mut u8
+        prv_alloc_layout(layout)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        vPortFree(ptr as *mut c_void);
+        prv_free_layout(ptr);
     }
 
-    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // heap_4 doesn't have realloc, so allocate new, copy, free old
-        let new_ptr = pvPortMalloc(new_size) as *mut u8;
+        let new_layout = match Layout::from_size_align(new_size, layout.align()) {
+            Ok(layout) => layout,
+            Err(_) => return ptr::null_mut(),
+        };
+        let new_ptr = prv_alloc_layout(new_layout);
         if !new_ptr.is_null() && !ptr.is_null() {
-            // Copy old data (use smaller of old and new size)
-            // Note: We don't know the old size exactly, but layout should have it
-            let copy_size = _layout.size().min(new_size);
+            let copy_size = layout.size().min(new_size);
             ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
-            vPortFree(ptr as *mut c_void);
+            prv_free_layout(ptr);
         }
         new_ptr
     }

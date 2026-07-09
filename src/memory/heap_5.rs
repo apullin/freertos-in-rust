@@ -177,6 +177,34 @@ fn heap_get_block_size(block: &BlockLink) -> usize {
 // Heap Initialization from Multiple Regions
 // =============================================================================
 
+/// Return the aligned start, end-marker address, and usable block size for a
+/// region. Empty, undersized, or overflowing regions are rejected without
+/// touching their storage.
+fn prv_region_bounds(region: &HeapRegion) -> Option<(usize, usize, usize)> {
+    if region.x_size_in_bytes == 0 || region.puc_start_address.is_null() {
+        return None;
+    }
+
+    let original_address = region.puc_start_address as usize;
+    let adjustment = if (original_address & PORT_BYTE_ALIGNMENT_MASK) != 0 {
+        portBYTE_ALIGNMENT - (original_address & PORT_BYTE_ALIGNMENT_MASK)
+    } else {
+        0
+    };
+    let ux_address = original_address.checked_add(adjustment)?;
+    let x_total_region_size = region.x_size_in_bytes.checked_sub(adjustment)?;
+
+    let ux_region_end = ux_address.checked_add(x_total_region_size)?;
+    let ux_end_address = ux_region_end.checked_sub(HEAP_STRUCT_SIZE)? & !PORT_BYTE_ALIGNMENT_MASK;
+    let block_size = ux_end_address.checked_sub(ux_address)?;
+
+    if block_size <= HEAP_MINIMUM_BLOCK_SIZE {
+        return None;
+    }
+
+    Some((ux_address, ux_end_address, block_size))
+}
+
 /// Define the memory regions that make up the heap
 ///
 /// This function must be called before any calls to `pvPortMalloc`.
@@ -204,90 +232,73 @@ pub unsafe fn vPortDefineHeapRegions<const N: usize>(regions: &[HeapRegion; N]) 
     // Compile-time check that we have at least one region
     const { assert!(N > 0, "At least one heap region must be provided") };
 
-    let mut px_first_free_block_in_region: *mut BlockLink;
-    let mut px_previous_free_block: *mut BlockLink;
-    let mut ux_address: usize;
-    let mut x_total_region_size: usize;
+    configASSERT!(PX_END.is_null(), "Heap regions may only be defined once");
+
+    /* [AMENDMENT] Validate the complete region set before writing any block
+     * headers. The C implementation relies on valid region sizes; the Rust
+     * translation must additionally prevent integer underflow/overflow from
+     * creating a wild end marker for a tiny or wrapping region. */
     let mut x_total_heap_size: usize = 0;
+    let mut ux_previous_end_address: Option<usize> = None;
 
-    // Start with the sentinel pointing to nothing
-    px_previous_free_block = &mut X_START as *mut BlockLink;
-
-    // Process each region
     for region in regions.iter() {
-        x_total_region_size = region.x_size_in_bytes;
-
-        // Skip empty regions
-        if x_total_region_size == 0 {
-            continue;
+        if region.x_size_in_bytes != 0 {
+            configASSERT!(
+                !region.puc_start_address.is_null(),
+                "Non-empty heap regions must have a non-null start address"
+            );
         }
 
-        ux_address = region.puc_start_address as usize;
-
-        // Ensure the region starts on a correctly aligned boundary
-        if (ux_address & PORT_BYTE_ALIGNMENT_MASK) != 0 {
-            let adjustment = portBYTE_ALIGNMENT - (ux_address & PORT_BYTE_ALIGNMENT_MASK);
-            ux_address += adjustment;
-
-            // Reduce region size by alignment adjustment
-            if x_total_region_size > adjustment {
-                x_total_region_size -= adjustment;
-            } else {
-                continue; // Region too small after alignment
-            }
-        }
-
-        // Calculate the end address, leaving room for the end marker
-        let mut ux_end_address = ux_address + x_total_region_size;
-        ux_end_address -= HEAP_STRUCT_SIZE;
-        ux_end_address &= !PORT_BYTE_ALIGNMENT_MASK;
-
-        // Ensure we have enough space for at least one block
-        if ux_end_address <= ux_address + HEAP_MINIMUM_BLOCK_SIZE {
-            continue; // Region too small
-        }
-
-        // Verify regions are in ascending address order
-        #[cfg(debug_assertions)]
-        {
-            if !px_previous_free_block.is_null()
-                && px_previous_free_block != &mut X_START as *mut BlockLink
-            {
-                debug_assert!(
-                    ux_address > px_previous_free_block as usize,
-                    "Heap regions must be in ascending address order"
+        if let Some((ux_address, ux_end_address, block_size)) = prv_region_bounds(region) {
+            if let Some(previous_end) = ux_previous_end_address {
+                configASSERT!(
+                    ux_address > previous_end,
+                    "Heap regions must be non-overlapping and in ascending address order"
                 );
             }
-        }
 
-        // Set up the end marker for this region
-        // Note: In heap_5, we have a single end marker at the highest region
-        // For now, track the end marker location (will be set after all regions)
+            x_total_heap_size = match x_total_heap_size.checked_add(block_size) {
+                Some(size) => size,
+                None => panic!("Total heap region size overflow"),
+            };
+            ux_previous_end_address = Some(ux_end_address);
+        }
+    }
+
+    configASSERT!(
+        x_total_heap_size > 0,
+        "At least one usable heap region must be provided"
+    );
+
+    X_START.pxNextFreeBlock = ptr::null_mut();
+    X_START.xBlockSize = 0;
+
+    /* Process the already-validated regions. As in upstream heap_5, each prior
+     * region's zero-sized end marker links to the first free block in the next
+     * region. */
+    for region in regions.iter() {
+        let Some((ux_address, ux_end_address, block_size)) = prv_region_bounds(region) else {
+            continue;
+        };
+
+        let px_previous_end = PX_END;
         PX_END = ux_end_address as *mut BlockLink;
         (*PX_END).xBlockSize = 0;
         (*PX_END).pxNextFreeBlock = ptr::null_mut();
 
-        // Create the first free block in this region
-        px_first_free_block_in_region = ux_address as *mut BlockLink;
-        (*px_first_free_block_in_region).xBlockSize = ux_end_address - ux_address;
+        let px_first_free_block_in_region = ux_address as *mut BlockLink;
+        (*px_first_free_block_in_region).xBlockSize = block_size;
         (*px_first_free_block_in_region).pxNextFreeBlock = PX_END;
 
-        // Link this region's free block to the previous region's last block
-        (*px_previous_free_block).pxNextFreeBlock = px_first_free_block_in_region;
-
-        // Update for next iteration
-        px_previous_free_block = px_first_free_block_in_region;
-
-        // Track total heap size
-        x_total_heap_size += (*px_first_free_block_in_region).xBlockSize;
+        if px_previous_end.is_null() {
+            X_START.pxNextFreeBlock = px_first_free_block_in_region;
+        } else {
+            (*px_previous_end).pxNextFreeBlock = px_first_free_block_in_region;
+        }
     }
 
-    // Initialize tracking variables
     X_MINIMUM_EVER_FREE_BYTES_REMAINING = x_total_heap_size;
     X_FREE_BYTES_REMAINING = x_total_heap_size;
-
-    // Initialize the start sentinel
-    X_START.xBlockSize = 0;
 }
 
 // =============================================================================
@@ -541,7 +552,10 @@ pub fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
                     if block_size > x_max_size {
                         x_max_size = block_size;
                     }
-                    if block_size < x_min_size {
+
+                    // Intermediate heap_5 region end markers have size zero and
+                    // link to the next region; they are not usable free blocks.
+                    if block_size != 0 && block_size < x_min_size {
                         x_min_size = block_size;
                     }
 
@@ -552,8 +566,11 @@ pub fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
         xTaskResumeAll();
 
         (*px_heap_stats).xSizeOfLargestFreeBlockInBytes = x_max_size;
-        (*px_heap_stats).xSizeOfSmallestFreeBlockInBytes =
-            if x_blocks > 0 { x_min_size } else { 0 };
+        (*px_heap_stats).xSizeOfSmallestFreeBlockInBytes = if x_min_size != usize::MAX {
+            x_min_size
+        } else {
+            0
+        };
         (*px_heap_stats).xNumberOfFreeBlocks = x_blocks;
         (*px_heap_stats).xAvailableHeapSpaceInBytes = X_FREE_BYTES_REMAINING;
         (*px_heap_stats).xNumberOfSuccessfulAllocations = X_NUMBER_OF_SUCCESSFUL_ALLOCATIONS;
@@ -598,25 +615,71 @@ use core::alloc::{GlobalAlloc, Layout};
 /// ```
 pub struct FreeRtosAllocator;
 
+const GLOBAL_ALLOC_HEADER_SIZE: usize = core::mem::size_of::<*mut u8>();
+
+/// Allocate a Rust `Layout` from heap_5 while retaining the original pointer
+/// immediately before the aligned result for `dealloc`.
+///
+/// [AMENDMENT] `pvPortMalloc` only promises `portBYTE_ALIGNMENT`. Rust's
+/// `GlobalAlloc` contract permits callers to request a larger alignment, so an
+/// over-allocation and an unaligned metadata write are required here.
+unsafe fn prv_alloc_layout(layout: Layout) -> *mut u8 {
+    let alignment = layout.align().max(portBYTE_ALIGNMENT);
+    let allocation_size = match layout
+        .size()
+        .checked_add(GLOBAL_ALLOC_HEADER_SIZE)
+        .and_then(|size| size.checked_add(alignment - 1))
+    {
+        Some(size) => size,
+        None => return ptr::null_mut(),
+    };
+
+    let raw = pvPortMalloc(allocation_size) as *mut u8;
+    if raw.is_null() {
+        return ptr::null_mut();
+    }
+
+    let unaligned_address = raw.add(GLOBAL_ALLOC_HEADER_SIZE) as usize;
+    let aligned_address = match unaligned_address.checked_add(alignment - 1) {
+        Some(address) => address & !(alignment - 1),
+        None => {
+            vPortFree(raw as *mut c_void);
+            return ptr::null_mut();
+        }
+    };
+    let aligned = aligned_address as *mut u8;
+
+    ptr::write_unaligned(aligned.sub(GLOBAL_ALLOC_HEADER_SIZE) as *mut *mut u8, raw);
+    aligned
+}
+
+unsafe fn prv_free_layout(ptr: *mut u8) {
+    if !ptr.is_null() {
+        let raw = ptr::read_unaligned(ptr.sub(GLOBAL_ALLOC_HEADER_SIZE) as *const *mut u8);
+        vPortFree(raw as *mut c_void);
+    }
+}
+
 unsafe impl GlobalAlloc for FreeRtosAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // heap_5 already aligns to portBYTE_ALIGNMENT (8 bytes)
-        // If larger alignment is requested, we may waste some space
-        pvPortMalloc(layout.size()) as *mut u8
+        prv_alloc_layout(layout)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        vPortFree(ptr as *mut c_void);
+        prv_free_layout(ptr);
     }
 
-    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // heap_5 doesn't have realloc, so allocate new, copy, free old
-        let new_ptr = pvPortMalloc(new_size) as *mut u8;
+        let new_layout = match Layout::from_size_align(new_size, layout.align()) {
+            Ok(layout) => layout,
+            Err(_) => return ptr::null_mut(),
+        };
+        let new_ptr = prv_alloc_layout(new_layout);
         if !new_ptr.is_null() && !ptr.is_null() {
-            // Copy old data (use smaller of old and new size)
-            let copy_size = _layout.size().min(new_size);
+            let copy_size = layout.size().min(new_size);
             ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
-            vPortFree(ptr as *mut c_void);
+            prv_free_layout(ptr);
         }
         new_ptr
     }

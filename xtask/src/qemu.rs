@@ -9,16 +9,15 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-const STANDARD_SUITES: [&str; 8] = [
+const CORTEX_M4F_SUITES: &[&str] = &[
     "smoke",
     "kernel-core",
     "isr",
     "allocator",
-    "static-only",
-    "port",
-    "tickless",
-    "safe-api",
+    "stream-event-timer",
 ];
+const CORTEX_A53_SUITES: &[&str] = &["smoke", "port", "tickless", "event-timer"];
+const UNQUALIFIED_SINGLE_CORE_SUITES: &[&str] = &["smoke"];
 
 pub fn run(repository: &Path, arguments: QemuTestArgs) -> Result<(), String> {
     let timeout = timeout_from_environment()?;
@@ -34,7 +33,7 @@ pub fn run(repository: &Path, arguments: QemuTestArgs) -> Result<(), String> {
             if arch == Architecture::CortexA9Smp {
                 vec!["smp"]
             } else {
-                STANDARD_SUITES.to_vec()
+                suites_for_arch(arch).to_vec()
             }
         } else {
             vec![arguments.suite.as_str()]
@@ -60,6 +59,19 @@ pub fn run(repository: &Path, arguments: QemuTestArgs) -> Result<(), String> {
             failures.len(),
             failures.join("\n  - ")
         ))
+    }
+}
+
+fn suites_for_arch(arch: Architecture) -> &'static [&'static str] {
+    match arch {
+        Architecture::CortexM4f => CORTEX_M4F_SUITES,
+        Architecture::CortexA53 => CORTEX_A53_SUITES,
+        Architecture::CortexA9Smp => &["smp"],
+        Architecture::CortexM0
+        | Architecture::CortexM3
+        | Architecture::CortexM7
+        | Architecture::Riscv32
+        | Architecture::CortexA9 => UNQUALIFIED_SINGLE_CORE_SUITES,
     }
 }
 
@@ -416,6 +428,23 @@ mod tests {
         assert!(rendered.contains("mps2-an386"));
         assert!(rendered.contains("cortex-m4"));
         assert!(rendered.contains("semihosting-config"));
+    }
+
+    #[test]
+    fn all_uses_only_registered_architecture_suites() {
+        assert_eq!(
+            suites_for_arch(Architecture::CortexM4f),
+            CORTEX_M4F_SUITES
+        );
+        assert!(suites_for_arch(Architecture::CortexM4f).contains(&"stream-event-timer"));
+        assert!(!suites_for_arch(Architecture::CortexM4f).contains(&"tickless"));
+
+        assert_eq!(
+            suites_for_arch(Architecture::CortexA53),
+            CORTEX_A53_SUITES
+        );
+        assert!(suites_for_arch(Architecture::CortexA53).contains(&"event-timer"));
+        assert!(!suites_for_arch(Architecture::CortexA53).contains(&"allocator"));
     }
 
     #[test]

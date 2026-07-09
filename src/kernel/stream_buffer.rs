@@ -37,16 +37,15 @@
 
 use core::ffi::c_void;
 use core::ptr;
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use crate::config::*;
 use crate::kernel::tasks::*;
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::memory::pvPortMalloc;
+use crate::memory::vPortFree;
 use crate::port::*;
 use crate::types::*;
-
-#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
-extern crate alloc;
-#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
-use alloc::alloc::{alloc, dealloc, Layout};
 
 // =============================================================================
 // Constants
@@ -104,22 +103,26 @@ pub type StreamBufferCallbackFunction_t = Option<
 #[repr(C)]
 pub struct StreamBuffer_t {
     /// Index to the next item to read within the buffer
-    pub xTail: usize,
+    ///
+    // [AMENDMENT] This is atomic because the single reader and single writer
+    // can be a task and an interrupt respectively. Acquire/release ordering
+    // publishes the corresponding data-buffer copy.
+    pub xTail: AtomicUsize,
 
     /// Index to the next item to write within the buffer
-    pub xHead: usize,
+    pub xHead: AtomicUsize,
 
     /// The length of the buffer pointed to by pucBuffer
     pub xLength: usize,
 
     /// Number of bytes that must be in buffer before unblocking waiting task
-    pub xTriggerLevelBytes: usize,
+    pub xTriggerLevelBytes: AtomicUsize,
 
     /// Handle of task waiting for data (or NULL)
-    pub xTaskWaitingToReceive: TaskHandle_t,
+    pub xTaskWaitingToReceive: AtomicPtr<c_void>,
 
     /// Handle of task waiting to send (or NULL)
-    pub xTaskWaitingToSend: TaskHandle_t,
+    pub xTaskWaitingToSend: AtomicPtr<c_void>,
 
     /// Points to the buffer storage area
     pub pucBuffer: *mut u8,
@@ -131,20 +134,29 @@ pub struct StreamBuffer_t {
     #[cfg(feature = "trace-facility")]
     pub uxStreamBufferNumber: UBaseType_t,
 
+    /// Optional callback called after a successful send.
+    pub pxSendCompletedCallback: StreamBufferCallbackFunction_t,
+
+    /// Optional callback called after a successful receive.
+    pub pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
+
     /// Notification index to use
-    pub uxNotificationIndex: UBaseType_t,
+    pub uxNotificationIndex: AtomicUsize,
 }
 
 /// Static stream buffer structure for user allocation
-#[repr(C)]
+#[repr(transparent)]
 pub struct StaticStreamBuffer_t {
-    _reserved: [u8; core::mem::size_of::<StreamBuffer_t>()],
+    // [AMENDMENT] Preserve the size and alignment of `StreamBuffer_t` without
+    // requiring an initialised internal value. A byte array is only
+    // byte-aligned and cannot soundly be cast to the internal structure.
+    _storage: core::mem::MaybeUninit<StreamBuffer_t>,
 }
 
 impl StaticStreamBuffer_t {
     pub const fn new() -> Self {
         StaticStreamBuffer_t {
-            _reserved: [0u8; core::mem::size_of::<StreamBuffer_t>()],
+            _storage: core::mem::MaybeUninit::uninit(),
         }
     }
 }
@@ -176,6 +188,14 @@ pub unsafe fn xStreamBufferGenericCreate(
 ) -> StreamBufferHandle_t {
     let ucFlags: u8;
 
+    if xBufferSizeBytes == 0
+        || xTriggerLevelBytes > xBufferSizeBytes
+        || (xStreamBufferType == sbTYPE_MESSAGE_BUFFER
+            && xBufferSizeBytes <= sbBYTES_TO_STORE_MESSAGE_LENGTH)
+    {
+        return ptr::null_mut();
+    }
+
     // Determine flags based on buffer type
     if xStreamBufferType == sbTYPE_MESSAGE_BUFFER {
         ucFlags = sbFLAGS_IS_MESSAGE_BUFFER;
@@ -195,14 +215,17 @@ pub unsafe fn xStreamBufferGenericCreate(
         xTriggerLevelBytes = 1;
     }
 
-    // Allocate structure and buffer together
-    // Add 1 to buffer size for implementation quirk (makes reported free space correct)
-    let xBufferSizeBytes = xBufferSizeBytes + 1;
-    let total_size = core::mem::size_of::<StreamBuffer_t>() + xBufferSizeBytes;
+    // Allocate structure and buffer together.  The additional byte is the
+    // upstream sentinel that distinguishes full from empty.
+    let Some(xBufferSizeBytes) = xBufferSizeBytes.checked_add(1) else {
+        return ptr::null_mut();
+    };
+    let Some(total_size) = core::mem::size_of::<StreamBuffer_t>().checked_add(xBufferSizeBytes)
+    else {
+        return ptr::null_mut();
+    };
 
-    let layout = Layout::from_size_align(total_size, core::mem::align_of::<StreamBuffer_t>())
-        .expect("Invalid layout");
-    let pvAllocatedMemory = alloc(layout);
+    let pvAllocatedMemory = pvPortMalloc(total_size) as *mut u8;
 
     if !pvAllocatedMemory.is_null() {
         let pxStreamBuffer = pvAllocatedMemory as *mut StreamBuffer_t;
@@ -251,6 +274,16 @@ pub unsafe fn xStreamBufferGenericCreateStatic(
     configASSERT(!pucStreamBufferStorageArea.is_null());
     configASSERT(!pxStaticStreamBuffer.is_null());
     configASSERT(xTriggerLevelBytes <= xBufferSizeBytes);
+
+    if pucStreamBufferStorageArea.is_null()
+        || pxStaticStreamBuffer.is_null()
+        || xBufferSizeBytes == 0
+        || xTriggerLevelBytes > xBufferSizeBytes
+        || (xStreamBufferType == sbTYPE_MESSAGE_BUFFER
+            && xBufferSizeBytes <= sbBYTES_TO_STORE_MESSAGE_LENGTH)
+    {
+        return ptr::null_mut();
+    }
 
     // Trigger level of 0 makes no sense
     if xTriggerLevelBytes == 0 {
@@ -339,15 +372,8 @@ pub unsafe fn vStreamBufferDelete(xStreamBuffer: StreamBufferHandle_t) {
     let pxStreamBuffer = xStreamBuffer as *mut StreamBuffer_t;
 
     if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_STATICALLY_ALLOCATED) == 0 {
-        #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
-        {
-            // Both structure and buffer were allocated together
-            let total_size = core::mem::size_of::<StreamBuffer_t>() + (*pxStreamBuffer).xLength;
-            let layout =
-                Layout::from_size_align(total_size, core::mem::align_of::<StreamBuffer_t>())
-                    .expect("Invalid layout");
-            dealloc(pxStreamBuffer as *mut u8, layout);
-        }
+        // Both structure and buffer were allocated by pvPortMalloc together.
+        vPortFree(pxStreamBuffer as *mut c_void);
     } else {
         // Static allocation - just zero it out
         ptr::write_bytes(pxStreamBuffer, 0, 1);
@@ -373,18 +399,32 @@ pub unsafe fn xStreamBufferReset(xStreamBuffer: StreamBufferHandle_t) -> BaseTyp
 
     portENTER_CRITICAL();
     {
-        if (*pxStreamBuffer).xTaskWaitingToReceive.is_null()
-            && (*pxStreamBuffer).xTaskWaitingToSend.is_null()
+        if (*pxStreamBuffer)
+            .xTaskWaitingToReceive
+            .load(Ordering::Acquire)
+            .is_null()
+            && (*pxStreamBuffer)
+                .xTaskWaitingToSend
+                .load(Ordering::Acquire)
+                .is_null()
         {
+            let pxSendCompletedCallback = (*pxStreamBuffer).pxSendCompletedCallback;
+            let pxReceiveCompletedCallback = (*pxStreamBuffer).pxReceiveCompletedCallback;
+            #[cfg(feature = "trace-facility")]
+            let uxStreamBufferNumber = (*pxStreamBuffer).uxStreamBufferNumber;
             prvInitialiseNewStreamBuffer(
                 pxStreamBuffer,
                 (*pxStreamBuffer).pucBuffer,
                 (*pxStreamBuffer).xLength,
-                (*pxStreamBuffer).xTriggerLevelBytes,
+                (*pxStreamBuffer).xTriggerLevelBytes.load(Ordering::Relaxed),
                 (*pxStreamBuffer).ucFlags,
-                None,
-                None,
+                pxSendCompletedCallback,
+                pxReceiveCompletedCallback,
             );
+            #[cfg(feature = "trace-facility")]
+            {
+                (*pxStreamBuffer).uxStreamBufferNumber = uxStreamBufferNumber;
+            }
             xReturn = pdPASS;
         }
     }
@@ -402,18 +442,32 @@ pub unsafe fn xStreamBufferResetFromISR(xStreamBuffer: StreamBufferHandle_t) -> 
 
     let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
     {
-        if (*pxStreamBuffer).xTaskWaitingToReceive.is_null()
-            && (*pxStreamBuffer).xTaskWaitingToSend.is_null()
+        if (*pxStreamBuffer)
+            .xTaskWaitingToReceive
+            .load(Ordering::Acquire)
+            .is_null()
+            && (*pxStreamBuffer)
+                .xTaskWaitingToSend
+                .load(Ordering::Acquire)
+                .is_null()
         {
+            let pxSendCompletedCallback = (*pxStreamBuffer).pxSendCompletedCallback;
+            let pxReceiveCompletedCallback = (*pxStreamBuffer).pxReceiveCompletedCallback;
+            #[cfg(feature = "trace-facility")]
+            let uxStreamBufferNumber = (*pxStreamBuffer).uxStreamBufferNumber;
             prvInitialiseNewStreamBuffer(
                 pxStreamBuffer,
                 (*pxStreamBuffer).pucBuffer,
                 (*pxStreamBuffer).xLength,
-                (*pxStreamBuffer).xTriggerLevelBytes,
+                (*pxStreamBuffer).xTriggerLevelBytes.load(Ordering::Relaxed),
                 (*pxStreamBuffer).ucFlags,
-                None,
-                None,
+                pxSendCompletedCallback,
+                pxReceiveCompletedCallback,
             );
+            #[cfg(feature = "trace-facility")]
+            {
+                (*pxStreamBuffer).uxStreamBufferNumber = uxStreamBufferNumber;
+            }
             xReturn = pdPASS;
         }
     }
@@ -438,19 +492,12 @@ pub unsafe fn xStreamBufferSpacesAvailable(xStreamBuffer: StreamBufferHandle_t) 
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
 
-    // Read tail and head atomically (retry if tail changes)
-    let mut xSpace: usize;
-    let mut xOriginalTail: usize;
-
-    loop {
-        xOriginalTail = (*pxStreamBuffer).xTail;
-        xSpace = (*pxStreamBuffer).xLength + (*pxStreamBuffer).xTail;
-        xSpace -= (*pxStreamBuffer).xHead;
-
-        if xOriginalTail == (*pxStreamBuffer).xTail {
-            break;
-        }
-    }
+    // A stale tail only under-reports space, which is safe for the writer.
+    // Acquire pairs with the reader's release-store after copying data out.
+    let xTail = (*pxStreamBuffer).xTail.load(Ordering::Acquire);
+    let xHead = (*pxStreamBuffer).xHead.load(Ordering::Relaxed);
+    let mut xSpace = (*pxStreamBuffer).xLength + xTail;
+    xSpace -= xHead;
 
     xSpace -= 1;
 
@@ -466,7 +513,9 @@ pub unsafe fn xStreamBufferIsEmpty(xStreamBuffer: StreamBufferHandle_t) -> BaseT
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
 
-    if (*pxStreamBuffer).xHead == (*pxStreamBuffer).xTail {
+    if (*pxStreamBuffer).xHead.load(Ordering::Acquire)
+        == (*pxStreamBuffer).xTail.load(Ordering::Acquire)
+    {
         pdTRUE
     } else {
         pdFALSE
@@ -505,7 +554,9 @@ pub unsafe fn xStreamBufferSetTriggerLevel(
     }
 
     if xTriggerLevel < (*pxStreamBuffer).xLength {
-        (*pxStreamBuffer).xTriggerLevelBytes = xTriggerLevel;
+        (*pxStreamBuffer)
+            .xTriggerLevelBytes
+            .store(xTriggerLevel, Ordering::Relaxed);
         pdPASS
     } else {
         pdFALSE
@@ -526,7 +577,7 @@ pub unsafe fn xStreamBufferNextMessageLengthBytes(xStreamBuffer: StreamBufferHan
                 pxStreamBuffer,
                 &mut xTempReturn as *mut _ as *mut u8,
                 sbBYTES_TO_STORE_MESSAGE_LENGTH,
-                (*pxStreamBuffer).xTail,
+                (*pxStreamBuffer).xTail.load(Ordering::Acquire),
             );
             xTempReturn as usize
         } else {
@@ -569,7 +620,11 @@ pub unsafe fn xStreamBufferSend(
 
     // For message buffers, need space for length prefix too
     if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER) != 0 {
-        xRequiredSpace += sbBYTES_TO_STORE_MESSAGE_LENGTH;
+        let Some(required_space) = xRequiredSpace.checked_add(sbBYTES_TO_STORE_MESSAGE_LENGTH)
+        else {
+            return 0;
+        };
+        xRequiredSpace = required_space;
 
         // Message won't fit even in empty buffer
         if xRequiredSpace > xMaxReportedSpace {
@@ -592,9 +647,25 @@ pub unsafe fn xStreamBufferSend(
                 xSpace = xStreamBufferSpacesAvailable(xStreamBuffer);
 
                 if xSpace < xRequiredSpace {
+                    let uxNotificationIndex = (*pxStreamBuffer)
+                        .uxNotificationIndex
+                        .load(Ordering::Relaxed)
+                        as UBaseType_t;
+
+                    // Clear a stale notification before publishing the waiter,
+                    // matching xTaskNotifyStateClearIndexed in upstream.
+                    let _ = xTaskNotifyStateClearIndexed(ptr::null_mut(), uxNotificationIndex);
+
                     // Record that we're waiting
-                    configASSERT((*pxStreamBuffer).xTaskWaitingToSend.is_null());
-                    (*pxStreamBuffer).xTaskWaitingToSend = xTaskGetCurrentTaskHandle();
+                    configASSERT(
+                        (*pxStreamBuffer)
+                            .xTaskWaitingToSend
+                            .load(Ordering::Acquire)
+                            .is_null(),
+                    );
+                    (*pxStreamBuffer)
+                        .xTaskWaitingToSend
+                        .store(xTaskGetCurrentTaskHandle(), Ordering::Release);
                 } else {
                     portEXIT_CRITICAL();
                     break;
@@ -603,8 +674,13 @@ pub unsafe fn xStreamBufferSend(
             portEXIT_CRITICAL();
 
             // Wait for notification
-            xTaskNotifyWait(0, 0, ptr::null_mut(), xTicksToWait);
-            (*pxStreamBuffer).xTaskWaitingToSend = ptr::null_mut();
+            let uxNotificationIndex = (*pxStreamBuffer)
+                .uxNotificationIndex
+                .load(Ordering::Relaxed) as UBaseType_t;
+            xTaskNotifyWaitIndexed(uxNotificationIndex, 0, 0, ptr::null_mut(), xTicksToWait);
+            (*pxStreamBuffer)
+                .xTaskWaitingToSend
+                .store(ptr::null_mut(), Ordering::Release);
 
             if xTaskCheckForTimeOut(&mut xTimeOut, &mut xTicksToWait) != pdFALSE {
                 break;
@@ -626,8 +702,10 @@ pub unsafe fn xStreamBufferSend(
 
     if xReturn > 0 {
         // Notify waiting receiver if trigger level reached
-        if prvBytesInBuffer(pxStreamBuffer) >= (*pxStreamBuffer).xTriggerLevelBytes {
-            sbSEND_COMPLETED(pxStreamBuffer);
+        if prvBytesInBuffer(pxStreamBuffer)
+            >= (*pxStreamBuffer).xTriggerLevelBytes.load(Ordering::Relaxed)
+        {
+            prvSEND_COMPLETED(pxStreamBuffer);
         }
     }
 
@@ -648,7 +726,11 @@ pub unsafe fn xStreamBufferSendFromISR(
     let mut xRequiredSpace = xDataLengthBytes;
 
     if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER) != 0 {
-        xRequiredSpace += sbBYTES_TO_STORE_MESSAGE_LENGTH;
+        let Some(required_space) = xRequiredSpace.checked_add(sbBYTES_TO_STORE_MESSAGE_LENGTH)
+        else {
+            return 0;
+        };
+        xRequiredSpace = required_space;
     }
 
     let xSpace = xStreamBufferSpacesAvailable(xStreamBuffer);
@@ -661,8 +743,10 @@ pub unsafe fn xStreamBufferSendFromISR(
     );
 
     if xReturn > 0 {
-        if prvBytesInBuffer(pxStreamBuffer) >= (*pxStreamBuffer).xTriggerLevelBytes {
-            sbSEND_COMPLETE_FROM_ISR(pxStreamBuffer, pxHigherPriorityTaskWoken);
+        if prvBytesInBuffer(pxStreamBuffer)
+            >= (*pxStreamBuffer).xTriggerLevelBytes.load(Ordering::Relaxed)
+        {
+            prvSEND_COMPLETE_FROM_ISR(pxStreamBuffer, pxHigherPriorityTaskWoken);
         }
     }
 
@@ -703,7 +787,7 @@ pub unsafe fn xStreamBufferReceive(
     {
         sbBYTES_TO_STORE_MESSAGE_LENGTH
     } else if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_BATCHING_BUFFER) != 0 {
-        (*pxStreamBuffer).xTriggerLevelBytes
+        (*pxStreamBuffer).xTriggerLevelBytes.load(Ordering::Relaxed)
     } else {
         0
     };
@@ -714,17 +798,36 @@ pub unsafe fn xStreamBufferReceive(
             xBytesAvailable = prvBytesInBuffer(pxStreamBuffer);
 
             if xBytesAvailable <= xBytesToStoreMessageLength {
+                let uxNotificationIndex = (*pxStreamBuffer)
+                    .uxNotificationIndex
+                    .load(Ordering::Relaxed)
+                    as UBaseType_t;
+
+                let _ = xTaskNotifyStateClearIndexed(ptr::null_mut(), uxNotificationIndex);
+
                 // Record that we're waiting
-                configASSERT((*pxStreamBuffer).xTaskWaitingToReceive.is_null());
-                (*pxStreamBuffer).xTaskWaitingToReceive = xTaskGetCurrentTaskHandle();
+                configASSERT(
+                    (*pxStreamBuffer)
+                        .xTaskWaitingToReceive
+                        .load(Ordering::Acquire)
+                        .is_null(),
+                );
+                (*pxStreamBuffer)
+                    .xTaskWaitingToReceive
+                    .store(xTaskGetCurrentTaskHandle(), Ordering::Release);
             }
         }
         portEXIT_CRITICAL();
 
         if xBytesAvailable <= xBytesToStoreMessageLength {
             // Wait for notification
-            xTaskNotifyWait(0, 0, ptr::null_mut(), xTicksToWait);
-            (*pxStreamBuffer).xTaskWaitingToReceive = ptr::null_mut();
+            let uxNotificationIndex = (*pxStreamBuffer)
+                .uxNotificationIndex
+                .load(Ordering::Relaxed) as UBaseType_t;
+            xTaskNotifyWaitIndexed(uxNotificationIndex, 0, 0, ptr::null_mut(), xTicksToWait);
+            (*pxStreamBuffer)
+                .xTaskWaitingToReceive
+                .store(ptr::null_mut(), Ordering::Release);
 
             // Recheck after blocking
             xBytesAvailable = prvBytesInBuffer(pxStreamBuffer);
@@ -742,7 +845,7 @@ pub unsafe fn xStreamBufferReceive(
         );
 
         if xReceivedLength != 0 {
-            sbRECEIVE_COMPLETED(pxStreamBuffer);
+            prvRECEIVE_COMPLETED(pxStreamBuffer);
         }
     }
 
@@ -780,7 +883,7 @@ pub unsafe fn xStreamBufferReceiveFromISR(
         );
 
         if xReceivedLength != 0 {
-            sbRECEIVE_COMPLETED_FROM_ISR(pxStreamBuffer, pxHigherPriorityTaskWoken);
+            prvRECEIVE_COMPLETED_FROM_ISR(pxStreamBuffer, pxHigherPriorityTaskWoken);
         }
     }
 
@@ -797,7 +900,9 @@ pub unsafe fn uxStreamBufferGetStreamBufferNotificationIndex(
 ) -> UBaseType_t {
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
-    (*pxStreamBuffer).uxNotificationIndex
+    (*pxStreamBuffer)
+        .uxNotificationIndex
+        .load(Ordering::Relaxed) as UBaseType_t
 }
 
 /// Set the notification index used by this stream buffer
@@ -809,10 +914,25 @@ pub unsafe fn vStreamBufferSetStreamBufferNotificationIndex(
     let pxStreamBuffer = xStreamBuffer as *mut StreamBuffer_t;
 
     // Should not change while tasks are waiting
-    configASSERT((*pxStreamBuffer).xTaskWaitingToReceive.is_null());
-    configASSERT((*pxStreamBuffer).xTaskWaitingToSend.is_null());
+    configASSERT(
+        (*pxStreamBuffer)
+            .xTaskWaitingToReceive
+            .load(Ordering::Acquire)
+            .is_null(),
+    );
+    configASSERT(
+        (*pxStreamBuffer)
+            .xTaskWaitingToSend
+            .load(Ordering::Acquire)
+            .is_null(),
+    );
+    configASSERT((uxNotificationIndex as usize) < configTASK_NOTIFICATION_ARRAY_ENTRIES);
 
-    (*pxStreamBuffer).uxNotificationIndex = uxNotificationIndex;
+    if (uxNotificationIndex as usize) < configTASK_NOTIFICATION_ARRAY_ENTRIES {
+        (*pxStreamBuffer)
+            .uxNotificationIndex
+            .store(uxNotificationIndex as usize, Ordering::Relaxed);
+    }
 }
 
 // =============================================================================
@@ -830,14 +950,17 @@ pub unsafe fn xStreamBufferSendCompletedFromISR(
 
     let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
     {
-        if !(*pxStreamBuffer).xTaskWaitingToReceive.is_null() {
-            xTaskNotifyFromISR(
-                (*pxStreamBuffer).xTaskWaitingToReceive,
+        let xTaskWaitingToReceive = prvTakeWaitingTask(&(*pxStreamBuffer).xTaskWaitingToReceive);
+        if !xTaskWaitingToReceive.is_null() {
+            xTaskNotifyIndexedFromISR(
+                xTaskWaitingToReceive,
+                (*pxStreamBuffer)
+                    .uxNotificationIndex
+                    .load(Ordering::Relaxed) as UBaseType_t,
                 0,
                 eNoAction as i32,
                 pxHigherPriorityTaskWoken,
             );
-            (*pxStreamBuffer).xTaskWaitingToReceive = ptr::null_mut();
             xReturn = pdTRUE;
         }
     }
@@ -857,14 +980,17 @@ pub unsafe fn xStreamBufferReceiveCompletedFromISR(
 
     let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
     {
-        if !(*pxStreamBuffer).xTaskWaitingToSend.is_null() {
-            xTaskNotifyFromISR(
-                (*pxStreamBuffer).xTaskWaitingToSend,
+        let xTaskWaitingToSend = prvTakeWaitingTask(&(*pxStreamBuffer).xTaskWaitingToSend);
+        if !xTaskWaitingToSend.is_null() {
+            xTaskNotifyIndexedFromISR(
+                xTaskWaitingToSend,
+                (*pxStreamBuffer)
+                    .uxNotificationIndex
+                    .load(Ordering::Relaxed) as UBaseType_t,
                 0,
                 eNoAction as i32,
                 pxHigherPriorityTaskWoken,
             );
-            (*pxStreamBuffer).xTaskWaitingToSend = ptr::null_mut();
             xReturn = pdTRUE;
         }
     }
@@ -884,23 +1010,54 @@ unsafe fn prvInitialiseNewStreamBuffer(
     xBufferSizeBytes: usize,
     xTriggerLevelBytes: usize,
     ucFlags: u8,
-    _pxSendCompletedCallback: StreamBufferCallbackFunction_t,
-    _pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
+    pxSendCompletedCallback: StreamBufferCallbackFunction_t,
+    pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
 ) {
-    // Zero the structure
-    ptr::write_bytes(pxStreamBuffer, 0, 1);
+    /* [AMENDMENT] Construct atomic members as atomics rather than relying on
+     * byte-wise zeroing. */
+    ptr::write(
+        pxStreamBuffer,
+        StreamBuffer_t {
+            xTail: AtomicUsize::new(0),
+            xHead: AtomicUsize::new(0),
+            xLength: xBufferSizeBytes,
+            xTriggerLevelBytes: AtomicUsize::new(xTriggerLevelBytes),
+            xTaskWaitingToReceive: AtomicPtr::new(ptr::null_mut()),
+            xTaskWaitingToSend: AtomicPtr::new(ptr::null_mut()),
+            pucBuffer,
+            ucFlags,
+            #[cfg(feature = "trace-facility")]
+            uxStreamBufferNumber: 0,
+            pxSendCompletedCallback,
+            pxReceiveCompletedCallback,
+            uxNotificationIndex: AtomicUsize::new(tskDEFAULT_INDEX_TO_NOTIFY as usize),
+        },
+    );
+}
 
-    (*pxStreamBuffer).pucBuffer = pucBuffer;
-    (*pxStreamBuffer).xLength = xBufferSizeBytes;
-    (*pxStreamBuffer).xTriggerLevelBytes = xTriggerLevelBytes;
-    (*pxStreamBuffer).ucFlags = ucFlags;
-    (*pxStreamBuffer).uxNotificationIndex = tskDEFAULT_INDEX_TO_NOTIFY;
+/// Load and clear a waiting-task slot from within the surrounding FreeRTOS
+/// scheduler/interrupt exclusion region.
+///
+// [AMENDMENT] Cortex-M0 provides atomic pointer loads/stores but no atomic
+// exchange. The surrounding critical section or scheduler exclusion preserves
+// the upstream serialization, while atomic accesses keep task/ISR aliasing
+// valid in Rust.
+#[inline(always)]
+fn prvTakeWaitingTask(pxWaitingTask: &AtomicPtr<c_void>) -> TaskHandle_t {
+    let xTask = pxWaitingTask.load(Ordering::Acquire);
+    if !xTask.is_null() {
+        pxWaitingTask.store(ptr::null_mut(), Ordering::Release);
+    }
+    xTask
 }
 
 /// Calculate bytes in the buffer
 unsafe fn prvBytesInBuffer(pxStreamBuffer: *const StreamBuffer_t) -> usize {
-    let mut xCount = (*pxStreamBuffer).xLength + (*pxStreamBuffer).xHead;
-    xCount -= (*pxStreamBuffer).xTail;
+    // Acquire publishes bytes copied by the writer before its head update.
+    let xHead = (*pxStreamBuffer).xHead.load(Ordering::Acquire);
+    let xTail = (*pxStreamBuffer).xTail.load(Ordering::Acquire);
+    let mut xCount = (*pxStreamBuffer).xLength + xHead;
+    xCount -= xTail;
 
     if xCount >= (*pxStreamBuffer).xLength {
         xCount -= (*pxStreamBuffer).xLength;
@@ -989,12 +1146,15 @@ unsafe fn prvWriteMessageToBuffer(
     xSpace: usize,
     xRequiredSpace: usize,
 ) -> usize {
-    let mut xNextHead = (*pxStreamBuffer).xHead;
+    let mut xNextHead = (*pxStreamBuffer).xHead.load(Ordering::Relaxed);
 
     if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER) != 0 {
         // Message buffer - write length prefix first
         if xSpace >= xRequiredSpace {
-            let xMessageLength = xDataLengthBytes as configMESSAGE_BUFFER_LENGTH_TYPE;
+            let Ok(xMessageLength) = configMESSAGE_BUFFER_LENGTH_TYPE::try_from(xDataLengthBytes)
+            else {
+                return 0;
+            };
             xNextHead = prvWriteBytesToBuffer(
                 pxStreamBuffer,
                 &xMessageLength as *const _ as *const u8,
@@ -1011,12 +1171,14 @@ unsafe fn prvWriteMessageToBuffer(
     }
 
     if xDataLengthBytes != 0 {
-        (*pxStreamBuffer).xHead = prvWriteBytesToBuffer(
+        let xHead = prvWriteBytesToBuffer(
             pxStreamBuffer,
             pvTxData as *const u8,
             xDataLengthBytes,
             xNextHead,
         );
+        // Publish the copied bytes to the reader.
+        (*pxStreamBuffer).xHead.store(xHead, Ordering::Release);
     }
 
     xDataLengthBytes
@@ -1029,7 +1191,7 @@ unsafe fn prvReadMessageFromBuffer(
     xBufferLengthBytes: usize,
     mut xBytesAvailable: usize,
 ) -> usize {
-    let mut xNextTail = (*pxStreamBuffer).xTail;
+    let mut xNextTail = (*pxStreamBuffer).xTail.load(Ordering::Relaxed);
     let xNextMessageLength: usize;
 
     if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER) != 0 {
@@ -1057,8 +1219,9 @@ unsafe fn prvReadMessageFromBuffer(
     let xCount = core::cmp::min(xNextMessageLength, xBytesAvailable);
 
     if xCount != 0 {
-        (*pxStreamBuffer).xTail =
-            prvReadBytesFromBuffer(pxStreamBuffer, pvRxData as *mut u8, xCount, xNextTail);
+        let xTail = prvReadBytesFromBuffer(pxStreamBuffer, pvRxData as *mut u8, xCount, xNextTail);
+        // Publish completion of the read before the writer reuses the space.
+        (*pxStreamBuffer).xTail.store(xTail, Ordering::Release);
     }
 
     xCount
@@ -1072,11 +1235,32 @@ unsafe fn prvReadMessageFromBuffer(
 #[inline(always)]
 unsafe fn sbSEND_COMPLETED(pxStreamBuffer: *mut StreamBuffer_t) {
     vTaskSuspendAll();
-    if !(*pxStreamBuffer).xTaskWaitingToReceive.is_null() {
-        xTaskNotify((*pxStreamBuffer).xTaskWaitingToReceive, 0, eNoAction as i32);
-        (*pxStreamBuffer).xTaskWaitingToReceive = ptr::null_mut();
+    let xTaskWaitingToReceive = prvTakeWaitingTask(&(*pxStreamBuffer).xTaskWaitingToReceive);
+    if !xTaskWaitingToReceive.is_null() {
+        xTaskNotifyIndexed(
+            xTaskWaitingToReceive,
+            (*pxStreamBuffer)
+                .uxNotificationIndex
+                .load(Ordering::Relaxed) as UBaseType_t,
+            0,
+            eNoAction as i32,
+        );
     }
     xTaskResumeAll();
+}
+
+/// Invoke an instance callback, falling back to the standard task notification.
+#[inline(always)]
+unsafe fn prvSEND_COMPLETED(pxStreamBuffer: *mut StreamBuffer_t) {
+    if let Some(pxCallback) = (*pxStreamBuffer).pxSendCompletedCallback {
+        pxCallback(
+            pxStreamBuffer as StreamBufferHandle_t,
+            pdFALSE,
+            ptr::null_mut(),
+        );
+    } else {
+        sbSEND_COMPLETED(pxStreamBuffer);
+    }
 }
 
 /// Send completed notification from ISR
@@ -1086,27 +1270,68 @@ unsafe fn sbSEND_COMPLETE_FROM_ISR(
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) {
     let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
-    if !(*pxStreamBuffer).xTaskWaitingToReceive.is_null() {
-        xTaskNotifyFromISR(
-            (*pxStreamBuffer).xTaskWaitingToReceive,
+    let xTaskWaitingToReceive = prvTakeWaitingTask(&(*pxStreamBuffer).xTaskWaitingToReceive);
+    if !xTaskWaitingToReceive.is_null() {
+        xTaskNotifyIndexedFromISR(
+            xTaskWaitingToReceive,
+            (*pxStreamBuffer)
+                .uxNotificationIndex
+                .load(Ordering::Relaxed) as UBaseType_t,
             0,
             eNoAction as i32,
             pxHigherPriorityTaskWoken,
         );
-        (*pxStreamBuffer).xTaskWaitingToReceive = ptr::null_mut();
     }
     portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+}
+
+/// Invoke an instance callback from ISR, falling back to task notification.
+#[inline(always)]
+unsafe fn prvSEND_COMPLETE_FROM_ISR(
+    pxStreamBuffer: *mut StreamBuffer_t,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) {
+    if let Some(pxCallback) = (*pxStreamBuffer).pxSendCompletedCallback {
+        pxCallback(
+            pxStreamBuffer as StreamBufferHandle_t,
+            pdTRUE,
+            pxHigherPriorityTaskWoken,
+        );
+    } else {
+        sbSEND_COMPLETE_FROM_ISR(pxStreamBuffer, pxHigherPriorityTaskWoken);
+    }
 }
 
 /// Receive completed notification
 #[inline(always)]
 unsafe fn sbRECEIVE_COMPLETED(pxStreamBuffer: *mut StreamBuffer_t) {
     vTaskSuspendAll();
-    if !(*pxStreamBuffer).xTaskWaitingToSend.is_null() {
-        xTaskNotify((*pxStreamBuffer).xTaskWaitingToSend, 0, eNoAction as i32);
-        (*pxStreamBuffer).xTaskWaitingToSend = ptr::null_mut();
+    let xTaskWaitingToSend = prvTakeWaitingTask(&(*pxStreamBuffer).xTaskWaitingToSend);
+    if !xTaskWaitingToSend.is_null() {
+        xTaskNotifyIndexed(
+            xTaskWaitingToSend,
+            (*pxStreamBuffer)
+                .uxNotificationIndex
+                .load(Ordering::Relaxed) as UBaseType_t,
+            0,
+            eNoAction as i32,
+        );
     }
     xTaskResumeAll();
+}
+
+/// Invoke an instance callback, falling back to the standard task notification.
+#[inline(always)]
+unsafe fn prvRECEIVE_COMPLETED(pxStreamBuffer: *mut StreamBuffer_t) {
+    if let Some(pxCallback) = (*pxStreamBuffer).pxReceiveCompletedCallback {
+        pxCallback(
+            pxStreamBuffer as StreamBufferHandle_t,
+            pdFALSE,
+            ptr::null_mut(),
+        );
+    } else {
+        sbRECEIVE_COMPLETED(pxStreamBuffer);
+    }
 }
 
 /// Receive completed notification from ISR
@@ -1116,16 +1341,36 @@ unsafe fn sbRECEIVE_COMPLETED_FROM_ISR(
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) {
     let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
-    if !(*pxStreamBuffer).xTaskWaitingToSend.is_null() {
-        xTaskNotifyFromISR(
-            (*pxStreamBuffer).xTaskWaitingToSend,
+    let xTaskWaitingToSend = prvTakeWaitingTask(&(*pxStreamBuffer).xTaskWaitingToSend);
+    if !xTaskWaitingToSend.is_null() {
+        xTaskNotifyIndexedFromISR(
+            xTaskWaitingToSend,
+            (*pxStreamBuffer)
+                .uxNotificationIndex
+                .load(Ordering::Relaxed) as UBaseType_t,
             0,
             eNoAction as i32,
             pxHigherPriorityTaskWoken,
         );
-        (*pxStreamBuffer).xTaskWaitingToSend = ptr::null_mut();
     }
     portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+}
+
+/// Invoke an instance callback from ISR, falling back to task notification.
+#[inline(always)]
+unsafe fn prvRECEIVE_COMPLETED_FROM_ISR(
+    pxStreamBuffer: *mut StreamBuffer_t,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) {
+    if let Some(pxCallback) = (*pxStreamBuffer).pxReceiveCompletedCallback {
+        pxCallback(
+            pxStreamBuffer as StreamBufferHandle_t,
+            pdTRUE,
+            pxHigherPriorityTaskWoken,
+        );
+    } else {
+        sbRECEIVE_COMPLETED_FROM_ISR(pxStreamBuffer, pxHigherPriorityTaskWoken);
+    }
 }
 
 /// Notification action: no action (just wake task)
@@ -1144,7 +1389,6 @@ const eNoAction: u32 = 0;
 /// # Safety
 ///
 /// The caller must ensure the output pointers are valid.
-#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub unsafe fn xStreamBufferGetStaticBuffers(
     xStreamBuffer: StreamBufferHandle_t,
     ppucStreamBufferStorageArea: *mut *mut u8,
@@ -1212,4 +1456,222 @@ pub unsafe fn ucStreamBufferGetStreamBufferType(xStreamBuffer: StreamBufferHandl
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
     (*pxStreamBuffer).ucFlags & sbFLAGS_IS_MESSAGE_BUFFER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static SEND_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static RECEIVE_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static ISR_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn send_callback(
+        _xStreamBuffer: StreamBufferHandle_t,
+        xIsInsideISR: BaseType_t,
+        _pxHigherPriorityTaskWoken: *mut BaseType_t,
+    ) {
+        SEND_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        if xIsInsideISR != pdFALSE {
+            ISR_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    extern "C" fn receive_callback(
+        _xStreamBuffer: StreamBufferHandle_t,
+        xIsInsideISR: BaseType_t,
+        _pxHigherPriorityTaskWoken: *mut BaseType_t,
+    ) {
+        RECEIVE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        if xIsInsideISR != pdFALSE {
+            ISR_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    extern "C" fn no_op_callback(
+        _xStreamBuffer: StreamBufferHandle_t,
+        _xIsInsideISR: BaseType_t,
+        _pxHigherPriorityTaskWoken: *mut BaseType_t,
+    ) {
+    }
+
+    #[test]
+    fn static_stream_buffer_storage_matches_internal_layout() {
+        assert_eq!(
+            core::mem::size_of::<StaticStreamBuffer_t>(),
+            core::mem::size_of::<StreamBuffer_t>()
+        );
+        assert_eq!(
+            core::mem::align_of::<StaticStreamBuffer_t>(),
+            core::mem::align_of::<StreamBuffer_t>()
+        );
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn callbacks_survive_reset_and_distinguish_isr_context() {
+        crate::port::test_port_reset();
+        SEND_CALLBACKS.store(0, Ordering::Relaxed);
+        RECEIVE_CALLBACKS.store(0, Ordering::Relaxed);
+        ISR_CALLBACKS.store(0, Ordering::Relaxed);
+
+        let mut storage = [0u8; 17];
+        let mut control = StaticStreamBuffer_t::new();
+        let handle = unsafe {
+            xStreamBufferGenericCreateStatic(
+                storage.len(),
+                1,
+                sbTYPE_STREAM_BUFFER,
+                storage.as_mut_ptr(),
+                &mut control,
+                Some(send_callback),
+                Some(receive_callback),
+            )
+        };
+        assert!(!handle.is_null());
+
+        #[cfg(feature = "trace-facility")]
+        unsafe {
+            vStreamBufferSetStreamBufferNumber(handle, 123);
+        }
+
+        let sent = [1u8, 2, 3];
+        let mut received = [0u8; 3];
+        assert_eq!(
+            unsafe { xStreamBufferSend(handle, sent.as_ptr().cast(), sent.len(), 0) },
+            sent.len()
+        );
+        assert_eq!(
+            unsafe {
+                xStreamBufferReceive(handle, received.as_mut_ptr().cast(), received.len(), 0)
+            },
+            received.len()
+        );
+        assert_eq!(received, sent);
+        assert_eq!(unsafe { xStreamBufferReset(handle) }, pdPASS);
+
+        #[cfg(feature = "trace-facility")]
+        assert_eq!(unsafe { uxStreamBufferGetStreamBufferNumber(handle) }, 123);
+
+        let mut higher_priority_task_woken = pdFALSE;
+        assert_eq!(
+            unsafe {
+                xStreamBufferSendFromISR(
+                    handle,
+                    sent.as_ptr().cast(),
+                    sent.len(),
+                    &mut higher_priority_task_woken,
+                )
+            },
+            sent.len()
+        );
+        assert_eq!(
+            unsafe {
+                xStreamBufferReceiveFromISR(
+                    handle,
+                    received.as_mut_ptr().cast(),
+                    received.len(),
+                    &mut higher_priority_task_woken,
+                )
+            },
+            received.len()
+        );
+        assert_eq!(unsafe { xStreamBufferResetFromISR(handle) }, pdPASS);
+        assert_eq!(
+            unsafe { xStreamBufferSend(handle, sent.as_ptr().cast(), sent.len(), 0) },
+            sent.len()
+        );
+        assert_eq!(
+            unsafe {
+                xStreamBufferReceive(handle, received.as_mut_ptr().cast(), received.len(), 0)
+            },
+            received.len()
+        );
+
+        #[cfg(feature = "trace-facility")]
+        assert_eq!(unsafe { uxStreamBufferGetStreamBufferNumber(handle) }, 123);
+
+        assert_eq!(SEND_CALLBACKS.load(Ordering::Relaxed), 3);
+        assert_eq!(RECEIVE_CALLBACKS.load(Ordering::Relaxed), 3);
+        assert_eq!(ISR_CALLBACKS.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(all(feature = "port-test", feature = "heap-4"))]
+    #[test]
+    fn dynamic_buffer_uses_and_returns_freertos_heap_storage() {
+        use crate::memory::{pvPortMalloc, vPortFree, vPortHeapResetState, xPortGetFreeHeapSize};
+
+        vPortHeapResetState();
+        unsafe {
+            let probe = pvPortMalloc(1);
+            assert!(!probe.is_null());
+            vPortFree(probe);
+            let initial_free = xPortGetFreeHeapSize();
+
+            let handle = xStreamBufferCreate(127, 1);
+            assert!(!handle.is_null());
+            assert!(xPortGetFreeHeapSize() < initial_free);
+            assert_eq!(handle as usize % crate::port::portBYTE_ALIGNMENT, 0,);
+
+            vStreamBufferDelete(handle);
+            assert_eq!(xPortGetFreeHeapSize(), initial_free);
+        }
+        vPortHeapResetState();
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn atomic_spsc_handoff_preserves_bytes_under_host_threads() {
+        const TRANSFERS: usize = 50_000;
+
+        let storage = std::boxed::Box::leak(std::boxed::Box::new([0u8; 257]));
+        let control = std::boxed::Box::leak(std::boxed::Box::new(StaticStreamBuffer_t::new()));
+        let handle = unsafe {
+            xStreamBufferGenericCreateStatic(
+                storage.len(),
+                1,
+                sbTYPE_STREAM_BUFFER,
+                storage.as_mut_ptr(),
+                control,
+                Some(no_op_callback),
+                Some(no_op_callback),
+            )
+        };
+        assert!(!handle.is_null());
+
+        let sender_handle = handle as usize;
+        let sender = std::thread::spawn(move || {
+            let handle = sender_handle as StreamBufferHandle_t;
+            let mut index = 0usize;
+            while index < TRANSFERS {
+                let byte = (index % 251) as u8;
+                if unsafe { xStreamBufferSend(handle, (&byte as *const u8).cast(), 1, 0) } == 1 {
+                    index += 1;
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        });
+
+        let receiver_handle = handle as usize;
+        let receiver = std::thread::spawn(move || {
+            let handle = receiver_handle as StreamBufferHandle_t;
+            let mut index = 0usize;
+            while index < TRANSFERS {
+                let mut byte = 0u8;
+                if unsafe { xStreamBufferReceive(handle, (&mut byte as *mut u8).cast(), 1, 0) } == 1
+                {
+                    assert_eq!(byte, (index % 251) as u8);
+                    index += 1;
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        });
+
+        sender.join().unwrap();
+        receiver.join().unwrap();
+        assert_eq!(unsafe { xStreamBufferBytesAvailable(handle) }, 0);
+    }
 }

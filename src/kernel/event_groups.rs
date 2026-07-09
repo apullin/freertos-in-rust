@@ -36,13 +36,19 @@
 #![allow(static_mut_refs)]
 
 use core::ffi::c_void;
-#[cfg(all(feature = "pend-function-call", feature = "timers"))]
+#[cfg(any(
+    feature = "alloc",
+    feature = "heap-4",
+    feature = "heap-5",
+    all(feature = "pend-function-call", feature = "timers")
+))]
 use core::ptr;
 
 use crate::config::*;
 use crate::kernel::list::*;
 use crate::kernel::tasks::*;
-use crate::memory::*;
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::memory::{pvPortMalloc, vPortFree};
 use crate::trace::*;
 use crate::types::*;
 
@@ -175,6 +181,11 @@ impl StaticList_t {
     }
 }
 
+const _: () =
+    assert!(core::mem::size_of::<StaticEventGroup_t>() == core::mem::size_of::<EventGroup_t>());
+const _: () =
+    assert!(core::mem::align_of::<StaticEventGroup_t>() == core::mem::align_of::<EventGroup_t>());
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -197,9 +208,19 @@ pub fn xEventGroupCreate() -> EventGroupHandle_t {
 
     if !pxEventBits.is_null() {
         unsafe {
-            (*pxEventBits).uxEventBits = 0;
+            /* [AMENDMENT] Construct the allocated Rust value before taking
+             * references to any of its fields. */
+            ptr::write(
+                pxEventBits,
+                EventGroup_t {
+                    uxEventBits: 0,
+                    xTasksWaitingForBits: List_t::new(),
+                    #[cfg(feature = "trace-facility")]
+                    uxEventGroupNumber: 0,
+                    ucStaticallyAllocated: pdFALSE as u8,
+                },
+            );
             vListInitialise(&mut (*pxEventBits).xTasksWaitingForBits);
-            (*pxEventBits).ucStaticallyAllocated = pdFALSE as u8;
         }
 
         traceEVENT_GROUP_CREATE(pxEventBits as *mut c_void);
@@ -232,6 +253,11 @@ pub fn xEventGroupCreateStatic(pxEventGroupBuffer: *mut StaticEventGroup_t) -> E
         unsafe {
             (*pxEventBits).uxEventBits = 0;
             vListInitialise(&mut (*pxEventBits).xTasksWaitingForBits);
+
+            #[cfg(feature = "trace-facility")]
+            {
+                (*pxEventBits).uxEventGroupNumber = 0;
+            }
 
             #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
             {
@@ -693,7 +719,11 @@ pub fn xEventGroupGetStaticBuffer(
 // =============================================================================
 
 /// Callback to set bits (used by xEventGroupSetBitsFromISR)
-pub extern "C" fn vEventGroupSetBitsCallback(pvEventGroup: *mut c_void, ulBitsToSet: u32) {
+#[cfg(all(feature = "pend-function-call", feature = "timers"))]
+pub extern "C" fn vEventGroupSetBitsCallback(
+    pvEventGroup: *mut c_void,
+    ulBitsToSet: crate::kernel::timers::PendedFunctionParameter_t,
+) {
     traceENTER_vEventGroupSetBitsCallback(pvEventGroup, ulBitsToSet);
 
     let _ = xEventGroupSetBits(
@@ -705,7 +735,11 @@ pub extern "C" fn vEventGroupSetBitsCallback(pvEventGroup: *mut c_void, ulBitsTo
 }
 
 /// Callback to clear bits (used by xEventGroupClearBitsFromISR)
-pub extern "C" fn vEventGroupClearBitsCallback(pvEventGroup: *mut c_void, ulBitsToClear: u32) {
+#[cfg(all(feature = "pend-function-call", feature = "timers"))]
+pub extern "C" fn vEventGroupClearBitsCallback(
+    pvEventGroup: *mut c_void,
+    ulBitsToClear: crate::kernel::timers::PendedFunctionParameter_t,
+) {
     traceENTER_vEventGroupClearBitsCallback(pvEventGroup, ulBitsToClear);
 
     let _ = xEventGroupClearBits(
@@ -736,7 +770,7 @@ pub fn xEventGroupSetBitsFromISR(
     let xReturn = xTimerPendFunctionCallFromISR(
         vEventGroupSetBitsCallback,
         xEventGroup as *mut c_void,
-        uxBitsToSet as u32,
+        uxBitsToSet as crate::kernel::timers::PendedFunctionParameter_t,
         pxHigherPriorityTaskWoken,
     );
 
@@ -760,7 +794,7 @@ pub fn xEventGroupClearBitsFromISR(
     let xReturn = xTimerPendFunctionCallFromISR(
         vEventGroupClearBitsCallback,
         xEventGroup as *mut c_void,
-        uxBitsToClear as u32,
+        uxBitsToClear as crate::kernel::timers::PendedFunctionParameter_t,
         ptr::null_mut(),
     );
 
@@ -889,12 +923,24 @@ fn traceENTER_xEventGroupGetStaticBuffer(
 #[inline(always)]
 fn traceRETURN_xEventGroupGetStaticBuffer(_xReturn: BaseType_t) {}
 #[inline(always)]
-fn traceENTER_vEventGroupSetBitsCallback(_pvEventGroup: *mut c_void, _ulBitsToSet: u32) {}
+#[cfg(all(feature = "pend-function-call", feature = "timers"))]
+fn traceENTER_vEventGroupSetBitsCallback(
+    _pvEventGroup: *mut c_void,
+    _ulBitsToSet: crate::kernel::timers::PendedFunctionParameter_t,
+) {
+}
 #[inline(always)]
+#[cfg(all(feature = "pend-function-call", feature = "timers"))]
 fn traceRETURN_vEventGroupSetBitsCallback() {}
 #[inline(always)]
-fn traceENTER_vEventGroupClearBitsCallback(_pvEventGroup: *mut c_void, _ulBitsToClear: u32) {}
+#[cfg(all(feature = "pend-function-call", feature = "timers"))]
+fn traceENTER_vEventGroupClearBitsCallback(
+    _pvEventGroup: *mut c_void,
+    _ulBitsToClear: crate::kernel::timers::PendedFunctionParameter_t,
+) {
+}
 #[inline(always)]
+#[cfg(all(feature = "pend-function-call", feature = "timers"))]
 fn traceRETURN_vEventGroupClearBitsCallback() {}
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
 #[inline(always)]
@@ -933,3 +979,45 @@ fn traceENTER_vEventGroupSetNumber(
 #[cfg(feature = "trace-facility")]
 #[inline(always)]
 fn traceRETURN_vEventGroupSetNumber() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_event_group_storage_matches_internal_layout() {
+        assert_eq!(
+            core::mem::size_of::<StaticEventGroup_t>(),
+            core::mem::size_of::<EventGroup_t>()
+        );
+        assert_eq!(
+            core::mem::align_of::<StaticEventGroup_t>(),
+            core::mem::align_of::<EventGroup_t>()
+        );
+    }
+
+    #[cfg(all(
+        feature = "port-test",
+        feature = "pend-function-call",
+        feature = "timers"
+    ))]
+    #[test]
+    fn deferred_callbacks_preserve_all_usable_32_bit_event_bits() {
+        let mut storage = StaticEventGroup_t::new();
+        let event_group = xEventGroupCreateStatic(&mut storage);
+        assert!(!event_group.is_null());
+
+        let highest_usable_bit = 0x0080_0000 as EventBits_t;
+        vEventGroupSetBitsCallback(
+            event_group,
+            highest_usable_bit as crate::kernel::timers::PendedFunctionParameter_t,
+        );
+        assert_eq!(xEventGroupGetBits(event_group), highest_usable_bit);
+
+        vEventGroupClearBitsCallback(
+            event_group,
+            highest_usable_bit as crate::kernel::timers::PendedFunctionParameter_t,
+        );
+        assert_eq!(xEventGroupGetBits(event_group), 0);
+    }
+}

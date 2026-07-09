@@ -41,20 +41,20 @@ use crate::config::*;
 use crate::kernel::list::*;
 use crate::kernel::queue::*;
 use crate::kernel::tasks::*;
-use crate::memory::*;
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::memory::{pvPortMalloc, vPortFree};
 use crate::types::*;
 
 // Import trace macros (exported at crate root via #[macro_export])
 use crate::{
     traceENTER_pcTimerGetName, traceENTER_pvTimerGetTimerID, traceENTER_uxTimerGetReloadMode,
-    traceENTER_vTimerSetReloadMode, traceENTER_vTimerSetTimerID, traceENTER_xTimerCreate,
-    traceENTER_xTimerCreateStatic, traceENTER_xTimerCreateTimerTask,
-    traceENTER_xTimerGenericCommandFromISR, traceENTER_xTimerGenericCommandFromTask,
-    traceENTER_xTimerGetExpiryTime, traceENTER_xTimerGetPeriod, traceENTER_xTimerGetReloadMode,
-    traceENTER_xTimerGetStaticBuffer, traceENTER_xTimerGetTimerDaemonTaskHandle,
-    traceENTER_xTimerIsTimerActive, traceRETURN_pcTimerGetName, traceRETURN_pvTimerGetTimerID,
-    traceRETURN_uxTimerGetReloadMode, traceRETURN_vTimerSetReloadMode,
-    traceRETURN_vTimerSetTimerID, traceRETURN_xTimerCreate, traceRETURN_xTimerCreateStatic,
+    traceENTER_vTimerSetReloadMode, traceENTER_vTimerSetTimerID, traceENTER_xTimerCreateStatic,
+    traceENTER_xTimerCreateTimerTask, traceENTER_xTimerGenericCommandFromISR,
+    traceENTER_xTimerGenericCommandFromTask, traceENTER_xTimerGetExpiryTime,
+    traceENTER_xTimerGetPeriod, traceENTER_xTimerGetReloadMode, traceENTER_xTimerGetStaticBuffer,
+    traceENTER_xTimerGetTimerDaemonTaskHandle, traceENTER_xTimerIsTimerActive,
+    traceRETURN_pcTimerGetName, traceRETURN_pvTimerGetTimerID, traceRETURN_uxTimerGetReloadMode,
+    traceRETURN_vTimerSetReloadMode, traceRETURN_vTimerSetTimerID, traceRETURN_xTimerCreateStatic,
     traceRETURN_xTimerCreateTimerTask, traceRETURN_xTimerGenericCommandFromISR,
     traceRETURN_xTimerGenericCommandFromTask, traceRETURN_xTimerGetExpiryTime,
     traceRETURN_xTimerGetPeriod, traceRETURN_xTimerGetReloadMode,
@@ -62,6 +62,9 @@ use crate::{
     traceRETURN_xTimerIsTimerActive, traceTIMER_COMMAND_RECEIVED, traceTIMER_COMMAND_SEND,
     traceTIMER_CREATE, traceTIMER_EXPIRED,
 };
+
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::{traceENTER_xTimerCreate, traceRETURN_xTimerCreate};
 
 #[cfg(feature = "trace-facility")]
 use crate::{
@@ -155,7 +158,19 @@ pub type TimerCallbackFunction_t = extern "C" fn(TimerHandle_t);
 
 /// Pended function callback prototype
 /// For xTimerPendFunctionCall
-pub type PendedFunction_t = extern "C" fn(*mut c_void, u32);
+///
+// [AMENDMENT] Upstream stores the second parameter as `uint32_t`, which
+// truncates 64-bit event-group masks. Widen it with the tick configuration so
+// all advertised event bits survive a deferred FromISR call.
+#[cfg(feature = "tick-64bit")]
+pub type PendedFunctionParameter_t = u64;
+#[cfg(not(feature = "tick-64bit"))]
+pub type PendedFunctionParameter_t = u32;
+pub type PendedFunction_t = extern "C" fn(*mut c_void, PendedFunctionParameter_t);
+
+const _: () = assert!(
+    core::mem::size_of::<PendedFunctionParameter_t>() >= core::mem::size_of::<TickType_t>()
+);
 
 // =============================================================================
 // Timer Structure
@@ -216,7 +231,7 @@ pub struct CallbackParameters_t {
     /// First parameter
     pub pvParameter1: *mut c_void,
     /// Second parameter
-    pub ulParameter2: u32,
+    pub ulParameter2: PendedFunctionParameter_t,
 }
 
 /// Union for timer message payload
@@ -242,27 +257,24 @@ pub struct DaemonTaskMessage_t {
 // Static Timer Buffer (for xTimerCreateStatic)
 // =============================================================================
 
-/// Static buffer for timer allocation
-///
-/// Must be the same size as Timer_t for static allocation to work.
-#[repr(C)]
+/// Opaque static buffer for timer allocation.
+#[repr(transparent)]
 pub struct StaticTimer_t {
-    /// Placeholder to match Timer_t size - name
-    pub pvDummy1: *mut c_void,
-    /// Placeholder - list item
-    pub xDummy2: StaticListItem_t,
-    /// Placeholder - period
-    pub xDummy3: TickType_t,
-    /// Placeholder - timer ID
-    pub pvDummy4: *mut c_void,
-    /// Placeholder - callback
-    pub pvDummy5: *mut c_void,
-    /// Placeholder - trace number (conditional)
-    #[cfg(feature = "trace-facility")]
-    pub uxDummy6: UBaseType_t,
-    /// Placeholder - status
-    pub ucDummy7: u8,
+    // [AMENDMENT] `MaybeUninit<Timer_t>` preserves both size and alignment
+    // without requiring callers to manufacture a valid internal timer.
+    _storage: core::mem::MaybeUninit<Timer_t>,
 }
+
+impl StaticTimer_t {
+    pub const fn new() -> Self {
+        Self {
+            _storage: core::mem::MaybeUninit::uninit(),
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<StaticTimer_t>() == core::mem::size_of::<Timer_t>());
+const _: () = assert!(core::mem::align_of::<StaticTimer_t>() == core::mem::align_of::<Timer_t>());
 
 // =============================================================================
 // Scheduler Globals
@@ -286,8 +298,54 @@ static mut xTimerQueue: QueueHandle_t = ptr::null_mut();
 /// Handle to the timer daemon task
 static mut xTimerTaskHandle: TaskHandle_t = ptr::null_mut();
 
+/// Application-provided storage for a statically allocated timer daemon task.
+static mut pxTimerTaskTCBBuffer: *mut StaticTask_t = ptr::null_mut();
+static mut pxTimerTaskStackBuffer: *mut StackType_t = ptr::null_mut();
+static mut uxTimerTaskStackSize: configSTACK_DEPTH_TYPE = 0;
+
+/// Static timer command queue, matching upstream when static allocation is
+/// supported.
+static mut xStaticTimerQueue: StaticQueue_t = StaticQueue_t::new();
+const TIMER_QUEUE_STORAGE_SIZE: usize =
+    configTIMER_QUEUE_LENGTH as usize * core::mem::size_of::<DaemonTaskMessage_t>();
+static mut ucStaticTimerQueueStorage: [u8; TIMER_QUEUE_STORAGE_SIZE] =
+    [0; TIMER_QUEUE_STORAGE_SIZE];
+
 /// Last sampled time (for overflow detection)
 static mut xLastTime: TickType_t = 0;
+
+/// Register storage used to create the timer daemon without an allocator.
+///
+/// This is the Rust equivalent of supplying
+/// `vApplicationGetTimerTaskMemory()`. It must be called before the scheduler
+/// is started and the storage must remain valid for the scheduler's lifetime.
+///
+/// # Safety
+///
+/// The TCB and stack must be uniquely owned, correctly aligned, and the stack
+/// must contain at least `uxStackSize` words.
+pub unsafe fn vTimerSetTimerTaskMemory(
+    pxTaskTCBBuffer: *mut StaticTask_t,
+    pxTaskStackBuffer: *mut StackType_t,
+    uxStackSize: configSTACK_DEPTH_TYPE,
+) -> BaseType_t {
+    if pxTaskTCBBuffer.is_null() || pxTaskStackBuffer.is_null() || uxStackSize == 0 {
+        return pdFAIL;
+    }
+
+    taskENTER_CRITICAL();
+    let xReturn = if xTimerTaskHandle.is_null() {
+        pxTimerTaskTCBBuffer = pxTaskTCBBuffer;
+        pxTimerTaskStackBuffer = pxTaskStackBuffer;
+        uxTimerTaskStackSize = uxStackSize;
+        pdPASS
+    } else {
+        pdFAIL
+    };
+    taskEXIT_CRITICAL();
+
+    xReturn
+}
 
 // =============================================================================
 // Public API: Timer Creation
@@ -309,33 +367,44 @@ pub fn xTimerCreateTimerTask() -> BaseType_t {
     prvCheckForValidListAndQueue();
 
     unsafe {
-        if xTimerQueue != ptr::null_mut() {
-            // Create the timer task
-            // [AMENDMENT] For static allocation, we would call
-            // vApplicationGetTimerTaskMemory. For now, use dynamic.
-            #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+        if !xTimerQueue.is_null() {
+            if !pxTimerTaskTCBBuffer.is_null()
+                && !pxTimerTaskStackBuffer.is_null()
+                && uxTimerTaskStackSize > 0
             {
-                xReturn = xTaskCreate(
+                xTimerTaskHandle = xTaskCreateStatic(
                     prvTimerTask,
                     configTIMER_SERVICE_TASK_NAME.as_ptr(),
-                    configTIMER_TASK_STACK_DEPTH,
+                    uxTimerTaskStackSize,
                     ptr::null_mut(),
                     configTIMER_TASK_PRIORITY,
-                    &mut xTimerTaskHandle,
+                    pxTimerTaskStackBuffer,
+                    pxTimerTaskTCBBuffer,
                 );
-            }
 
-            #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
-            {
-                // Static allocation requires user to provide memory
-                // via vApplicationGetTimerTaskMemory
-                // TODO: Implement static allocation path
-                xReturn = pdFAIL;
+                if !xTimerTaskHandle.is_null() {
+                    xReturn = pdPASS;
+                }
+            } else {
+                #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+                {
+                    xReturn = xTaskCreate(
+                        prvTimerTask,
+                        configTIMER_SERVICE_TASK_NAME.as_ptr(),
+                        configTIMER_TASK_STACK_DEPTH,
+                        ptr::null_mut(),
+                        configTIMER_TASK_PRIORITY,
+                        &mut xTimerTaskHandle,
+                    );
+                }
+
+                #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
+                {
+                    xReturn = pdFAIL;
+                }
             }
         }
     }
-
-    configASSERT(xReturn != pdFAIL);
 
     traceRETURN_xTimerCreateTimerTask!(xReturn);
 
@@ -369,14 +438,15 @@ pub fn xTimerCreate(
         pxCallbackFunction
     );
 
+    if xTimerPeriodInTicks == 0 {
+        traceRETURN_xTimerCreate!(ptr::null_mut::<Timer_t>());
+        return ptr::null_mut();
+    }
+
     let pxNewTimer: *mut Timer_t =
         unsafe { pvPortMalloc(core::mem::size_of::<Timer_t>()) as *mut Timer_t };
 
     if pxNewTimer != ptr::null_mut() {
-        // Status is zero - not static, not active, auto-reload set below
-        unsafe {
-            (*pxNewTimer).ucStatus = 0x00;
-        }
         prvInitialiseNewTimer(
             pcTimerName,
             xTimerPeriodInTicks,
@@ -384,6 +454,7 @@ pub fn xTimerCreate(
             pvTimerID,
             pxCallbackFunction,
             pxNewTimer,
+            0,
         );
     }
 
@@ -431,13 +502,14 @@ pub fn xTimerCreateStatic(
 
     configASSERT(pxTimerBuffer != ptr::null_mut());
 
+    if pxTimerBuffer.is_null() || xTimerPeriodInTicks == 0 {
+        traceRETURN_xTimerCreateStatic!(ptr::null_mut::<Timer_t>());
+        return ptr::null_mut();
+    }
+
     let pxNewTimer: *mut Timer_t = pxTimerBuffer as *mut Timer_t;
 
     if pxNewTimer != ptr::null_mut() {
-        // Mark as statically allocated
-        unsafe {
-            (*pxNewTimer).ucStatus = tmrSTATUS_IS_STATICALLY_ALLOCATED;
-        }
         prvInitialiseNewTimer(
             pcTimerName,
             xTimerPeriodInTicks,
@@ -445,6 +517,7 @@ pub fn xTimerCreateStatic(
             pvTimerID,
             pxCallbackFunction,
             pxNewTimer,
+            tmrSTATUS_IS_STATICALLY_ALLOCATED,
         );
     }
 
@@ -494,7 +567,9 @@ pub fn xTimerGenericCommandFromTask(
 
             configASSERT(xCommandID < tmrFIRST_FROM_ISR_COMMAND);
 
-            if xCommandID < tmrFIRST_FROM_ISR_COMMAND {
+            let xPeriodIsValid = xCommandID != tmrCOMMAND_CHANGE_PERIOD || xOptionalValue != 0;
+
+            if xCommandID < tmrFIRST_FROM_ISR_COMMAND && xPeriodIsValid {
                 let xTicksToWaitActual = if xTaskGetSchedulerState() == taskSCHEDULER_RUNNING {
                     xTicksToWait
                 } else {
@@ -554,7 +629,10 @@ pub fn xTimerGenericCommandFromISR(
 
             configASSERT(xCommandID >= tmrFIRST_FROM_ISR_COMMAND);
 
-            if xCommandID >= tmrFIRST_FROM_ISR_COMMAND {
+            let xPeriodIsValid =
+                xCommandID != tmrCOMMAND_CHANGE_PERIOD_FROM_ISR || xOptionalValue != 0;
+
+            if xCommandID >= tmrFIRST_FROM_ISR_COMMAND && xPeriodIsValid {
                 xReturn = xQueueSendToBackFromISR(
                     xTimerQueue,
                     &xMessage as *const _ as *const c_void,
@@ -849,7 +927,7 @@ pub fn vTimerSetTimerNumber(xTimer: TimerHandle_t, uxTimerNumber: UBaseType_t) {
 pub fn xTimerPendFunctionCallFromISR(
     xFunctionToPend: PendedFunction_t,
     pvParameter1: *mut c_void,
-    ulParameter2: u32,
+    ulParameter2: PendedFunctionParameter_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) -> BaseType_t {
     traceENTER_xTimerPendFunctionCallFromISR!(
@@ -858,6 +936,11 @@ pub fn xTimerPendFunctionCallFromISR(
         ulParameter2,
         pxHigherPriorityTaskWoken
     );
+
+    if unsafe { xTimerQueue.is_null() } {
+        traceRETURN_xTimerPendFunctionCallFromISR!(pdFAIL);
+        return pdFAIL;
+    }
 
     let mut xMessage: DaemonTaskMessage_t = unsafe { core::mem::zeroed() };
     xMessage.xMessageID = tmrCOMMAND_EXECUTE_CALLBACK_FROM_ISR;
@@ -884,13 +967,17 @@ pub fn xTimerPendFunctionCallFromISR(
 pub fn xTimerPendFunctionCall(
     xFunctionToPend: PendedFunction_t,
     pvParameter1: *mut c_void,
-    ulParameter2: u32,
+    ulParameter2: PendedFunctionParameter_t,
     xTicksToWait: TickType_t,
 ) -> BaseType_t {
     traceENTER_xTimerPendFunctionCall!(xFunctionToPend, pvParameter1, ulParameter2, xTicksToWait);
 
     unsafe {
         configASSERT(xTimerQueue != ptr::null_mut());
+        if xTimerQueue.is_null() {
+            traceRETURN_xTimerPendFunctionCall!(pdFAIL);
+            return pdFAIL;
+        }
     }
 
     let mut xMessage: DaemonTaskMessage_t = unsafe { core::mem::zeroed() };
@@ -925,6 +1012,7 @@ fn prvInitialiseNewTimer(
     pvTimerID: *mut c_void,
     pxCallbackFunction: TimerCallbackFunction_t,
     pxNewTimer: *mut Timer_t,
+    mut ucStatus: u8,
 ) {
     // Period must be > 0
     configASSERT(xTimerPeriodInTicks > 0);
@@ -932,17 +1020,28 @@ fn prvInitialiseNewTimer(
     // Ensure infrastructure is initialized
     prvCheckForValidListAndQueue();
 
-    // Initialize timer fields
-    unsafe {
-        (*pxNewTimer).pcTimerName = pcTimerName;
-        (*pxNewTimer).xTimerPeriodInTicks = xTimerPeriodInTicks;
-        (*pxNewTimer).pvTimerID = pvTimerID;
-        (*pxNewTimer).pxCallbackFunction = pxCallbackFunction;
-        vListInitialiseItem(&mut (*pxNewTimer).xTimerListItem);
+    if xAutoReload != pdFALSE {
+        ucStatus |= tmrSTATUS_IS_AUTORELOAD;
+    }
 
-        if xAutoReload != pdFALSE {
-            (*pxNewTimer).ucStatus |= tmrSTATUS_IS_AUTORELOAD;
-        }
+    /* [AMENDMENT] Construct the complete Rust value in one write. Allocator
+     * and `MaybeUninit` storage do not initially contain a valid `Timer_t`, so
+     * taking references to individual uninitialised fields would be invalid. */
+    unsafe {
+        ptr::write(
+            pxNewTimer,
+            Timer_t {
+                pcTimerName,
+                xTimerListItem: ListItem_t::new(),
+                xTimerPeriodInTicks,
+                pvTimerID,
+                pxCallbackFunction,
+                #[cfg(feature = "trace-facility")]
+                uxTimerNumber: 0,
+                ucStatus,
+            },
+        );
+        vListInitialiseItem(&mut (*pxNewTimer).xTimerListItem);
     }
 
     traceTIMER_CREATE!(pxNewTimer);
@@ -959,11 +1058,14 @@ fn prvCheckForValidListAndQueue() {
             pxCurrentTimerList = &mut xActiveTimerList1;
             pxOverflowTimerList = &mut xActiveTimerList2;
 
-            // Create timer queue
-            // [AMENDMENT] Using static queue if available
-            xTimerQueue = xQueueCreate(
+            /* The timer queue is static whenever static allocation is
+             * supported, matching upstream and allowing allocator-free timer
+             * configurations to compile and start. */
+            xTimerQueue = xQueueCreateStatic(
                 configTIMER_QUEUE_LENGTH,
                 core::mem::size_of::<DaemonTaskMessage_t>() as UBaseType_t,
+                ucStaticTimerQueueStorage.as_mut_ptr(),
+                &mut xStaticTimerQueue,
             );
 
             // TODO: Queue registry support
@@ -1079,11 +1181,17 @@ fn prvProcessTimerOrBlockTask(xNextExpireTime: TickType_t, xListWasEmpty: BaseTy
                     xListWasEmptyNow = listLIST_IS_EMPTY(pxOverflowTimerList);
                 }
 
-                vQueueWaitForMessageRestricted(
-                    xTimerQueue,
-                    xNextExpireTime.wrapping_sub(xTimeNow),
-                    xListWasEmptyNow,
-                );
+                /* When both timer lists are empty the daemon waits
+                 * indefinitely for a command. Upstream performs this
+                 * conversion in vTaskPlaceOnEventListRestricted; pass the
+                 * effective value explicitly as a defensive boundary here. */
+                let xTicksToWait = if xListWasEmptyNow != pdFALSE {
+                    portMAX_DELAY
+                } else {
+                    xNextExpireTime.wrapping_sub(xTimeNow)
+                };
+
+                vQueueWaitForMessageRestricted(xTimerQueue, xTicksToWait, xListWasEmptyNow);
 
                 if xTaskResumeAll() == pdFALSE {
                     // Yield to allow higher priority task to run
@@ -1425,4 +1533,81 @@ pub fn xTimerResetFromISR(
         pxHigherPriorityTaskWoken,
         0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" fn callback(_xTimer: TimerHandle_t) {}
+
+    #[cfg(feature = "pend-function-call")]
+    extern "C" fn pended_callback(
+        _pvParameter1: *mut c_void,
+        _ulParameter2: PendedFunctionParameter_t,
+    ) {
+    }
+
+    #[test]
+    fn static_timer_storage_matches_internal_layout() {
+        assert_eq!(
+            core::mem::size_of::<StaticTimer_t>(),
+            core::mem::size_of::<Timer_t>()
+        );
+        assert_eq!(
+            core::mem::align_of::<StaticTimer_t>(),
+            core::mem::align_of::<Timer_t>()
+        );
+    }
+
+    #[test]
+    fn zero_period_static_timer_is_rejected_before_initialisation() {
+        let mut storage = StaticTimer_t::new();
+        let timer = xTimerCreateStatic(
+            b"zero\0".as_ptr(),
+            0,
+            pdTRUE,
+            ptr::null_mut(),
+            callback,
+            &mut storage,
+        );
+        assert!(timer.is_null());
+    }
+
+    #[cfg(feature = "pend-function-call")]
+    #[test]
+    fn pended_call_fails_cleanly_before_timer_queue_initialisation() {
+        vTimerResetState();
+        assert_eq!(
+            xTimerPendFunctionCallFromISR(
+                pended_callback,
+                ptr::null_mut(),
+                PendedFunctionParameter_t::MAX,
+                ptr::null_mut(),
+            ),
+            pdFAIL,
+        );
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn zero_period_change_is_rejected_without_mutating_timer() {
+        crate::port::test_port_reset();
+        vTimerResetState();
+
+        let mut storage = StaticTimer_t::new();
+        let timer = xTimerCreateStatic(
+            b"period\0".as_ptr(),
+            10,
+            pdFALSE,
+            ptr::null_mut(),
+            callback,
+            &mut storage,
+        );
+        assert!(!timer.is_null());
+        assert_eq!(xTimerChangePeriod(timer, 0, 0), pdFAIL);
+        assert_eq!(xTimerGetPeriod(timer), 10);
+
+        vTimerResetState();
+    }
 }

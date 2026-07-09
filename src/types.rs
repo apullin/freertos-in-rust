@@ -59,24 +59,33 @@ compile_error!("Must enable one of: tick-16bit, tick-32bit, tick-64bit");
 #[cfg(feature = "arch-32bit")]
 pub type BaseType_t = i32;
 
-#[cfg(feature = "arch-64bit")]
+#[cfg(all(feature = "arch-64bit", not(feature = "arch-32bit")))]
 pub type BaseType_t = i64;
+
+#[cfg(not(any(feature = "arch-32bit", feature = "arch-64bit")))]
+pub type BaseType_t = i32;
 
 /// Unsigned base type - architecture word size
 /// Used for counts, indices, and priority values.
 #[cfg(feature = "arch-32bit")]
 pub type UBaseType_t = u32;
 
-#[cfg(feature = "arch-64bit")]
+#[cfg(all(feature = "arch-64bit", not(feature = "arch-32bit")))]
 pub type UBaseType_t = u64;
+
+#[cfg(not(any(feature = "arch-32bit", feature = "arch-64bit")))]
+pub type UBaseType_t = u32;
 
 /// Stack element type
 /// Each stack "slot" is this size.
 #[cfg(feature = "arch-32bit")]
 pub type StackType_t = u32;
 
-#[cfg(feature = "arch-64bit")]
+#[cfg(all(feature = "arch-64bit", not(feature = "arch-32bit")))]
 pub type StackType_t = u64;
+
+#[cfg(not(any(feature = "arch-32bit", feature = "arch-64bit")))]
+pub type StackType_t = u32;
 
 // =============================================================================
 // Tick type (configurable width independent of architecture)
@@ -92,21 +101,35 @@ pub type TickType_t = u16;
 pub const portMAX_DELAY: TickType_t = 0xFFFF;
 
 /// Tick counter type - 32-bit variant (most common)
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(feature = "tick-32bit", not(feature = "tick-16bit")))]
 pub type TickType_t = u32;
 
 /// Maximum tick value for 32-bit ticks
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(feature = "tick-32bit", not(feature = "tick-16bit")))]
 pub const portMAX_DELAY: TickType_t = 0xFFFF_FFFF;
 
 /// Tick counter type - 64-bit variant
 /// For systems needing very long delays without overflow.
-#[cfg(feature = "tick-64bit")]
+#[cfg(all(
+    feature = "tick-64bit",
+    not(feature = "tick-16bit"),
+    not(feature = "tick-32bit")
+))]
 pub type TickType_t = u64;
 
 /// Maximum tick value for 64-bit ticks
-#[cfg(feature = "tick-64bit")]
+#[cfg(all(
+    feature = "tick-64bit",
+    not(feature = "tick-16bit"),
+    not(feature = "tick-32bit")
+))]
 pub const portMAX_DELAY: TickType_t = 0xFFFF_FFFF_FFFF_FFFF;
+
+#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+pub type TickType_t = u32;
+
+#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+pub const portMAX_DELAY: TickType_t = 0xFFFF_FFFF;
 
 // =============================================================================
 // Tick type width constants (for conditional compilation in kernel code)
@@ -123,11 +146,18 @@ pub const TICK_TYPE_WIDTH_64_BITS: u8 = 2;
 #[cfg(feature = "tick-16bit")]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_16_BITS;
 
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(feature = "tick-32bit", not(feature = "tick-16bit")))]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_32_BITS;
 
-#[cfg(feature = "tick-64bit")]
+#[cfg(all(
+    feature = "tick-64bit",
+    not(feature = "tick-16bit"),
+    not(feature = "tick-32bit")
+))]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_64_BITS;
+
+#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_32_BITS;
 
 // =============================================================================
 // Boolean-like constants (from projdefs.h)
@@ -173,12 +203,19 @@ pub const errQUEUE_YIELD: BaseType_t = -5;
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A;
 
 /// Integrity check magic value - 32-bit ticks
-#[cfg(feature = "tick-32bit")]
+#[cfg(all(feature = "tick-32bit", not(feature = "tick-16bit")))]
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A;
 
 /// Integrity check magic value - 64-bit ticks
-#[cfg(feature = "tick-64bit")]
+#[cfg(all(
+    feature = "tick-64bit",
+    not(feature = "tick-16bit"),
+    not(feature = "tick-32bit")
+))]
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A_5A5A_5A5A;
+
+#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A;
 
 // =============================================================================
 // Task function type (from projdefs.h)

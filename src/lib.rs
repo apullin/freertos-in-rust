@@ -60,6 +60,98 @@
 #![allow(dead_code)] // During development
 #![allow(static_mut_refs)] // TODO: Migrate to raw pointers for Rust 2024
 
+#[cfg(not(any(
+    feature = "port-cortex-m0",
+    feature = "port-cortex-m3",
+    feature = "port-cortex-m4f",
+    feature = "port-cortex-m7",
+    feature = "port-riscv32",
+    feature = "port-cortex-a9",
+    feature = "port-cortex-a53",
+    feature = "port-test",
+    feature = "port-dummy"
+)))]
+compile_error!("select exactly one FreeRusTOS port feature");
+
+#[cfg(any(
+    all(
+        feature = "port-cortex-m0",
+        any(
+            feature = "port-cortex-m3",
+            feature = "port-cortex-m4f",
+            feature = "port-cortex-m7",
+            feature = "port-riscv32",
+            feature = "port-cortex-a9",
+            feature = "port-cortex-a53",
+            feature = "port-test",
+            feature = "port-dummy"
+        )
+    ),
+    all(
+        feature = "port-cortex-m3",
+        any(
+            feature = "port-cortex-m4f",
+            feature = "port-cortex-m7",
+            feature = "port-riscv32",
+            feature = "port-cortex-a9",
+            feature = "port-cortex-a53",
+            feature = "port-test",
+            feature = "port-dummy"
+        )
+    ),
+    all(
+        feature = "port-cortex-m4f",
+        any(
+            feature = "port-cortex-m7",
+            feature = "port-riscv32",
+            feature = "port-cortex-a9",
+            feature = "port-cortex-a53",
+            feature = "port-test",
+            feature = "port-dummy"
+        )
+    ),
+    all(
+        feature = "port-cortex-m7",
+        any(
+            feature = "port-riscv32",
+            feature = "port-cortex-a9",
+            feature = "port-cortex-a53",
+            feature = "port-test",
+            feature = "port-dummy"
+        )
+    ),
+    all(
+        feature = "port-riscv32",
+        any(
+            feature = "port-cortex-a9",
+            feature = "port-cortex-a53",
+            feature = "port-test",
+            feature = "port-dummy"
+        )
+    ),
+    all(
+        feature = "port-cortex-a9",
+        any(
+            feature = "port-cortex-a53",
+            feature = "port-test",
+            feature = "port-dummy"
+        )
+    ),
+    all(
+        feature = "port-cortex-a53",
+        any(feature = "port-test", feature = "port-dummy")
+    ),
+    all(feature = "port-test", feature = "port-dummy")
+))]
+compile_error!("FreeRusTOS port features are mutually exclusive");
+
+#[cfg(any(
+    all(feature = "heap-4", feature = "heap-5"),
+    all(feature = "heap-4", feature = "alloc"),
+    all(feature = "heap-5", feature = "alloc")
+))]
+compile_error!("allocator features are mutually exclusive");
+
 #[cfg(feature = "std")]
 extern crate std;
 

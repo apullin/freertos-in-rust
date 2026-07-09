@@ -319,16 +319,20 @@ impl tskTaskControlBlock {
 /// Static task buffer for xTaskCreateStatic
 ///
 /// [AMENDMENT] Users provide this buffer for static task allocation.
-#[repr(C)]
+#[repr(transparent)]
 pub struct StaticTask_t {
-    /// Reserved space for TCB - must be large enough
-    _reserved: [u8; core::mem::size_of::<tskTaskControlBlock>()],
+    /// Reserved storage for a TCB.
+    ///
+    /// [AMENDMENT] `MaybeUninit<TCB_t>` gives this public opaque buffer the
+    /// exact size and alignment of the internal TCB. A byte array has alignment
+    /// one and cannot soundly be cast to `TCB_t` in Rust.
+    _storage: core::mem::MaybeUninit<TCB_t>,
 }
 
 impl StaticTask_t {
     pub const fn new() -> Self {
         StaticTask_t {
-            _reserved: [0u8; core::mem::size_of::<tskTaskControlBlock>()],
+            _storage: core::mem::MaybeUninit::uninit(),
         }
     }
 }
@@ -405,6 +409,18 @@ static mut xNextTaskUnblockTime: TickType_t = 0;
 /// Handle to the idle task(s).
 static mut xIdleTaskHandles: [TaskHandle_t; configNUMBER_OF_CORES as usize] =
     [ptr::null_mut(); configNUMBER_OF_CORES as usize];
+
+/// Optional application-provided storage for the idle task.
+static mut pxIdleTaskTCBBuffer: *mut StaticTask_t = ptr::null_mut();
+static mut pxIdleTaskStackBuffer: *mut StackType_t = ptr::null_mut();
+static mut uxIdleTaskStackSize: configSTACK_DEPTH_TYPE = 0;
+
+/// Kernel-provided fallback storage for allocator-free configurations.
+#[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
+static mut xStaticIdleTaskTCB: StaticTask_t = StaticTask_t::new();
+#[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
+static mut uxStaticIdleTaskStack: [StackType_t; configMINIMAL_STACK_SIZE] =
+    [0; configMINIMAL_STACK_SIZE];
 
 /// Scheduler suspension count (>0 means suspended).
 static mut uxSchedulerSuspended: UBaseType_t = 0;
@@ -655,7 +671,7 @@ unsafe fn prvInitialiseNewTask(
     // Event list items are stored in reverse priority order.
     listSET_LIST_ITEM_VALUE(
         &mut (*pxNewTCB).xEventListItem,
-        (configMAX_PRIORITIES - 1 - uxPriority) as TickType_t,
+        (configMAX_PRIORITIES - uxPriority) as TickType_t,
     );
     listSET_LIST_ITEM_OWNER(&mut (*pxNewTCB).xEventListItem, pxNewTCB as *mut c_void);
 
@@ -696,6 +712,14 @@ unsafe fn prvAddCurrentTaskToDelayedList(
     xCanBlockIndefinitely: BaseType_t,
 ) {
     let xConstTickCount = xTickCount;
+
+    #[cfg(feature = "abort-delay")]
+    {
+        /* About to enter a delayed list, so ensure the flag is reset. A later
+         * pdTRUE value then unambiguously means this particular block was
+         * aborted. */
+        (*pxCurrentTCB).ucDelayAborted = pdFALSE as u8;
+    }
 
     // Remove the task from the ready list before adding to delayed list.
     let _ux = uxListRemove(&mut (*pxCurrentTCB).xStateListItem);
@@ -829,6 +853,24 @@ unsafe fn prvCreateIdleTasks() -> BaseType_t {
     // Create the idle task.
     let xReturn: BaseType_t;
 
+    if !pxIdleTaskTCBBuffer.is_null() && !pxIdleTaskStackBuffer.is_null() && uxIdleTaskStackSize > 0
+    {
+        xIdleTaskHandles[0] = xTaskCreateStatic(
+            prvIdleTask,
+            configIDLE_TASK_NAME.as_ptr(),
+            uxIdleTaskStackSize,
+            ptr::null_mut(),
+            tskIDLE_PRIORITY,
+            pxIdleTaskStackBuffer,
+            pxIdleTaskTCBBuffer,
+        );
+        return if xIdleTaskHandles[0].is_null() {
+            pdFAIL
+        } else {
+            pdPASS
+        };
+    }
+
     #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     {
         xReturn = xTaskCreate(
@@ -843,10 +885,51 @@ unsafe fn prvCreateIdleTasks() -> BaseType_t {
 
     #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
     {
-        // Static allocation required but not yet implemented
-        xReturn = pdFAIL;
+        xIdleTaskHandles[0] = xTaskCreateStatic(
+            prvIdleTask,
+            configIDLE_TASK_NAME.as_ptr(),
+            configMINIMAL_STACK_SIZE,
+            ptr::null_mut(),
+            tskIDLE_PRIORITY,
+            uxStaticIdleTaskStack.as_mut_ptr(),
+            &mut xStaticIdleTaskTCB,
+        );
+        xReturn = if xIdleTaskHandles[0].is_null() {
+            pdFAIL
+        } else {
+            pdPASS
+        };
     }
 
+    xReturn
+}
+
+/// Register application-provided storage for the statically allocated idle
+/// task. This must be called before the scheduler starts.
+///
+/// # Safety
+///
+/// The TCB and stack must be uniquely owned and remain valid for the complete
+/// scheduler lifetime. The stack must contain at least `uxStackSize` words.
+pub unsafe fn vTaskSetIdleTaskMemory(
+    pxTaskTCBBuffer: *mut StaticTask_t,
+    pxTaskStackBuffer: *mut StackType_t,
+    uxStackSize: configSTACK_DEPTH_TYPE,
+) -> BaseType_t {
+    if pxTaskTCBBuffer.is_null() || pxTaskStackBuffer.is_null() || uxStackSize == 0 {
+        return pdFAIL;
+    }
+
+    taskENTER_CRITICAL();
+    let xReturn = if xSchedulerRunning == pdFALSE && xIdleTaskHandles[0].is_null() {
+        pxIdleTaskTCBBuffer = pxTaskTCBBuffer;
+        pxIdleTaskStackBuffer = pxTaskStackBuffer;
+        uxIdleTaskStackSize = uxStackSize;
+        pdPASS
+    } else {
+        pdFAIL
+    };
+    taskEXIT_CRITICAL();
     xReturn
 }
 
@@ -887,23 +970,39 @@ pub unsafe fn xTaskCreate(
     let pxNewTCB = crate::memory::pvPortMalloc(core::mem::size_of::<TCB_t>()) as *mut TCB_t;
 
     if !pxNewTCB.is_null() {
+        /* [AMENDMENT] Rust allocations are uninitialised. Initialise every TCB
+         * field before field assignments below, matching the upstream memset
+         * path and preventing later reads of indeterminate Rust values. */
+        ptr::write(pxNewTCB, TCB_t::new());
+
+        if uxStackDepth == 0 {
+            crate::memory::vPortFree(pxNewTCB as *mut c_void);
+            return errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+        }
+
+        let stack_size = match uxStackDepth.checked_mul(core::mem::size_of::<StackType_t>()) {
+            Some(size) => size,
+            None => {
+                crate::memory::vPortFree(pxNewTCB as *mut c_void);
+                return errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+            }
+        };
+
         // Allocate the stack.
-        let pxStack =
-            crate::memory::pvPortMalloc(uxStackDepth * core::mem::size_of::<StackType_t>())
-                as *mut StackType_t;
+        let pxStack = crate::memory::pvPortMalloc(stack_size) as *mut StackType_t;
 
         if !pxStack.is_null() {
             (*pxNewTCB).pxStack = pxStack;
 
             // Calculate top of stack based on stack growth direction.
-            let pxTopOfStack: *mut StackType_t;
+            let mut pxTopOfStack: *mut StackType_t;
             if portSTACK_GROWTH < 0 {
                 // Stack grows down - top is at highest address.
                 pxTopOfStack = pxStack.add(uxStackDepth - 1);
 
                 // Align the stack.
                 let aligned = (pxTopOfStack as usize) & !(portBYTE_ALIGNMENT - 1);
-                let pxTopOfStack = aligned as *mut StackType_t;
+                pxTopOfStack = aligned as *mut StackType_t;
 
                 // Record end of stack for stack overflow detection.
                 #[cfg(any(not(feature = "arch-32bit"), feature = "record-stack-high-address"))]
@@ -992,7 +1091,7 @@ pub unsafe fn xTaskCreateStatic(
 ) -> TaskHandle_t {
     let mut xReturn: TaskHandle_t = ptr::null_mut();
 
-    if !puxStackBuffer.is_null() && !pxTaskBuffer.is_null() {
+    if uxStackDepth > 0 && !puxStackBuffer.is_null() && !pxTaskBuffer.is_null() {
         // Use the provided TCB buffer.
         let pxNewTCB = pxTaskBuffer as *mut TCB_t;
 
@@ -1063,15 +1162,17 @@ pub unsafe fn xTaskCreateStatic(
 pub fn vTaskStartScheduler() {
     unsafe {
         // Create idle task(s).
-        let xReturn = prvCreateIdleTasks();
+        let mut xReturn = prvCreateIdleTasks();
 
         if xReturn == pdPASS {
             // Create the timer task if timers are enabled.
             #[cfg(feature = "timers")]
             {
-                crate::kernel::timers::xTimerCreateTimerTask();
+                xReturn = crate::kernel::timers::xTimerCreateTimerTask();
             }
+        }
 
+        if xReturn == pdPASS {
             // Disable interrupts to ensure a tick doesn't occur before the first
             // task is switched in.
             portDISABLE_INTERRUPTS();
@@ -1116,10 +1217,17 @@ pub fn vTaskEndScheduler() {
 /// except the current one. Call xTaskResumeAll() to resume.
 pub fn vTaskSuspendAll() {
     unsafe {
-        // Increment suspension count atomically (no interrupts during increment).
-        portDISABLE_INTERRUPTS();
-        uxSchedulerSuspended += 1;
-        portENABLE_INTERRUPTS();
+        /* A critical section is not required as the variable is of type
+         * UBaseType_t. Each task maintains its own context, and a context
+         * switch cannot occur while the variable is non-zero.
+         *
+         * [AMENDMENT] The previous Rust translation disabled and then
+         * unconditionally enabled interrupts here, which could clear an outer
+         * critical section's mask. Compiler and port barriers preserve the
+         * upstream single-core ordering without changing interrupt state. */
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        uxSchedulerSuspended = uxSchedulerSuspended.wrapping_add(1);
+        portMEMORY_BARRIER();
     }
 }
 
@@ -1220,6 +1328,7 @@ pub fn xTaskDelayUntil(
     pxPreviousWakeTime: *mut TickType_t,
     xTimeIncrement: TickType_t,
 ) -> BaseType_t {
+    let xAlreadyYielded: BaseType_t;
     let mut xShouldDelay = pdFALSE;
 
     unsafe {
@@ -1251,7 +1360,13 @@ pub fn xTaskDelayUntil(
                 prvAddCurrentTaskToDelayedList(xTimeToWake.wrapping_sub(xConstTickCount), pdFALSE);
             }
         }
-        xTaskResumeAll();
+        xAlreadyYielded = xTaskResumeAll();
+    }
+
+    /* Force a reschedule if xTaskResumeAll has not already done so, we may
+     * have put ourselves to sleep. */
+    if xAlreadyYielded == pdFALSE {
+        portYIELD_WITHIN_API();
     }
 
     xShouldDelay
@@ -1283,11 +1398,13 @@ pub fn xTaskGetCurrentTaskHandle() -> TaskHandle_t {
 ///
 /// Called when a mutex is successfully taken.
 #[cfg(feature = "use-mutexes")]
-pub fn pvTaskIncrementMutexHeldCount() {
+pub fn pvTaskIncrementMutexHeldCount() -> TaskHandle_t {
     unsafe {
         if !pxCurrentTCB.is_null() {
             (*pxCurrentTCB).uxMutexesHeld += 1;
         }
+
+        pxCurrentTCB as TaskHandle_t
     }
 }
 
@@ -1298,12 +1415,24 @@ pub fn uxTaskGetNumberOfTasks() -> UBaseType_t {
 
 /// Get the current tick count.
 pub fn xTaskGetTickCount() -> TickType_t {
-    unsafe { xTickCount }
+    let xTicks: TickType_t;
+    taskENTER_CRITICAL();
+    unsafe {
+        xTicks = xTickCount;
+    }
+    taskEXIT_CRITICAL();
+    xTicks
 }
 
 /// Get the current tick count from ISR.
 pub fn xTaskGetTickCountFromISR() -> TickType_t {
-    unsafe { xTickCount }
+    let xTicks: TickType_t;
+    let uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+    unsafe {
+        xTicks = xTickCount;
+    }
+    taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
+    xTicks
 }
 
 // =============================================================================
@@ -1337,7 +1466,7 @@ pub unsafe fn xTaskRemoveFromEventList(pxEventList: *const List_t) -> BaseType_t
         // (In case it was holding special values)
         listSET_LIST_ITEM_VALUE(
             &mut (*pxUnblockedTCB).xEventListItem,
-            (configMAX_PRIORITIES - 1 - (*pxUnblockedTCB).uxPriority) as TickType_t,
+            (configMAX_PRIORITIES - (*pxUnblockedTCB).uxPriority) as TickType_t,
         );
     } else {
         // Scheduler is suspended, add to pending ready list.
@@ -1375,13 +1504,17 @@ pub unsafe fn vTaskPlaceOnEventList(pxEventList: *mut List_t, xTicksToWait: Tick
 /// Place the current task on an event list (restricted variant).
 pub unsafe fn vTaskPlaceOnEventListRestricted(
     pxEventList: *mut List_t,
-    xTicksToWait: TickType_t,
+    mut xTicksToWait: TickType_t,
     xWaitIndefinitely: BaseType_t,
 ) {
     configASSERT(!pxEventList.is_null());
 
     // Place at end (not ordered).
     vListInsertEnd(pxEventList, &mut (*pxCurrentTCB).xEventListItem);
+
+    if xWaitIndefinitely != pdFALSE {
+        xTicksToWait = portMAX_DELAY;
+    }
 
     // Add to delayed list.
     prvAddCurrentTaskToDelayedList(xTicksToWait, xWaitIndefinitely);
@@ -1413,25 +1546,32 @@ pub unsafe fn xTaskRemoveFromUnorderedEventList(
     pxEventListItem: *mut ListItem_t,
     xItemValue: TickType_t,
 ) -> BaseType_t {
-    // Update the item value (clearing the in-use marker).
-    listSET_LIST_ITEM_VALUE(pxEventListItem, xItemValue);
+    configASSERT(uxSchedulerSuspended != 0);
+
+    // Store the event result while preserving the marker that prevents a
+    // priority change from overwriting it before the task consumes the value.
+    listSET_LIST_ITEM_VALUE(
+        pxEventListItem,
+        xItemValue | taskEVENT_LIST_ITEM_VALUE_IN_USE,
+    );
 
     // Remove from event list.
     let pxUnblockedTCB = listGET_LIST_ITEM_OWNER(pxEventListItem) as *mut TCB_t;
     configASSERT(!pxUnblockedTCB.is_null());
     let _ux = uxListRemove(pxEventListItem);
 
-    if uxSchedulerSuspended == 0 {
-        let _ux = uxListRemove(&mut (*pxUnblockedTCB).xStateListItem);
-        prvAddTaskToReadyList(pxUnblockedTCB);
-    } else {
-        vListInsertEnd(
-            &mut xPendingReadyList,
-            &mut (*pxUnblockedTCB).xEventListItem,
-        );
+    #[cfg(feature = "tickless-idle")]
+    {
+        prvResetNextTaskUnblockTime();
     }
 
+    // Event groups are manipulated at task level with the scheduler suspended,
+    // so the ready lists can be updated directly as in the upstream function.
+    let _ux = uxListRemove(&mut (*pxUnblockedTCB).xStateListItem);
+    prvAddTaskToReadyList(pxUnblockedTCB);
+
     if (*pxUnblockedTCB).uxPriority > (*pxCurrentTCB).uxPriority {
+        xYieldPendings[0] = pdTRUE;
         pdTRUE
     } else {
         pdFALSE
@@ -1555,12 +1695,15 @@ pub fn xTaskCheckForTimeOut(
 // Public API - Priority Inheritance (Mutexes)
 // =============================================================================
 
-/// Implement priority inheritance for mutex holder.
+/// Implement priority inheritance for a mutex holder.
 ///
-/// Called when a higher priority task blocks on a mutex.
-pub fn vTaskPriorityInherit(pxMutexHolder: TaskHandle_t) {
+/// Returns `pdTRUE` if inheritance occurred, or would have occurred had the
+/// holder not already inherited an equal or higher priority.
+pub fn xTaskPriorityInherit(pxMutexHolder: TaskHandle_t) -> BaseType_t {
     #[cfg(feature = "use-mutexes")]
     unsafe {
+        let mut xReturn = pdFALSE;
+
         if !pxMutexHolder.is_null() {
             let pxMutexHolderTCB = pxMutexHolder as *mut TCB_t;
 
@@ -1573,7 +1716,7 @@ pub fn vTaskPriorityInherit(pxMutexHolder: TaskHandle_t) {
                 {
                     listSET_LIST_ITEM_VALUE(
                         &mut (*pxMutexHolderTCB).xEventListItem,
-                        (configMAX_PRIORITIES - 1 - (*pxCurrentTCB).uxPriority) as TickType_t,
+                        (configMAX_PRIORITIES - (*pxCurrentTCB).uxPriority) as TickType_t,
                     );
                 }
 
@@ -1595,14 +1738,32 @@ pub fn vTaskPriorityInherit(pxMutexHolder: TaskHandle_t) {
                     pxMutexHolderTCB as *mut c_void,
                     (*pxCurrentTCB).uxPriority,
                 );
+
+                xReturn = pdTRUE;
+            } else if (*pxMutexHolderTCB).uxBasePriority < (*pxCurrentTCB).uxPriority {
+                /* The holder has already inherited an equal or higher
+                 * priority. Remember that inheritance was nevertheless
+                 * required so a later timeout can disinherit correctly. */
+                xReturn = pdTRUE;
             }
         }
+
+        xReturn
     }
 
     #[cfg(not(feature = "use-mutexes"))]
     {
         let _ = pxMutexHolder;
+        pdFALSE
     }
+}
+
+/// Compatibility wrapper retained for existing callers of the earlier Rust
+/// translation. New kernel code uses [`xTaskPriorityInherit`] to observe
+/// whether inheritance occurred.
+#[inline(always)]
+pub fn vTaskPriorityInherit(pxMutexHolder: TaskHandle_t) {
+    let _ = xTaskPriorityInherit(pxMutexHolder);
 }
 
 /// Restore priority after releasing mutex.
@@ -1616,6 +1777,7 @@ pub fn xTaskPriorityDisinherit(pxMutexHolder: TaskHandle_t) -> BaseType_t {
         if !pxMutexHolder.is_null() {
             let pxTCB = pxMutexHolder as *mut TCB_t;
 
+            configASSERT(pxTCB == pxCurrentTCB);
             configASSERT((*pxTCB).uxMutexesHeld > 0);
             (*pxTCB).uxMutexesHeld -= 1;
 
@@ -1632,7 +1794,7 @@ pub fn xTaskPriorityDisinherit(pxMutexHolder: TaskHandle_t) -> BaseType_t {
                     // Reset event list item value.
                     listSET_LIST_ITEM_VALUE(
                         &mut (*pxTCB).xEventListItem,
-                        (configMAX_PRIORITIES - 1 - (*pxTCB).uxPriority) as TickType_t,
+                        (configMAX_PRIORITIES - (*pxTCB).uxPriority) as TickType_t,
                     );
 
                     // Add to correct ready list.
@@ -1668,28 +1830,42 @@ pub fn vTaskPriorityDisinheritAfterTimeout(
         if !pxMutexHolder.is_null() {
             let pxTCB = pxMutexHolder as *mut TCB_t;
 
-            // Only matters if priority was inherited.
-            if (*pxTCB).uxPriority != (*pxTCB).uxBasePriority {
-                // New priority is max of base priority and highest waiting task.
-                let uxPriorityToUse = if (*pxTCB).uxBasePriority > uxHighestPriorityWaitingTask {
-                    (*pxTCB).uxBasePriority
-                } else {
-                    uxHighestPriorityWaitingTask
-                };
+            configASSERT((*pxTCB).uxMutexesHeld > 0);
 
-                if uxPriorityToUse != (*pxTCB).uxPriority {
-                    // Need to change priority.
+            // New priority is max of base priority and the highest task still
+            // waiting for this mutex.
+            let uxPriorityToUse = if (*pxTCB).uxBasePriority > uxHighestPriorityWaitingTask {
+                (*pxTCB).uxBasePriority
+            } else {
+                uxHighestPriorityWaitingTask
+            };
+
+            if uxPriorityToUse != (*pxTCB).uxPriority {
+                /* Only disinherit if this is the sole mutex held. Other held
+                 * mutexes may be the source of the inherited priority. */
+                if (*pxTCB).uxMutexesHeld == 1 {
+                    configASSERT(pxTCB != pxCurrentTCB);
+
+                    let uxPriorityUsedOnEntry = (*pxTCB).uxPriority;
+                    (*pxTCB).uxPriority = uxPriorityToUse;
+
+                    if (listGET_LIST_ITEM_VALUE(&(*pxTCB).xEventListItem)
+                        & taskEVENT_LIST_ITEM_VALUE_IN_USE)
+                        == 0
+                    {
+                        listSET_LIST_ITEM_VALUE(
+                            &mut (*pxTCB).xEventListItem,
+                            (configMAX_PRIORITIES - uxPriorityToUse) as TickType_t,
+                        );
+                    }
+
                     if listIS_CONTAINED_WITHIN(
-                        &pxReadyTasksLists[(*pxTCB).uxPriority as usize],
+                        &pxReadyTasksLists[uxPriorityUsedOnEntry as usize],
                         &(*pxTCB).xStateListItem,
                     ) != pdFALSE
                     {
                         let _ux = uxListRemove(&mut (*pxTCB).xStateListItem);
-
-                        (*pxTCB).uxPriority = uxPriorityToUse;
                         prvAddTaskToReadyList(pxTCB);
-                    } else {
-                        (*pxTCB).uxPriority = uxPriorityToUse;
                     }
                 }
             }
@@ -2059,6 +2235,42 @@ pub fn vTaskResume(xTaskToResume: TaskHandle_t) {
     }
 }
 
+/// Resume a suspended task from interrupt context.
+///
+/// Returns `pdTRUE` when the resumed task has a higher priority than the
+/// interrupted task and the caller should request a context switch.
+#[cfg(feature = "task-suspend")]
+pub fn xTaskResumeFromISR(xTaskToResume: TaskHandle_t) -> BaseType_t {
+    let mut xYieldRequired = pdFALSE;
+
+    unsafe {
+        let pxTCB = xTaskToResume as *mut TCB_t;
+        configASSERT(!pxTCB.is_null());
+
+        let uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+        {
+            if prvTaskIsTaskSuspended(pxTCB) != pdFALSE {
+                crate::trace::traceTASK_RESUME(pxTCB as *mut c_void);
+
+                if uxSchedulerSuspended == 0 {
+                    if (*pxTCB).uxPriority > (*pxCurrentTCB).uxPriority {
+                        xYieldRequired = pdTRUE;
+                        xYieldPendings[0] = pdTRUE;
+                    }
+
+                    let _ux = uxListRemove(&mut (*pxTCB).xStateListItem);
+                    prvAddTaskToReadyList(pxTCB);
+                } else {
+                    vListInsertEnd(&mut xPendingReadyList, &mut (*pxTCB).xEventListItem);
+                }
+            }
+        }
+        taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
+    }
+
+    xYieldRequired
+}
+
 /// Check if a task is suspended.
 #[cfg(feature = "task-suspend")]
 unsafe fn prvTaskIsTaskSuspended(pxTCB: *const TCB_t) -> BaseType_t {
@@ -2067,8 +2279,18 @@ unsafe fn prvTaskIsTaskSuspended(pxTCB: *const TCB_t) -> BaseType_t {
         if listIS_CONTAINED_WITHIN(&xPendingReadyList, &(*pxTCB).xEventListItem) == pdFALSE {
             // Not in pending ready list either.
             if listLIST_ITEM_CONTAINER(&(*pxTCB).xEventListItem) == ptr::null_mut() {
-                // Not waiting on any event.
-                return pdTRUE;
+                // A task blocked indefinitely on a direct notification also has
+                // no event-list container, but it is not explicitly suspended.
+                let mut xReturn = pdTRUE;
+                let mut uxIndex = 0usize;
+                while uxIndex < configTASK_NOTIFICATION_ARRAY_ENTRIES {
+                    if (*pxTCB).ucNotifyState[uxIndex] == taskWAITING_NOTIFICATION {
+                        xReturn = pdFALSE;
+                        break;
+                    }
+                    uxIndex += 1;
+                }
+                return xReturn;
             }
         }
     }
@@ -2142,6 +2364,22 @@ pub unsafe fn xTaskNotify(xTaskToNotify: TaskHandle_t, ulValue: u32, eAction: i3
     )
 }
 
+/// Send a notification to a specific notification-array index.
+pub unsafe fn xTaskNotifyIndexed(
+    xTaskToNotify: TaskHandle_t,
+    uxIndexToNotify: UBaseType_t,
+    ulValue: u32,
+    eAction: i32,
+) -> BaseType_t {
+    xTaskGenericNotify(
+        xTaskToNotify,
+        uxIndexToNotify,
+        ulValue,
+        eAction,
+        ptr::null_mut(),
+    )
+}
+
 /// Wait for a notification.
 ///
 /// # Arguments
@@ -2162,6 +2400,23 @@ pub unsafe fn xTaskNotifyWait(
 ) -> BaseType_t {
     xTaskGenericNotifyWait(
         tskDEFAULT_INDEX_TO_NOTIFY,
+        ulBitsToClearOnEntry,
+        ulBitsToClearOnExit,
+        pulNotificationValue,
+        xTicksToWait,
+    )
+}
+
+/// Wait for a notification at a specific notification-array index.
+pub unsafe fn xTaskNotifyWaitIndexed(
+    uxIndexToWait: UBaseType_t,
+    ulBitsToClearOnEntry: u32,
+    ulBitsToClearOnExit: u32,
+    pulNotificationValue: *mut u32,
+    xTicksToWait: TickType_t,
+) -> BaseType_t {
+    xTaskGenericNotifyWait(
+        uxIndexToWait,
         ulBitsToClearOnEntry,
         ulBitsToClearOnExit,
         pulNotificationValue,
@@ -2195,6 +2450,71 @@ pub unsafe fn xTaskNotifyFromISR(
         ptr::null_mut(),
         pxHigherPriorityTaskWoken,
     )
+}
+
+/// Send a notification to a specific index from interrupt context.
+pub unsafe fn xTaskNotifyIndexedFromISR(
+    xTaskToNotify: TaskHandle_t,
+    uxIndexToNotify: UBaseType_t,
+    ulValue: u32,
+    eAction: i32,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> BaseType_t {
+    xTaskGenericNotifyFromISR(
+        xTaskToNotify,
+        uxIndexToNotify,
+        ulValue,
+        eAction,
+        ptr::null_mut(),
+        pxHigherPriorityTaskWoken,
+    )
+}
+
+/// Increment a task notification value, using it as a lightweight semaphore.
+pub unsafe fn xTaskNotifyGiveIndexed(
+    xTaskToNotify: TaskHandle_t,
+    uxIndexToNotify: UBaseType_t,
+) -> BaseType_t {
+    xTaskGenericNotify(
+        xTaskToNotify,
+        uxIndexToNotify,
+        0,
+        eNotifyAction::eIncrement as i32,
+        ptr::null_mut(),
+    )
+}
+
+/// Increment the default notification value as a lightweight semaphore.
+pub unsafe fn xTaskNotifyGive(xTaskToNotify: TaskHandle_t) -> BaseType_t {
+    xTaskNotifyGiveIndexed(xTaskToNotify, tskDEFAULT_INDEX_TO_NOTIFY)
+}
+
+/// Increment a task notification value from interrupt context.
+pub unsafe fn vTaskNotifyGiveIndexedFromISR(
+    xTaskToNotify: TaskHandle_t,
+    uxIndexToNotify: UBaseType_t,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) {
+    let _ = xTaskGenericNotifyFromISR(
+        xTaskToNotify,
+        uxIndexToNotify,
+        0,
+        eNotifyAction::eIncrement as i32,
+        ptr::null_mut(),
+        pxHigherPriorityTaskWoken,
+    );
+}
+
+/// Increment the default notification value from interrupt context.
+pub unsafe fn vTaskNotifyGiveFromISR(
+    xTaskToNotify: TaskHandle_t,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) {
+    vTaskNotifyGiveIndexedFromISR(
+        xTaskToNotify,
+        tskDEFAULT_INDEX_TO_NOTIFY,
+        pxHigherPriorityTaskWoken,
+    );
 }
 
 /// Generic task notification function.
@@ -2304,7 +2624,12 @@ pub unsafe fn xTaskGenericNotifyWait(
                 prvAddCurrentTaskToDelayedList(xTicksToWait, pdTRUE);
             }
         }
-        xTaskResumeAll();
+        let xAlreadyYielded = xTaskResumeAll();
+
+        // Force a reschedule if xTaskResumeAll has not already done so.
+        if xShouldBlock == pdTRUE && xAlreadyYielded == pdFALSE {
+            portYIELD_WITHIN_API();
+        }
     }
 
     // Check notification state after potential blocking.
@@ -2399,6 +2724,115 @@ pub unsafe fn xTaskGenericNotifyFromISR(
     portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
 
     xReturn
+}
+
+/// Take a task notification as a counting or binary semaphore.
+pub unsafe fn ulTaskNotifyTakeIndexed(
+    uxIndexToWait: UBaseType_t,
+    xClearCountOnExit: BaseType_t,
+    xTicksToWait: TickType_t,
+) -> u32 {
+    configASSERT((uxIndexToWait as usize) < configTASK_NOTIFICATION_ARRAY_ENTRIES);
+
+    let mut xShouldBlock = pdFALSE;
+
+    if (*pxCurrentTCB).ulNotifiedValue[uxIndexToWait as usize] == 0 && xTicksToWait > 0 {
+        vTaskSuspendAll();
+        {
+            taskENTER_CRITICAL();
+            {
+                if (*pxCurrentTCB).ulNotifiedValue[uxIndexToWait as usize] == 0 {
+                    (*pxCurrentTCB).ucNotifyState[uxIndexToWait as usize] =
+                        taskWAITING_NOTIFICATION;
+                    xShouldBlock = pdTRUE;
+                }
+            }
+            taskEXIT_CRITICAL();
+
+            if xShouldBlock == pdTRUE {
+                prvAddCurrentTaskToDelayedList(xTicksToWait, pdTRUE);
+            }
+        }
+        let xAlreadyYielded = xTaskResumeAll();
+        if xShouldBlock == pdTRUE && xAlreadyYielded == pdFALSE {
+            portYIELD_WITHIN_API();
+        }
+    }
+
+    let ulReturn: u32;
+    taskENTER_CRITICAL();
+    {
+        ulReturn = (*pxCurrentTCB).ulNotifiedValue[uxIndexToWait as usize];
+        if ulReturn != 0 {
+            if xClearCountOnExit != pdFALSE {
+                (*pxCurrentTCB).ulNotifiedValue[uxIndexToWait as usize] = 0;
+            } else {
+                (*pxCurrentTCB).ulNotifiedValue[uxIndexToWait as usize] = ulReturn - 1;
+            }
+        }
+        (*pxCurrentTCB).ucNotifyState[uxIndexToWait as usize] = taskNOT_WAITING_NOTIFICATION;
+    }
+    taskEXIT_CRITICAL();
+
+    ulReturn
+}
+
+/// Take the default task notification as a counting or binary semaphore.
+pub unsafe fn ulTaskNotifyTake(xClearCountOnExit: BaseType_t, xTicksToWait: TickType_t) -> u32 {
+    ulTaskNotifyTakeIndexed(tskDEFAULT_INDEX_TO_NOTIFY, xClearCountOnExit, xTicksToWait)
+}
+
+/// Clear the pending state of a task notification at a specific index.
+pub unsafe fn xTaskNotifyStateClearIndexed(
+    xTask: TaskHandle_t,
+    uxIndexToClear: UBaseType_t,
+) -> BaseType_t {
+    configASSERT((uxIndexToClear as usize) < configTASK_NOTIFICATION_ARRAY_ENTRIES);
+    let pxTCB = prvGetTCBFromHandle(xTask);
+    configASSERT(!pxTCB.is_null());
+
+    let xReturn: BaseType_t;
+    taskENTER_CRITICAL();
+    {
+        if (*pxTCB).ucNotifyState[uxIndexToClear as usize] == taskNOTIFICATION_RECEIVED {
+            (*pxTCB).ucNotifyState[uxIndexToClear as usize] = taskNOT_WAITING_NOTIFICATION;
+            xReturn = pdPASS;
+        } else {
+            xReturn = pdFAIL;
+        }
+    }
+    taskEXIT_CRITICAL();
+    xReturn
+}
+
+/// Clear the pending state of the default task notification.
+pub unsafe fn xTaskNotifyStateClear(xTask: TaskHandle_t) -> BaseType_t {
+    xTaskNotifyStateClearIndexed(xTask, tskDEFAULT_INDEX_TO_NOTIFY)
+}
+
+/// Clear selected bits in a task notification value and return its old value.
+pub unsafe fn ulTaskNotifyValueClearIndexed(
+    xTask: TaskHandle_t,
+    uxIndexToClear: UBaseType_t,
+    ulBitsToClear: u32,
+) -> u32 {
+    configASSERT((uxIndexToClear as usize) < configTASK_NOTIFICATION_ARRAY_ENTRIES);
+    let pxTCB = prvGetTCBFromHandle(xTask);
+    configASSERT(!pxTCB.is_null());
+
+    let ulReturn: u32;
+    taskENTER_CRITICAL();
+    {
+        ulReturn = (*pxTCB).ulNotifiedValue[uxIndexToClear as usize];
+        (*pxTCB).ulNotifiedValue[uxIndexToClear as usize] &= !ulBitsToClear;
+    }
+    taskEXIT_CRITICAL();
+    ulReturn
+}
+
+/// Clear selected bits in the default task notification value.
+pub unsafe fn ulTaskNotifyValueClear(xTask: TaskHandle_t, ulBitsToClear: u32) -> u32 {
+    ulTaskNotifyValueClearIndexed(xTask, tskDEFAULT_INDEX_TO_NOTIFY, ulBitsToClear)
 }
 
 // =============================================================================
@@ -3690,22 +4124,10 @@ fn prvGetExpectedIdleTime() -> TickType_t {
         // configUSE_PREEMPTION is 0, so there may be tasks above the idle priority
         // task that are in the Ready state, even though the idle task is running.
 
-        #[cfg(not(feature = "port-optimised-task-selection"))]
-        {
-            if uxTopReadyPriority > tskIDLE_PRIORITY {
-                xHigherPriorityReadyTasks = pdTRUE;
-            }
-        }
-
-        #[cfg(feature = "port-optimised-task-selection")]
-        {
-            // When port optimised task selection is used, uxTopReadyPriority
-            // is a bit map. If bits other than the least significant bit are set,
-            // there are tasks above idle priority ready.
-            const UX_LEAST_SIGNIFICANT_BIT: UBaseType_t = 0x01;
-            if uxTopReadyPriority > UX_LEAST_SIGNIFICANT_BIT {
-                xHigherPriorityReadyTasks = pdTRUE;
-            }
+        // uxTopReadyPriority stores the highest ready priority.  The bitmap
+        // representation used by port-optimised selection is not implemented.
+        if uxTopReadyPriority > tskIDLE_PRIORITY {
+            xHigherPriorityReadyTasks = pdTRUE;
         }
 
         if !pxCurrentTCB.is_null() && (*pxCurrentTCB).uxPriority > tskIDLE_PRIORITY {
@@ -3816,5 +4238,205 @@ pub fn vTaskStepTick(xTicksToJump: TickType_t) {
         xTickCount = xTickCount.wrapping_add(xTicksToJump);
 
         crate::trace::traceINCREASE_TICK_COUNT(xTicksToJump);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" fn test_task(_parameter: *mut c_void) {}
+
+    #[cfg(all(feature = "port-test", feature = "use-mutexes"))]
+    unsafe fn initialise_synthetic_mutex_tcb(tcb: *mut TCB_t, priority: UBaseType_t) {
+        (*tcb).uxPriority = priority;
+        (*tcb).uxBasePriority = priority;
+        vListInitialiseItem(&mut (*tcb).xStateListItem);
+        vListInitialiseItem(&mut (*tcb).xEventListItem);
+        listSET_LIST_ITEM_OWNER(&mut (*tcb).xStateListItem, tcb.cast());
+        listSET_LIST_ITEM_OWNER(&mut (*tcb).xEventListItem, tcb.cast());
+        listSET_LIST_ITEM_VALUE(
+            &mut (*tcb).xEventListItem,
+            (configMAX_PRIORITIES - priority) as TickType_t,
+        );
+    }
+
+    #[test]
+    fn static_task_storage_matches_tcb_layout() {
+        assert_eq!(
+            core::mem::size_of::<StaticTask_t>(),
+            core::mem::size_of::<TCB_t>()
+        );
+        assert_eq!(
+            core::mem::align_of::<StaticTask_t>(),
+            core::mem::align_of::<TCB_t>()
+        );
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn scheduler_suspend_preserves_preexisting_interrupt_mask() {
+        crate::port::test_port_reset();
+        unsafe {
+            uxSchedulerSuspended = 0;
+        }
+
+        portDISABLE_INTERRUPTS();
+        let before = crate::port::test_port_snapshot();
+        assert!(before.interrupts_masked);
+
+        vTaskSuspendAll();
+
+        let after = crate::port::test_port_snapshot();
+        assert!(after.interrupts_masked);
+        assert_eq!(after.interrupt_enable_count, before.interrupt_enable_count);
+        unsafe {
+            uxSchedulerSuspended = 0;
+        }
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn event_list_keys_are_unique_and_priority_ordered() {
+        crate::port::test_port_reset();
+        let mut previous_key: Option<TickType_t> = None;
+
+        let mut uxPriority = 0;
+        while uxPriority < configMAX_PRIORITIES {
+            let mut tcb = TCB_t::new();
+            let mut stack_word: StackType_t = 0;
+
+            unsafe {
+                prvInitialiseNewTask(
+                    test_task,
+                    b"test\0".as_ptr(),
+                    1,
+                    ptr::null_mut(),
+                    uxPriority,
+                    ptr::null_mut(),
+                    &mut tcb,
+                    &mut stack_word,
+                );
+            }
+
+            let key = unsafe { listGET_LIST_ITEM_VALUE(&tcb.xEventListItem) };
+            assert_eq!(key, (configMAX_PRIORITIES - uxPriority) as TickType_t);
+            if let Some(previous) = previous_key {
+                assert!(key < previous);
+            }
+            previous_key = Some(key);
+            uxPriority += 1;
+        }
+    }
+
+    #[cfg(all(feature = "port-test", feature = "use-mutexes"))]
+    #[test]
+    fn priority_inheritance_reports_both_new_and_existing_inheritance() {
+        crate::port::test_port_reset();
+
+        let mut holder = TCB_t::new();
+        holder.uxMutexesHeld = 1;
+
+        let mut waiter = TCB_t::new();
+
+        unsafe {
+            initialise_synthetic_mutex_tcb(&mut holder, 1);
+            initialise_synthetic_mutex_tcb(&mut waiter, 3);
+            pxCurrentTCB = &mut waiter;
+            assert_eq!(
+                xTaskPriorityInherit((&mut holder as *mut TCB_t).cast()),
+                pdTRUE
+            );
+            assert_eq!(holder.uxPriority, 3);
+            assert_eq!(
+                listGET_LIST_ITEM_VALUE(&holder.xEventListItem),
+                (configMAX_PRIORITIES - waiter.uxPriority) as TickType_t
+            );
+
+            /* A second waiter below an already inherited priority still needs
+             * a true result so timeout disinheritance is performed later. */
+            let mut second_waiter = TCB_t::new();
+            initialise_synthetic_mutex_tcb(&mut second_waiter, 2);
+            pxCurrentTCB = &mut second_waiter;
+            assert_eq!(
+                xTaskPriorityInherit((&mut holder as *mut TCB_t).cast()),
+                pdTRUE
+            );
+            assert_eq!(holder.uxPriority, 3);
+            pxCurrentTCB = ptr::null_mut();
+        }
+    }
+
+    #[cfg(all(feature = "port-test", feature = "use-mutexes"))]
+    #[test]
+    fn timeout_disinherits_only_sole_mutex_and_repositions_ready_task() {
+        crate::port::test_port_reset();
+
+        let mut holder = TCB_t::new();
+        holder.uxMutexesHeld = 2;
+
+        let mut waiter = TCB_t::new();
+
+        unsafe {
+            initialise_synthetic_mutex_tcb(&mut holder, 4);
+            holder.uxBasePriority = 1;
+            initialise_synthetic_mutex_tcb(&mut waiter, 3);
+            prvInitialiseTaskLists();
+            prvAddTaskToReadyList(&mut holder);
+            pxCurrentTCB = &mut waiter;
+
+            vTaskPriorityDisinheritAfterTimeout((&mut holder as *mut TCB_t).cast(), 2);
+            assert_eq!(holder.uxPriority, 4);
+            assert!(
+                listIS_CONTAINED_WITHIN(&pxReadyTasksLists[4], &holder.xStateListItem) != pdFALSE
+            );
+
+            holder.uxMutexesHeld = 1;
+            vTaskPriorityDisinheritAfterTimeout((&mut holder as *mut TCB_t).cast(), 2);
+            assert_eq!(holder.uxPriority, 2);
+            assert_eq!(
+                listGET_LIST_ITEM_VALUE(&holder.xEventListItem),
+                (configMAX_PRIORITIES - 2) as TickType_t
+            );
+            assert!(
+                listIS_CONTAINED_WITHIN(&pxReadyTasksLists[2], &holder.xStateListItem) != pdFALSE
+            );
+            pxCurrentTCB = ptr::null_mut();
+        }
+    }
+
+    #[cfg(all(feature = "port-test", feature = "use-mutexes"))]
+    #[test]
+    fn giving_last_of_multiple_mutexes_restores_base_priority() {
+        crate::port::test_port_reset();
+
+        let mut holder = TCB_t::new();
+        holder.uxMutexesHeld = 2;
+
+        unsafe {
+            initialise_synthetic_mutex_tcb(&mut holder, 4);
+            holder.uxBasePriority = 1;
+            prvInitialiseTaskLists();
+            prvAddTaskToReadyList(&mut holder);
+            pxCurrentTCB = &mut holder;
+
+            assert_eq!(
+                xTaskPriorityDisinherit((&mut holder as *mut TCB_t).cast()),
+                pdFALSE
+            );
+            assert_eq!(holder.uxMutexesHeld, 1);
+            assert_eq!(holder.uxPriority, 4);
+
+            assert_eq!(
+                xTaskPriorityDisinherit((&mut holder as *mut TCB_t).cast()),
+                pdTRUE
+            );
+            assert_eq!(holder.uxMutexesHeld, 0);
+            assert_eq!(holder.uxPriority, 1);
+            assert!(
+                listIS_CONTAINED_WITHIN(&pxReadyTasksLists[1], &holder.xStateListItem) != pdFALSE
+            );
+            pxCurrentTCB = ptr::null_mut();
+        }
     }
 }

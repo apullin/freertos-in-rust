@@ -431,6 +431,8 @@ impl Platform {
             OsStr::new("none"),
             OsStr::new("-serial"),
             OsStr::new("stdio"),
+            OsStr::new("-nic"),
+            OsStr::new("none"),
             OsStr::new("-no-reboot"),
         ]);
         if self.semihosting {
@@ -456,6 +458,7 @@ mod tests {
         assert!(rendered.contains("mps2-an386"));
         assert!(rendered.contains("cortex-m4"));
         assert!(rendered.contains("semihosting-config"));
+        assert!(rendered.contains("\"-nic\" \"none\""));
     }
 
     #[test]

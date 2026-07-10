@@ -31,20 +31,23 @@ static mut REPORTER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 extern "C" fn worker_a(_parameter: *mut c_void) {
     loop {
         WORKER_A_RUNS.fetch_add(1, Ordering::Relaxed);
-        vTaskDelay(2);
+        // Safety: worker_a is a live task and the scheduler is running.
+        unsafe { vTaskDelay(2) };
     }
 }
 
 extern "C" fn worker_b(_parameter: *mut c_void) {
     loop {
         WORKER_B_RUNS.fetch_add(1, Ordering::Relaxed);
-        vTaskDelay(2);
+        // Safety: worker_b is a live task and the scheduler is running.
+        unsafe { vTaskDelay(2) };
     }
 }
 
 extern "C" fn reporter(_parameter: *mut c_void) {
     let start = xTaskGetTickCount();
-    vTaskDelay(OBSERVATION_TICKS);
+    // Safety: reporter is a live task and the scheduler is running.
+    unsafe { vTaskDelay(OBSERVATION_TICKS) };
     let elapsed = xTaskGetTickCount().wrapping_sub(start);
     let worker_a_runs = WORKER_A_RUNS.load(Ordering::Relaxed);
     let worker_b_runs = WORKER_B_RUNS.load(Ordering::Relaxed);

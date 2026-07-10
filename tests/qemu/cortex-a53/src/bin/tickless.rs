@@ -8,6 +8,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use freertos_in_rust::kernel::tasks::{vTaskDelay, xTaskGetTickCount};
+use freertos_in_rust::port::portGET_RUN_TIME_COUNTER_VALUE;
 use freertos_in_rust::types::{StackType_t, TickType_t};
 use freertos_qemu_cortex_a53::{
     finish, init, spawn_static, start_scheduler, tap, timer_interrupts, AlignedTaskBuffer,
@@ -30,17 +31,22 @@ static mut REPORTER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 extern "C" fn sleeper(_parameter: *mut c_void) {
     let start = xTaskGetTickCount();
     SLEEPER_START.store(start, Ordering::Release);
-    vTaskDelay(SLEEP_TICKS);
+    // Safety: sleeper is a live task and the scheduler is running.
+    unsafe { vTaskDelay(SLEEP_TICKS) };
     SLEEPER_END.store(xTaskGetTickCount(), Ordering::Release);
 
     loop {
-        vTaskDelay(1000);
+        // Safety: sleeper remains a live task in ordinary task context.
+        unsafe { vTaskDelay(1000) };
     }
 }
 
 extern "C" fn reporter(_parameter: *mut c_void) {
     let report_start = xTaskGetTickCount();
-    vTaskDelay(REPORT_TICKS);
+    let runtime_start = portGET_RUN_TIME_COUNTER_VALUE();
+    // Safety: reporter is a live task and the scheduler is running.
+    unsafe { vTaskDelay(REPORT_TICKS) };
+    let runtime_elapsed = portGET_RUN_TIME_COUNTER_VALUE().wrapping_sub(runtime_start);
     let report_elapsed = xTaskGetTickCount().wrapping_sub(report_start);
     let sleeper_start = SLEEPER_START.load(Ordering::Acquire);
     let sleeper_end = SLEEPER_END.load(Ordering::Acquire);
@@ -62,10 +68,14 @@ extern "C" fn reporter(_parameter: *mut c_void) {
         interrupts > 0 && interrupts < 20,
         "long_idle_suppresses_periodic_timer_irqs",
     );
+    output.check(
+        runtime_elapsed > 0,
+        "generic_runtime_counter_advances_through_wfi",
+    );
     output.diagnostic(format_args!(
-        "report_elapsed={report_elapsed} sleeper={sleeper_start}->{sleeper_end}/{sleeper_elapsed} irq={interrupts}"
+        "report_elapsed={report_elapsed} sleeper={sleeper_start}->{sleeper_end}/{sleeper_elapsed} irq={interrupts} runtime={runtime_elapsed}"
     ));
-    finish(output, 3)
+    finish(output, 4)
 }
 
 #[no_mangle]

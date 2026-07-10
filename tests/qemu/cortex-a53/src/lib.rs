@@ -216,7 +216,10 @@ pub fn init() {
 }
 
 pub fn start_scheduler() -> ! {
-    freertos_in_rust::start_scheduler()
+    // Safety: test initialization is single-threaded with IRQs masked, and the
+    // capability is consumed before the scheduler enables task execution.
+    let context = unsafe { freertos_in_rust::sync::TaskContext::assume() };
+    freertos_in_rust::start_scheduler(context)
 }
 
 #[no_mangle]

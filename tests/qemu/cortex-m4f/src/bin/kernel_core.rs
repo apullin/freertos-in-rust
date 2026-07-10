@@ -24,7 +24,11 @@ use freertos_in_rust::kernel::tasks::{
 use freertos_in_rust::types::{pdFALSE, pdPASS, StackType_t, TickType_t};
 use freertos_qemu_cortex_m4f::{finish, spawn_static, start_scheduler, tap, AlignedTaskBuffer};
 
+#[cfg(feature = "small-memory")]
+const STACK_WORDS: usize = 128;
+#[cfg(not(feature = "small-memory"))]
 const STACK_WORDS: usize = 256;
+const REPORTER_STACK_WORDS: usize = 256;
 const WORKER_PRIORITY: u32 = 2;
 const REPORTER_PRIORITY: u32 = 3;
 const BLOCK_TICKS: TickType_t = 20;
@@ -64,7 +68,7 @@ static mut NOTIFY_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
 static mut NOTIFY_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 static mut STREAM_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
 static mut STREAM_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
-static mut REPORTER_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
+static mut REPORTER_STACK: [StackType_t; REPORTER_STACK_WORDS] = [0; REPORTER_STACK_WORDS];
 static mut REPORTER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 static mut MUTEX_LOW_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
 static mut MUTEX_LOW_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
@@ -85,7 +89,7 @@ fn park_worker() -> ! {
 
 fn sleep_worker() -> ! {
     loop {
-        vTaskDelay(1000);
+        unsafe { vTaskDelay(1000) };
     }
 }
 
@@ -93,7 +97,9 @@ extern "C" fn delay_until_worker(_parameter: *mut c_void) {
     let mut previous_wake = xTaskGetTickCount();
     DELAY_START.store(previous_wake as u32, Ordering::Relaxed);
 
-    xTaskDelayUntil(&mut previous_wake, BLOCK_TICKS);
+    // SAFETY: `previous_wake` is uniquely owned by this task and the call is
+    // made from task context.
+    unsafe { xTaskDelayUntil(&mut previous_wake, BLOCK_TICKS) };
 
     DELAY_END.store(xTaskGetTickCount() as u32, Ordering::Relaxed);
     park_worker()
@@ -156,7 +162,7 @@ extern "C" fn mutex_low_worker(_parameter: *mut c_void) {
 }
 
 extern "C" fn mutex_medium_worker(_parameter: *mut c_void) {
-    vTaskDelay(3);
+    unsafe { vTaskDelay(3) };
 
     /* Without priority inheritance this task starves the low-priority mutex
      * holder. With inheritance, the holder runs through its critical section
@@ -168,7 +174,7 @@ extern "C" fn mutex_medium_worker(_parameter: *mut c_void) {
 }
 
 extern "C" fn mutex_high_worker(_parameter: *mut c_void) {
-    vTaskDelay(2);
+    unsafe { vTaskDelay(2) };
     let result = unsafe { xQueueSemaphoreTake(MUTEX, 40) };
     MUTEX_HIGH_RESULT.store(result as u32, Ordering::Relaxed);
 
@@ -204,7 +210,7 @@ extern "C" fn queue_waker_worker(_parameter: *mut c_void) {
     let mut index = 0usize;
 
     while index < wake_delays.len() {
-        vTaskDelay(wake_delays[index]);
+        unsafe { vTaskDelay(wake_delays[index]) };
         unsafe {
             let _ = xQueueGenericSend(
                 TIMEOUT_QUEUE,
@@ -246,7 +252,7 @@ fn blocked_for_expected_ticks(measured: Option<TickType_t>) -> bool {
 }
 
 extern "C" fn reporter(_parameter: *mut c_void) {
-    vTaskDelay(REPORT_TICKS);
+    unsafe { vTaskDelay(REPORT_TICKS) };
 
     let delay_elapsed = elapsed(&DELAY_START, &DELAY_END);
     let notify_elapsed = elapsed(&NOTIFY_START, &NOTIFY_END);
@@ -391,7 +397,7 @@ fn main() -> ! {
         spawn_static(
             b"report\0",
             REPORTER_STACK.as_mut_ptr(),
-            STACK_WORDS,
+            REPORTER_STACK_WORDS,
             core::ptr::addr_of_mut!(REPORTER_TCB),
             REPORTER_PRIORITY,
             reporter,

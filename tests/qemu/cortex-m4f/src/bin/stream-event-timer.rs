@@ -31,6 +31,9 @@ use freertos_in_rust::types::{
 };
 use freertos_qemu_cortex_m4f::{finish, spawn_static, start_scheduler, tap, AlignedTaskBuffer};
 
+#[cfg(feature = "small-memory")]
+const STACK_WORDS: usize = 128;
+#[cfg(not(feature = "small-memory"))]
 const STACK_WORDS: usize = 256;
 const RECEIVER_PRIORITY: UBaseType_t = 3;
 const CONTROLLER_PRIORITY: UBaseType_t = 2;
@@ -80,14 +83,22 @@ static mut CONTROLLER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 static mut REPORTER_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
 static mut REPORTER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 
+fn increment_serialized(counter: &AtomicU32, ordering: Ordering) {
+    // ARMv6-M provides atomic loads/stores but no hardware atomic RMW. These
+    // callbacks execute serially on one core, so preserve the counter with the
+    // load/store operations supported by every Cortex-M port under test.
+    let value = counter.load(Ordering::Relaxed);
+    counter.store(value.wrapping_add(1), ordering);
+}
+
 extern "C" fn send_completed(
     stream: StreamBufferHandle_t,
     inside_isr: BaseType_t,
     higher_priority_task_woken: *mut BaseType_t,
 ) {
-    SEND_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+    increment_serialized(&SEND_CALLBACKS, Ordering::Relaxed);
     if inside_isr != pdFALSE {
-        ISR_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        increment_serialized(&ISR_CALLBACKS, Ordering::Relaxed);
         unsafe {
             let _ = xStreamBufferSendCompletedFromISR(stream, higher_priority_task_woken);
         }
@@ -99,15 +110,15 @@ extern "C" fn receive_completed(
     inside_isr: BaseType_t,
     _higher_priority_task_woken: *mut BaseType_t,
 ) {
-    RECEIVE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+    increment_serialized(&RECEIVE_CALLBACKS, Ordering::Relaxed);
     if inside_isr != pdFALSE {
-        ISR_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        increment_serialized(&ISR_CALLBACKS, Ordering::Relaxed);
     }
 }
 
 extern "C" fn timer_callback(_timer: TimerHandle_t) {
     TIMER_CALLBACK_TICK.store(xTaskGetTickCount() as u32, Ordering::Relaxed);
-    TIMER_CALLBACKS.fetch_add(1, Ordering::Release);
+    increment_serialized(&TIMER_CALLBACKS, Ordering::Release);
 }
 
 #[exception]
@@ -130,8 +141,11 @@ unsafe fn DefaultHandler(interrupt_number: i16) {
             1,
             &mut higher_priority_task_woken,
         );
-        let event_result =
-            xEventGroupSetBitsFromISR(event_group, EVENT_BIT, &mut higher_priority_task_woken);
+        // SAFETY: the static event group remains live for the firmware, and
+        // IRQ0 uses a priority permitted to call FreeRTOS FromISR APIs.
+        let event_result = unsafe {
+            xEventGroupSetBitsFromISR(event_group, EVENT_BIT, &mut higher_priority_task_woken)
+        };
 
         ISR_STREAM_RESULT.store(stream_result as u32, Ordering::Release);
         ISR_EVENT_RESULT.store(event_result as u32, Ordering::Release);
@@ -172,7 +186,7 @@ extern "C" fn receiver(_parameter: *mut c_void) {
     RECEIVER_RESULT.store(received as u32, Ordering::Release);
 
     loop {
-        vTaskDelay(1000);
+        unsafe { vTaskDelay(1000) };
     }
 }
 
@@ -181,18 +195,19 @@ extern "C" fn controller(_parameter: *mut c_void) {
         cortex_m::asm::nop();
     }
 
-    vTaskDelay(2);
+    unsafe { vTaskDelay(2) };
     pend_application_interrupt();
 
     loop {
-        vTaskDelay(1000);
+        unsafe { vTaskDelay(1000) };
     }
 }
 
 extern "C" fn reporter(_parameter: *mut c_void) {
-    vTaskDelay(REPORT_TICKS);
+    unsafe { vTaskDelay(REPORT_TICKS) };
 
-    let event_bits = xEventGroupGetBits(EVENT_GROUP.load(Ordering::Acquire));
+    // SAFETY: the static event group remains live for the firmware.
+    let event_bits = unsafe { xEventGroupGetBits(EVENT_GROUP.load(Ordering::Acquire)) };
     let mut output = tap();
     output.check(
         SEND_CALLBACKS.load(Ordering::Relaxed) == 2
@@ -294,34 +309,48 @@ fn main() -> ! {
     // compile-time check of the callback-enabled representation.
     let _receive_from_isr: unsafe fn(_, _, _, _) -> _ = xStreamBufferReceiveFromISR;
 
-    let event_group = xEventGroupCreateStatic(core::ptr::addr_of_mut!(EVENT_CONTROL));
+    // SAFETY: EVENT_CONTROL is uniquely initialized here and remains at a
+    // stable address for the firmware's lifetime.
+    let event_group = unsafe { xEventGroupCreateStatic(core::ptr::addr_of_mut!(EVENT_CONTROL)) };
     assert!(!event_group.is_null());
     EVENT_GROUP.store(event_group, Ordering::Release);
 
-    let zero_timer = xTimerCreateStatic(
-        b"zero\0".as_ptr(),
-        0,
-        pdTRUE,
-        ptr::null_mut(),
-        timer_callback,
-        core::ptr::addr_of_mut!(ZERO_TIMER_CONTROL),
-    );
+    // SAFETY: the name and unique static storage live for the firmware; the
+    // invalid zero period rejects creation before initialization.
+    let zero_timer = unsafe {
+        xTimerCreateStatic(
+            b"zero\0".as_ptr(),
+            0,
+            pdTRUE,
+            ptr::null_mut(),
+            timer_callback,
+            core::ptr::addr_of_mut!(ZERO_TIMER_CONTROL),
+        )
+    };
     ZERO_TIMER_REJECTED.store(zero_timer.is_null() as u32, Ordering::Relaxed);
 
-    let timer = xTimerCreateStatic(
-        b"oneshot\0".as_ptr(),
-        5,
-        pdFALSE,
-        ptr::null_mut(),
-        timer_callback,
-        core::ptr::addr_of_mut!(TIMER_CONTROL),
-    );
+    // SAFETY: the name and unique static storage remain live for every queued
+    // timer operation and callback in this firmware.
+    let timer = unsafe {
+        xTimerCreateStatic(
+            b"oneshot\0".as_ptr(),
+            5,
+            pdFALSE,
+            ptr::null_mut(),
+            timer_callback,
+            core::ptr::addr_of_mut!(TIMER_CONTROL),
+        )
+    };
     assert!(!timer.is_null());
-    ZERO_CHANGE_REJECTED.store(
-        (xTimerChangePeriod(timer, 0, 0) != pdPASS) as u32,
-        Ordering::Relaxed,
-    );
-    assert_eq!(xTimerStart(timer, 0), pdPASS);
+    // SAFETY: `timer` names the live static timer above and both calls are in
+    // task context before scheduling starts.
+    unsafe {
+        ZERO_CHANGE_REJECTED.store(
+            (xTimerChangePeriod(timer, 0, 0) != pdPASS) as u32,
+            Ordering::Relaxed,
+        );
+        assert_eq!(xTimerStart(timer, 0), pdPASS);
+    }
 
     unsafe {
         spawn_static(

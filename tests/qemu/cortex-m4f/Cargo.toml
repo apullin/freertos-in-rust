@@ -4,6 +4,18 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["fpu-context", "basepri-port"]
+small-memory = []
+integer-context = []
+fpu-context = []
+primask-port = []
+basepri-port = []
+tickless = [
+    "freertos-in-rust/generate-run-time-stats",
+    "freertos-in-rust/tickless-idle",
+]
+
 [[bin]]
 name = "smoke"
 path = "src/bin/smoke.rs"
@@ -19,6 +31,22 @@ path = "src/bin/isr.rs"
 [[bin]]
 name = "allocator"
 path = "src/bin/allocator.rs"
+
+[[bin]]
+name = "stream-event-timer"
+path = "src/bin/stream-event-timer.rs"
+
+[[bin]]
+name = "safe-api"
+path = "src/bin/safe-api.rs"
+
+[[bin]]
+name = "port"
+path = "src/bin/port.rs"
+
+[[bin]]
+name = "tickless"
+path = "src/bin/tickless.rs"
 
 [dependencies]
 cortex-m = "0.7"

@@ -53,17 +53,23 @@ extern "C" fn timer_isr_hook() {
     match OPERATION.swap(OPERATION_IDLE, Ordering::AcqRel) {
         OPERATION_SET => {
             let mut higher_priority_task_woken: BaseType_t = pdFALSE;
-            let result = xEventGroupSetBitsFromISR(
-                unsafe { EVENT_GROUP },
-                HIGH_EVENT_BITS,
-                &mut higher_priority_task_woken,
-            );
+            // SAFETY: the static group remains live until the daemon consumes
+            // this deferred operation; this hook runs at an allowed IRQ level.
+            let result = unsafe {
+                xEventGroupSetBitsFromISR(
+                    EVENT_GROUP,
+                    HIGH_EVENT_BITS,
+                    &mut higher_priority_task_woken,
+                )
+            };
             SET_QUEUE_RESULT.store(result as u64, Ordering::Release);
             ISR_HIGHER_PRIORITY_WOKEN.store(higher_priority_task_woken as u64, Ordering::Release);
             portYIELD_FROM_ISR(higher_priority_task_woken);
         }
         OPERATION_CLEAR => {
-            let result = xEventGroupClearBitsFromISR(unsafe { EVENT_GROUP }, HIGH_EVENT_BITS);
+            // SAFETY: the same static group and interrupt-context invariants as
+            // the set operation above apply.
+            let result = unsafe { xEventGroupClearBitsFromISR(EVENT_GROUP, HIGH_EVENT_BITS) };
             CLEAR_QUEUE_RESULT.store(result as u64, Ordering::Release);
             if result == pdPASS {
                 // ClearBitsFromISR has no higher-priority output; FreeRTOS
@@ -76,13 +82,16 @@ extern "C" fn timer_isr_hook() {
 }
 
 extern "C" fn controller(_parameter: *mut c_void) {
-    vTaskDelay(1);
+    // Safety: setter is a live task and the scheduler is running.
+    unsafe { vTaskDelay(1) };
     OPERATION.store(OPERATION_SET, Ordering::Release);
 
     let mut attempts = 0;
     while attempts < 20 {
-        vTaskDelay(1);
-        if xEventGroupGetBits(unsafe { EVENT_GROUP }) & HIGH_EVENT_BITS == HIGH_EVENT_BITS {
+        // Safety: setter remains a live task in ordinary task context.
+        unsafe { vTaskDelay(1) };
+        // SAFETY: EVENT_GROUP names the live static group for this firmware.
+        if unsafe { xEventGroupGetBits(EVENT_GROUP) } & HIGH_EVENT_BITS == HIGH_EVENT_BITS {
             SET_OBSERVED.store(1, Ordering::Release);
             break;
         }
@@ -92,8 +101,10 @@ extern "C" fn controller(_parameter: *mut c_void) {
     OPERATION.store(OPERATION_CLEAR, Ordering::Release);
     attempts = 0;
     while attempts < 20 {
-        vTaskDelay(1);
-        if xEventGroupGetBits(unsafe { EVENT_GROUP }) & HIGH_EVENT_BITS == 0 {
+        // Safety: waiter is a live task and the scheduler is running.
+        unsafe { vTaskDelay(1) };
+        // SAFETY: EVENT_GROUP names the live static group for this firmware.
+        if unsafe { xEventGroupGetBits(EVENT_GROUP) } & HIGH_EVENT_BITS == 0 {
             CLEAR_OBSERVED.store(1, Ordering::Release);
             break;
         }
@@ -101,14 +112,17 @@ extern "C" fn controller(_parameter: *mut c_void) {
     }
 
     loop {
-        vTaskDelay(1000);
+        // Safety: waiter remains a live task in ordinary task context.
+        unsafe { vTaskDelay(1000) };
     }
 }
 
 extern "C" fn reporter(_parameter: *mut c_void) {
-    vTaskDelay(REPORT_TICKS);
+    // Safety: reporter is a live task and the scheduler is running.
+    unsafe { vTaskDelay(REPORT_TICKS) };
 
-    let final_bits = xEventGroupGetBits(unsafe { EVENT_GROUP });
+    // SAFETY: EVENT_GROUP names the live static group for this firmware.
+    let final_bits = unsafe { xEventGroupGetBits(EVENT_GROUP) };
     let mut output = tap();
     output.check(
         SET_QUEUE_RESULT.load(Ordering::Acquire) == pdPASS as u64
@@ -142,6 +156,8 @@ pub extern "C" fn main() -> ! {
     set_tick_isr_hook(timer_isr_hook);
 
     unsafe {
+        // SAFETY: EVENT_CONTROL is initialized once at a stable address and
+        // lives for the entire firmware execution.
         EVENT_GROUP = xEventGroupCreateStatic(core::ptr::addr_of_mut!(EVENT_CONTROL));
         assert!(!EVENT_GROUP.is_null());
 

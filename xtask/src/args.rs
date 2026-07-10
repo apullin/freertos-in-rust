@@ -180,7 +180,7 @@ fn validate_suite(suite: &str) -> Result<(), String> {
 }
 
 pub fn usage() -> &'static str {
-    "FreeRusTOS project test driver
+    "FreeRTOS-in-Rust project test driver
 
 Usage:
   cargo run --manifest-path xtask/Cargo.toml -- test host

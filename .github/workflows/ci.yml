@@ -2,77 +2,222 @@ name: CI
 
 on:
   push:
-    branches: [master, smp, ci]
   pull_request:
-    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-demos:
-    name: Build Demos
+  formatting:
+    name: Formatting
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting for every crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo fmt --manifest-path xtask/Cargo.toml --all --check
+          for manifest in demo/*/Cargo.toml hardware-tests/*/Cargo.toml tests/qemu/*/Cargo.toml; do
+            cargo fmt --manifest-path "$manifest" --all --check
+          done
+
+  host-tests:
+    name: Host tests (debug + release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run canonical host matrix
+        run: cargo run --manifest-path xtask/Cargo.toml -- test host
+
+  feature-matrix:
+    name: Features and documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain and supported targets
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: >-
             thumbv6m-none-eabi,
             thumbv7m-none-eabi,
             thumbv7em-none-eabihf,
+            riscv32imac-unknown-none-elf,
             armv7a-none-eabi,
-            aarch64-unknown-none,
-            riscv32imac-unknown-none-elf
+            aarch64-unknown-none
 
-      - name: Build Cortex-M0 demo
-        run: cd demo/cortex-m0 && cargo build --release
+      - name: Run canonical feature, allocator, port, and docs matrix
+        run: cargo run --manifest-path xtask/Cargo.toml -- check-features
 
-      - name: Build Cortex-M3 demo
-        run: cd demo/cortex-m3 && cargo build --release
-
-      - name: Build Cortex-M4F demo
-        run: cd demo/cortex-m4f && cargo build --release
-
-      - name: Build Cortex-A9 demo
-        run: cd demo/cortex-a9 && cargo build --release
-        continue-on-error: true  # A9 needs ARM cross-compiler for startup.S
-
-      - name: Build Cortex-A53 demo
-        run: cd demo/cortex-a53 && cargo build --release
-
-      - name: Build RISC-V32 demo
-        run: cd demo/riscv32 && cargo build --release
-
-  # Verify the library builds with various feature combinations
-  check-features:
-    name: Check Feature Combinations
+  demo-builds:
+    name: Firmware build / ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Cortex-M0
+            directory: demo/cortex-m0
+            target: thumbv6m-none-eabi
+            needs_arm_gcc: false
+          - name: Cortex-M3
+            directory: demo/cortex-m3
+            target: thumbv7m-none-eabi
+            needs_arm_gcc: false
+          - name: Cortex-M4F
+            directory: demo/cortex-m4f
+            target: thumbv7em-none-eabihf
+            needs_arm_gcc: false
+          - name: RV32IMAC
+            directory: demo/riscv32
+            target: riscv32imac-unknown-none-elf
+            needs_arm_gcc: false
+          - name: Cortex-A9
+            directory: demo/cortex-a9
+            target: armv7a-none-eabi
+            needs_arm_gcc: true
+          - name: Cortex-A53
+            directory: demo/cortex-a53
+            target: aarch64-unknown-none
+            needs_arm_gcc: false
+          - name: LP-MSPM0G5187 hardware regression
+            directory: hardware-tests/mspm0g5187
+            target: thumbv6m-none-eabi
+            needs_arm_gcc: false
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: thumbv7em-none-eabihf
+          targets: ${{ matrix.target }}
 
-      - name: Check with heap-4
-        run: cargo check --target thumbv7em-none-eabihf --features "port-cortex-m4f,heap-4"
+      - name: Install Cortex-A9 assembly toolchain
+        if: matrix.needs_arm_gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gcc-arm-none-eabi
 
-      - name: Check with heap-5
-        run: cargo check --target thumbv7em-none-eabihf --features "port-cortex-m4f,heap-5"
+      - name: Build release firmware
+        working-directory: ${{ matrix.directory }}
+        run: cargo build --release --locked
 
-      - name: Check with all kernel features
-        run: cargo check --target thumbv7em-none-eabihf --features "port-cortex-m4f,heap-4,use-mutexes,timers,task-delete,task-suspend,queue-sets,stream-buffers"
-
-  formatting:
-    name: Formatting
+  qemu-tests:
+    name: QEMU / ${{ matrix.arch }} (${{ matrix.expected_suites }} suites)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FREERUSTOS_QEMU_TIMEOUT_SECS: "25"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: cortex-m0
+            target: thumbv6m-none-eabi
+            qemu_package: qemu-system-arm
+            expected_suites: 7
+          - arch: cortex-m3
+            target: thumbv7m-none-eabi
+            qemu_package: qemu-system-arm
+            expected_suites: 7
+          - arch: cortex-m4f
+            target: thumbv7em-none-eabihf
+            qemu_package: qemu-system-arm
+            expected_suites: 9
+          - arch: cortex-m7
+            target: thumbv7em-none-eabihf
+            qemu_package: qemu-system-arm
+            expected_suites: 7
+          - arch: riscv32
+            target: riscv32imac-unknown-none-elf
+            qemu_package: qemu-system-misc
+            expected_suites: 1
+          - arch: cortex-a9
+            target: armv7a-none-eabi
+            qemu_package: qemu-system-arm
+            expected_suites: 1
+          - arch: cortex-a53
+            target: aarch64-unknown-none
+            qemu_package: qemu-system-arm
+            expected_suites: 4
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - run: cargo fmt --check
+          targets: ${{ matrix.target }}
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            ${{ matrix.qemu_package }}
+
+      - name: Run every registered suite and verify the count
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          EXPECTED_SUITES: ${{ matrix.expected_suites }}
+        run: |
+          set -uo pipefail
+          mkdir -p target/xtask/qemu-logs
+          transcript="target/xtask/qemu-logs/xtask-${ARCH}.log"
+
+          cargo run --manifest-path xtask/Cargo.toml -- \
+            qemu-test --arch "$ARCH" --suite all 2>&1 | tee "$transcript"
+          xtask_status=${PIPESTATUS[0]}
+
+          if (( xtask_status != 0 )); then
+            echo "### QEMU ${ARCH}: failed" >> "$GITHUB_STEP_SUMMARY"
+            exit "$xtask_status"
+          fi
+
+          actual_suites="$({
+            sed -n 's/^QEMU test matrix passed: \([0-9][0-9]*\) firmware run(s)$/\1/p' \
+              "$transcript" || true
+          } | tail -n 1)"
+
+          if [[ ! "$actual_suites" =~ ^[1-9][0-9]*$ ]]; then
+            echo "xtask did not report a nonzero firmware-suite count" >&2
+            exit 1
+          fi
+          if (( actual_suites != EXPECTED_SUITES )); then
+            echo "expected ${EXPECTED_SUITES} suites, xtask ran ${actual_suites}" >&2
+            exit 1
+          fi
+
+          {
+            echo "### QEMU ${ARCH}: passed"
+            echo "- Firmware suites: ${actual_suites}"
+            echo "- Per-firmware timeout: ${FREERUSTOS_QEMU_TIMEOUT_SECS}s"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload QEMU logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-logs-${{ matrix.arch }}
+          path: target/xtask/qemu-logs
+          if-no-files-found: warn
+          retention-days: 14

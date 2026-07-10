@@ -9,12 +9,25 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+const CORTEX_M_SHARED_SUITES: &[&str] = &[
+    "smoke",
+    "kernel-core",
+    "isr",
+    "allocator",
+    "stream-event-timer",
+    "port",
+    "tickless",
+];
 const CORTEX_M4F_SUITES: &[&str] = &[
     "smoke",
     "kernel-core",
     "isr",
     "allocator",
     "stream-event-timer",
+    "port",
+    "tickless",
+    "safe-api",
+    "static-only",
 ];
 const CORTEX_A53_SUITES: &[&str] = &["smoke", "port", "tickless", "event-timer"];
 const UNQUALIFIED_SINGLE_CORE_SUITES: &[&str] = &["smoke"];
@@ -64,14 +77,13 @@ pub fn run(repository: &Path, arguments: QemuTestArgs) -> Result<(), String> {
 
 fn suites_for_arch(arch: Architecture) -> &'static [&'static str] {
     match arch {
+        Architecture::CortexM0 | Architecture::CortexM3 | Architecture::CortexM7 => {
+            CORTEX_M_SHARED_SUITES
+        }
         Architecture::CortexM4f => CORTEX_M4F_SUITES,
         Architecture::CortexA53 => CORTEX_A53_SUITES,
         Architecture::CortexA9Smp => &["smp"],
-        Architecture::CortexM0
-        | Architecture::CortexM3
-        | Architecture::CortexM7
-        | Architecture::Riscv32
-        | Architecture::CortexA9 => UNQUALIFIED_SINGLE_CORE_SUITES,
+        Architecture::Riscv32 | Architecture::CortexA9 => UNQUALIFIED_SINGLE_CORE_SUITES,
     }
 }
 
@@ -83,9 +95,13 @@ fn run_one(
     timeout: Duration,
 ) -> Result<usize, String> {
     let platform = Platform::for_arch(arch);
-    let firmware_directory = repository
-        .join("tests/qemu")
-        .join(platform.firmware_directory);
+    let firmware_directory = if arch == Architecture::CortexM4f && suite == "static-only" {
+        repository.join("tests/qemu/cortex-m4f-static")
+    } else {
+        repository
+            .join("tests/qemu")
+            .join(platform.firmware_directory)
+    };
     let manifest = firmware_directory.join("Cargo.toml");
     if !manifest.is_file() {
         return Err(format!(
@@ -157,7 +173,8 @@ fn build_firmware(
     suite: &str,
 ) -> Result<(), String> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let status = Command::new(&cargo)
+    let mut command = Command::new(&cargo);
+    command
         .current_dir(firmware_directory)
         .arg("build")
         .arg("--manifest-path")
@@ -168,7 +185,18 @@ fn build_firmware(
         .arg(target_directory)
         .arg("--release")
         .arg("--bin")
-        .arg(suite)
+        .arg(suite);
+
+    if suite == "static-only" {
+        command
+            .arg("--no-default-features")
+            .arg("--features")
+            .arg("static-only");
+    } else if suite == "tickless" {
+        command.arg("--features").arg("tickless");
+    }
+
+    let status = command
         .status()
         .map_err(|error| format!("could not start {:?}: {error}", cargo))?;
     if status.success() {
@@ -432,17 +460,22 @@ mod tests {
 
     #[test]
     fn all_uses_only_registered_architecture_suites() {
-        assert_eq!(
-            suites_for_arch(Architecture::CortexM4f),
-            CORTEX_M4F_SUITES
-        );
+        assert_eq!(suites_for_arch(Architecture::CortexM4f), CORTEX_M4F_SUITES);
         assert!(suites_for_arch(Architecture::CortexM4f).contains(&"stream-event-timer"));
-        assert!(!suites_for_arch(Architecture::CortexM4f).contains(&"tickless"));
-
+        assert!(suites_for_arch(Architecture::CortexM4f).contains(&"port"));
+        assert!(suites_for_arch(Architecture::CortexM4f).contains(&"tickless"));
+        assert!(suites_for_arch(Architecture::CortexM4f).contains(&"safe-api"));
+        assert!(suites_for_arch(Architecture::CortexM4f).contains(&"static-only"));
         assert_eq!(
-            suites_for_arch(Architecture::CortexA53),
-            CORTEX_A53_SUITES
+            suites_for_arch(Architecture::CortexM0),
+            CORTEX_M_SHARED_SUITES
         );
+        assert!(suites_for_arch(Architecture::CortexM0).contains(&"port"));
+        assert!(suites_for_arch(Architecture::CortexM0).contains(&"tickless"));
+        assert!(!suites_for_arch(Architecture::CortexM0).contains(&"safe-api"));
+        assert!(!suites_for_arch(Architecture::CortexM7).contains(&"static-only"));
+
+        assert_eq!(suites_for_arch(Architecture::CortexA53), CORTEX_A53_SUITES);
         assert!(suites_for_arch(Architecture::CortexA53).contains(&"event-timer"));
         assert!(!suites_for_arch(Architecture::CortexA53).contains(&"allocator"));
     }

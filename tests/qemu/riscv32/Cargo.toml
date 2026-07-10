@@ -1,0 +1,23 @@
+[package]
+name = "freertos-qemu-riscv32"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "smoke"
+path = "src/bin/smoke.rs"
+
+[dependencies]
+riscv-rt = "0.13"
+freertos-in-rust = { path = "../../..", default-features = false, features = [
+    "port-riscv32",
+    "task-suspend",
+    "tickless-idle",
+] }
+freertos-qemu-test-common = { path = "../common" }
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

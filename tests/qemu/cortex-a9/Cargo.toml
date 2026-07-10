@@ -1,0 +1,26 @@
+[package]
+name = "freertos-qemu-cortex-a9"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "smoke"
+path = "src/bin/smoke.rs"
+
+[dependencies]
+freertos-in-rust = { path = "../../..", default-features = false, features = [
+    "port-cortex-a9",
+    "tickless-idle",
+    "generate-run-time-stats",
+] }
+freertos-qemu-test-common = { path = "../common" }
+
+[profile.dev]
+opt-level = "s"
+debug = true
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

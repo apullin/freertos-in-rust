@@ -22,7 +22,11 @@ use freertos_in_rust::port::{portYIELD_FROM_ISR, xPortIsInsideInterrupt};
 use freertos_in_rust::types::{pdFALSE, pdPASS, BaseType_t, StackType_t, TickType_t, UBaseType_t};
 use freertos_qemu_cortex_m4f::{finish, spawn_static, start_scheduler, tap, AlignedTaskBuffer};
 
+#[cfg(feature = "small-memory")]
+const STACK_WORDS: usize = 128;
+#[cfg(not(feature = "small-memory"))]
 const STACK_WORDS: usize = 256;
+const REPORTER_STACK_WORDS: usize = 256;
 const QUEUE_LENGTH: UBaseType_t = 1;
 const RECEIVER_PRIORITY: UBaseType_t = 3;
 const CONTROLLER_PRIORITY: UBaseType_t = 2;
@@ -66,7 +70,7 @@ static mut RECEIVER_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
 static mut RECEIVER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 static mut CONTROLLER_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
 static mut CONTROLLER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
-static mut REPORTER_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
+static mut REPORTER_STACK: [StackType_t; REPORTER_STACK_WORDS] = [0; REPORTER_STACK_WORDS];
 static mut REPORTER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 
 extern "C" fn timer_pended_callback(parameter: *mut c_void, value: u32) {
@@ -100,14 +104,18 @@ unsafe fn DefaultHandler(interrupt_number: i16) {
             core::ptr::addr_of!(value).cast::<c_void>(),
             &mut higher_priority_task_woken,
         );
-        let timer_result = xTimerPendFunctionCallFromISR(
-            timer_pended_callback,
-            core::ptr::addr_of!(CALLBACK_COOKIE)
-                .cast_mut()
-                .cast::<c_void>(),
-            CALLBACK_VALUE,
-            &mut higher_priority_task_woken,
-        );
+        // SAFETY: the callback and static cookie remain valid until the timer
+        // daemon runs, and IRQ0 uses an allowed FromISR priority.
+        let timer_result = unsafe {
+            xTimerPendFunctionCallFromISR(
+                timer_pended_callback,
+                core::ptr::addr_of!(CALLBACK_COOKIE)
+                    .cast_mut()
+                    .cast::<c_void>(),
+                CALLBACK_VALUE,
+                &mut higher_priority_task_woken,
+            )
+        };
 
         ISR_QUEUE_RESULT.store(queue_result as u32, Ordering::Relaxed);
         ISR_TIMER_RESULT.store(timer_result as u32, Ordering::Relaxed);
@@ -136,7 +144,7 @@ extern "C" fn receiver(_parameter: *mut c_void) {
     RECEIVER_RAN.store((result == pdPASS) as u32, Ordering::Release);
 
     loop {
-        vTaskDelay(1000);
+        unsafe { vTaskDelay(1000) };
     }
 }
 
@@ -158,7 +166,9 @@ extern "C" fn controller(_parameter: *mut c_void) {
 
     let queue = TEST_QUEUE.load(Ordering::Acquire);
 
-    vTaskSuspendAll();
+    // SAFETY: this controller is the sole owner of the suspend/resume pair;
+    // every path below reaches the matching resume without blocking.
+    unsafe { vTaskSuspendAll() };
     unsafe {
         // Reproduce the state immediately after prvLockQueue(). Interrupts stay
         // enabled so the application ISR can post while the scheduler is held.
@@ -186,15 +196,17 @@ extern "C" fn controller(_parameter: *mut c_void) {
         LOCKS_AFTER_UNLOCK.store(locks_reset as u32, Ordering::Relaxed);
     }
 
-    xTaskResumeAll();
+    // SAFETY: this exactly pairs the suspension above after the queue locks
+    // have been restored, and the controller relinquishes scheduler ownership.
+    let _ = unsafe { xTaskResumeAll() };
 
     loop {
-        vTaskDelay(1000);
+        unsafe { vTaskDelay(1000) };
     }
 }
 
 extern "C" fn reporter(_parameter: *mut c_void) {
-    vTaskDelay(REPORT_TICKS);
+    unsafe { vTaskDelay(REPORT_TICKS) };
 
     let isr_ran = ISR_RAN.load(Ordering::Acquire) != 0;
     let queue_result = ISR_QUEUE_RESULT.load(Ordering::Relaxed);
@@ -276,7 +288,7 @@ fn main() -> ! {
         spawn_static(
             b"report\0",
             REPORTER_STACK.as_mut_ptr(),
-            STACK_WORDS,
+            REPORTER_STACK_WORDS,
             core::ptr::addr_of_mut!(REPORTER_TCB),
             REPORTER_PRIORITY,
             reporter,

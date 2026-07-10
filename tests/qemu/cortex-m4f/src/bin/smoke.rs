@@ -10,10 +10,15 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use cortex_m_rt::entry;
-use freertos_in_rust::kernel::tasks::{vTaskDelay, xTaskGetTickCount};
+use freertos_in_rust::kernel::tasks::{
+    taskENTER_CRITICAL, taskEXIT_CRITICAL, vTaskDelay, xTaskGetTickCount,
+};
 use freertos_in_rust::types::{StackType_t, TickType_t};
 use freertos_qemu_cortex_m4f::{finish, spawn_static, start_scheduler, tap, AlignedTaskBuffer};
 
+#[cfg(feature = "small-memory")]
+const STACK_WORDS: usize = 128;
+#[cfg(not(feature = "small-memory"))]
 const STACK_WORDS: usize = 256;
 const WORKER_PRIORITY: u32 = 2;
 const REPORTER_PRIORITY: u32 = 3;
@@ -34,25 +39,37 @@ static mut REPORTER_STACK: [StackType_t; STACK_WORDS] = [0; STACK_WORDS];
 static mut REPORTER_TCB: AlignedTaskBuffer = AlignedTaskBuffer::new();
 
 fn record_worker(worker: u32, counter: &AtomicU32) {
-    counter.fetch_add(1, Ordering::Relaxed);
+    /* ARMv6-M supports atomic loads/stores but not atomic read-modify-write
+     * instructions. The scheduler critical section supplies the required
+     * single-core exclusion portably across every shared Cortex-M smoke test. */
+    taskENTER_CRITICAL();
+    counter.store(
+        counter.load(Ordering::Relaxed).wrapping_add(1),
+        Ordering::Relaxed,
+    );
 
-    let event_index = EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+    let event_index = EVENT_COUNT.load(Ordering::Relaxed);
+    EVENT_COUNT.store(event_index.wrapping_add(1), Ordering::Relaxed);
     if event_index < RECORDED_EVENTS {
-        EVENT_SEQUENCE.fetch_or(worker << (event_index * 2), Ordering::Relaxed);
+        EVENT_SEQUENCE.store(
+            EVENT_SEQUENCE.load(Ordering::Relaxed) | (worker << (event_index * 2)),
+            Ordering::Relaxed,
+        );
     }
+    taskEXIT_CRITICAL();
 }
 
 extern "C" fn worker_a(_parameter: *mut c_void) {
     loop {
         record_worker(1, &WORKER_A_RUNS);
-        vTaskDelay(2);
+        unsafe { vTaskDelay(2) };
     }
 }
 
 extern "C" fn worker_b(_parameter: *mut c_void) {
     loop {
         record_worker(2, &WORKER_B_RUNS);
-        vTaskDelay(2);
+        unsafe { vTaskDelay(2) };
     }
 }
 
@@ -80,7 +97,7 @@ fn recorded_workers_alternate(events: usize, sequence: u32) -> bool {
 extern "C" fn reporter(_parameter: *mut c_void) {
     let start_tick = xTaskGetTickCount();
     START_TICK.store(start_tick as u32, Ordering::Relaxed);
-    vTaskDelay(OBSERVATION_TICKS);
+    unsafe { vTaskDelay(OBSERVATION_TICKS) };
 
     let end_tick = xTaskGetTickCount();
     let elapsed = end_tick.wrapping_sub(START_TICK.load(Ordering::Relaxed) as TickType_t);

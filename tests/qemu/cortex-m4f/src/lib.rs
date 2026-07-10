@@ -105,7 +105,10 @@ pub fn finish(mut tap: Tap<SemihostingOutput>, planned_tests: usize) -> ! {
 
 /// Start the kernel after all test tasks have been created.
 pub fn start_scheduler() -> ! {
-    freertos_in_rust::start_scheduler()
+    // Safety: each test calls this once during single-threaded startup after
+    // installing every task and before enabling scheduler concurrency.
+    let context = unsafe { freertos_in_rust::sync::TaskContext::assume() };
+    freertos_in_rust::start_scheduler(context)
 }
 
 /// Assert that the kernel constants used by test setup retain their expected

@@ -228,7 +228,8 @@ extern "C" fn worker_b(_parameter: *mut c_void) {
 
 extern "C" fn reporter(_parameter: *mut c_void) {
     let start = xTaskGetTickCount();
-    vTaskDelay(OBSERVATION_TICKS);
+    // Safety: reporter is a live task and the scheduler is running.
+    unsafe { vTaskDelay(OBSERVATION_TICKS) };
     let elapsed = xTaskGetTickCount().wrapping_sub(start);
 
     let a_runs = WORKER_A_RUNS.load(Ordering::Acquire);

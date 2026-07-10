@@ -18,8 +18,8 @@ fn main() -> ! {
 
     unsafe {
         let raw = pvPortMalloc(37) as *mut u8;
-        let raw_aligned = !raw.is_null()
-            && (raw as usize % freertos_in_rust::port::portBYTE_ALIGNMENT) == 0;
+        let raw_aligned =
+            !raw.is_null() && (raw as usize % freertos_in_rust::port::portBYTE_ALIGNMENT) == 0;
         if !raw.is_null() {
             core::ptr::write_bytes(raw, 0xa5, 37);
             vPortFree(raw.cast());

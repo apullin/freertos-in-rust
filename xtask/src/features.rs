@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 const ALLOCATORS: [Option<&str>; 4] = [None, Some("heap-4"), Some("heap-5"), Some("alloc")];
 
-const CAPABILITIES: [&str; 25] = [
+const CAPABILITIES: [&str; 22] = [
     "list-data-integrity-check",
     "trace-facility",
     "stack-overflow-check",
@@ -22,18 +22,13 @@ const CAPABILITIES: [&str; 25] = [
     "stream-buffers",
     "queue-sets",
     "queue-registry",
-    "posix-errno",
     "pend-function-call",
     "application-task-tag",
     "thread-local-storage",
-    "critical-nesting-in-tcb",
     "idle-yield",
     "stats-formatting",
     "generate-run-time-stats",
     "tickless-idle",
-    // This is introduced when the integrated veneer has completed its soundness
-    // repair. Keeping it here makes the matrix pick it up automatically.
-    "safe-api",
 ];
 
 struct Port {

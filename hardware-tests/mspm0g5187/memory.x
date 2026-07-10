@@ -1,0 +1,8 @@
+/* MSPM0G5187: 128 KiB flash and 32 KiB SRAM. */
+MEMORY
+{
+    FLASH : ORIGIN = 0x00000000, LENGTH = 128K
+    RAM   : ORIGIN = 0x20200000, LENGTH = 32K
+}
+
+_stack_start = ORIGIN(RAM) + LENGTH(RAM);

@@ -1,4 +1,4 @@
-# FreeRusTOS test driver
+# FreeRTOS-in-Rust test driver
 
 `xtask` supplies stable, dependency-free entry points for the host, feature,
 and QEMU test matrices:

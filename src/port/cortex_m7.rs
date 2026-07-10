@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This is the Cortex-M7 port for FreeRusTOS.
+ * [AMENDMENT] This is the Cortex-M7 port for FreeRTOS-in-Rust.
  *
  * Per the FreeRTOS documentation:
  * "It is recommended to use the FreeRTOS ARM Cortex-M4F port located in

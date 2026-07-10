@@ -29,7 +29,9 @@ use core::ffi::c_void;
 use core::ptr;
 
 use crate::config::configTOTAL_HEAP_SIZE;
-use crate::kernel::tasks::{vTaskSuspendAll, xTaskResumeAll};
+use crate::kernel::tasks::{
+    taskENTER_CRITICAL, taskEXIT_CRITICAL, vTaskSuspendAll, xTaskResumeAll,
+};
 use crate::port::portBYTE_ALIGNMENT;
 
 // =============================================================================
@@ -82,7 +84,7 @@ impl BlockLink {
 
 /// The heap memory - a static byte array
 ///
-/// [AMENDMENT] In C, this can be placed in a specific section.
+/// \[AMENDMENT\] In C, this can be placed in a specific section.
 /// In Rust, you'd use #[link_section] if needed.
 static mut UC_HEAP: [u8; configTOTAL_HEAP_SIZE] = [0u8; configTOTAL_HEAP_SIZE];
 
@@ -242,7 +244,11 @@ unsafe fn prv_insert_block_into_free_list(px_block_to_insert: *mut BlockLink) {
 /// than needed.
 ///
 /// # Safety
-/// The returned pointer must be freed with [`vPortFree`].
+///
+/// The port's scheduler-suspension primitives must be initialized and usable
+/// from the current task context. A non-null result designates exactly
+/// `x_wanted_size` writable, uninitialized bytes and must be passed exactly
+/// once to [`vPortFree`] when no access can remain.
 pub unsafe fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void {
     let mut pv_return: *mut c_void = ptr::null_mut();
     let mut x_wanted_size = x_wanted_size;
@@ -336,7 +342,10 @@ pub unsafe fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void {
 /// Returns the block to the free list and coalesces with adjacent free blocks.
 ///
 /// # Safety
-/// `pv` must have been returned by [`pvPortMalloc`] and not yet freed.
+///
+/// Apart from null, `pv` must be the live pointer returned by this heap's
+/// [`pvPortMalloc`] or [`pvPortCalloc`], must not have been freed already, and
+/// no pointer derived from the allocation may be accessed after this call.
 pub unsafe fn vPortFree(pv: *mut c_void) {
     if pv.is_null() {
         return;
@@ -391,7 +400,13 @@ pub fn xPortResetHeapMinimumEverFreeHeapSize() {
     }
 }
 
-/// Allocate and zero memory
+/// Allocate and zero memory.
+///
+/// # Safety
+///
+/// The same scheduler/port requirements as [`pvPortMalloc`] apply. A non-null
+/// result owns exactly `x_num * x_size` writable zeroed bytes and must be
+/// passed exactly once to [`vPortFree`].
 pub unsafe fn pvPortCalloc(x_num: usize, x_size: usize) -> *mut c_void {
     let total = match x_num.checked_mul(x_size) {
         Some(t) => t,
@@ -405,8 +420,17 @@ pub unsafe fn pvPortCalloc(x_num: usize, x_size: usize) -> *mut c_void {
     pv
 }
 
-/// Get detailed heap statistics
-pub fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
+/// Get detailed heap statistics.
+///
+/// # Safety
+///
+/// `px_heap_stats` must be non-null, aligned, and valid for one complete
+/// `HeapStats_t` write, with no conflicting access for the duration.
+pub unsafe fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
+    if px_heap_stats.is_null() {
+        return;
+    }
+
     let mut x_blocks: usize = 0;
     let mut x_max_size: usize = 0;
     let mut x_min_size: usize = usize::MAX;
@@ -436,13 +460,17 @@ pub fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
         xTaskResumeAll();
 
         (*px_heap_stats).xSizeOfLargestFreeBlockInBytes = x_max_size;
-        (*px_heap_stats).xSizeOfSmallestFreeBlockInBytes =
-            if x_blocks > 0 { x_min_size } else { 0 };
+        (*px_heap_stats).xSizeOfSmallestFreeBlockInBytes = x_min_size;
         (*px_heap_stats).xNumberOfFreeBlocks = x_blocks;
+
+        /* Snapshot counters atomically with respect to allocator operations,
+         * matching the critical section in upstream heap_4.c. */
+        taskENTER_CRITICAL();
         (*px_heap_stats).xAvailableHeapSpaceInBytes = X_FREE_BYTES_REMAINING;
         (*px_heap_stats).xNumberOfSuccessfulAllocations = X_NUMBER_OF_SUCCESSFUL_ALLOCATIONS;
         (*px_heap_stats).xNumberOfSuccessfulFrees = X_NUMBER_OF_SUCCESSFUL_FREES;
         (*px_heap_stats).xMinimumEverFreeBytesRemaining = X_MINIMUM_EVER_FREE_BYTES_REMAINING;
+        taskEXIT_CRITICAL();
     }
 }
 
@@ -451,8 +479,14 @@ pub fn vPortInitialiseBlocks() {
     // No-op - heap initializes on first pvPortMalloc call
 }
 
-/// Reset heap state (for scheduler restart)
-pub fn vPortHeapResetState() {
+/// Reset heap state for a scheduler restart.
+///
+/// # Safety
+///
+/// There must be no live allocations, no allocator operation may be in
+/// progress, and the scheduler must be stopped. Every pointer previously
+/// returned by this heap becomes invalid for allocator operations.
+pub unsafe fn vPortHeapResetState() {
     unsafe {
         PX_END = ptr::null_mut();
         X_FREE_BYTES_REMAINING = 0;
@@ -470,7 +504,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 /// Global allocator that wraps FreeRTOS heap_4
 ///
-/// [AMENDMENT] This allows Rust's `alloc` crate (Vec, Box, etc.) to use
+/// \[AMENDMENT\] This allows Rust's `alloc` crate (Vec, Box, etc.) to use
 /// the FreeRTOS heap_4 allocator. Applications should add:
 ///
 /// ```ignore
@@ -480,27 +514,71 @@ use core::alloc::{GlobalAlloc, Layout};
 /// ```
 pub struct FreeRtosAllocator;
 
+const GLOBAL_ALLOC_HEADER_SIZE: usize = core::mem::size_of::<*mut u8>();
+
+/// Allocate a Rust `Layout` from heap_4 while retaining the original pointer
+/// immediately before the aligned result for `dealloc`.
+///
+/// \[AMENDMENT\] `pvPortMalloc` only promises `portBYTE_ALIGNMENT`. Rust's
+/// `GlobalAlloc` contract permits callers to request a larger alignment, so an
+/// over-allocation and an unaligned metadata write are required here.
+unsafe fn prv_alloc_layout(layout: Layout) -> *mut u8 {
+    let alignment = layout.align().max(portBYTE_ALIGNMENT);
+    let allocation_size = match layout
+        .size()
+        .checked_add(GLOBAL_ALLOC_HEADER_SIZE)
+        .and_then(|size| size.checked_add(alignment - 1))
+    {
+        Some(size) => size,
+        None => return ptr::null_mut(),
+    };
+
+    let raw = pvPortMalloc(allocation_size) as *mut u8;
+    if raw.is_null() {
+        return ptr::null_mut();
+    }
+
+    let unaligned_address = raw.add(GLOBAL_ALLOC_HEADER_SIZE) as usize;
+    let aligned_address = match unaligned_address.checked_add(alignment - 1) {
+        Some(address) => address & !(alignment - 1),
+        None => {
+            vPortFree(raw as *mut c_void);
+            return ptr::null_mut();
+        }
+    };
+    let aligned = aligned_address as *mut u8;
+
+    ptr::write_unaligned(aligned.sub(GLOBAL_ALLOC_HEADER_SIZE) as *mut *mut u8, raw);
+    aligned
+}
+
+unsafe fn prv_free_layout(ptr: *mut u8) {
+    if !ptr.is_null() {
+        let raw = ptr::read_unaligned(ptr.sub(GLOBAL_ALLOC_HEADER_SIZE) as *const *mut u8);
+        vPortFree(raw as *mut c_void);
+    }
+}
+
 unsafe impl GlobalAlloc for FreeRtosAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // heap_4 already aligns to portBYTE_ALIGNMENT (8 bytes)
-        // If larger alignment is requested, we may waste some space
-        // For now, just allocate the requested size
-        pvPortMalloc(layout.size()) as *mut u8
+        prv_alloc_layout(layout)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        vPortFree(ptr as *mut c_void);
+        prv_free_layout(ptr);
     }
 
-    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // heap_4 doesn't have realloc, so allocate new, copy, free old
-        let new_ptr = pvPortMalloc(new_size) as *mut u8;
+        let new_layout = match Layout::from_size_align(new_size, layout.align()) {
+            Ok(layout) => layout,
+            Err(_) => return ptr::null_mut(),
+        };
+        let new_ptr = prv_alloc_layout(new_layout);
         if !new_ptr.is_null() && !ptr.is_null() {
-            // Copy old data (use smaller of old and new size)
-            // Note: We don't know the old size exactly, but layout should have it
-            let copy_size = _layout.size().min(new_size);
+            let copy_size = layout.size().min(new_size);
             ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
-            vPortFree(ptr as *mut c_void);
+            prv_free_layout(ptr);
         }
         new_ptr
     }

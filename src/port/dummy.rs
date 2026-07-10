@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This is the dummy port for FreeRusTOS.
+ * [AMENDMENT] This is the dummy port for FreeRTOS-in-Rust.
  * It provides stub implementations that compile but panic at runtime.
  * Used during early development to validate kernel translation.
  *
@@ -38,12 +38,12 @@ pub const portBYTE_ALIGNMENT: usize = 8;
 // =============================================================================
 
 /// Critical section nesting counter
-/// [AMENDMENT] Using atomic for thread-safety during host testing
+/// \[AMENDMENT\] Using atomic for thread-safety during host testing
 static CRITICAL_NESTING: AtomicUsize = AtomicUsize::new(0);
 
 /// Enter a critical section (disable interrupts)
 ///
-/// [AMENDMENT] In the dummy port, this just increments a counter.
+/// \[AMENDMENT\] In the dummy port, this just increments a counter.
 /// A real port would disable interrupts here.
 #[inline(always)]
 pub fn portENTER_CRITICAL() {
@@ -53,7 +53,7 @@ pub fn portENTER_CRITICAL() {
 
 /// Exit a critical section (potentially re-enable interrupts)
 ///
-/// [AMENDMENT] In the dummy port, this decrements the counter.
+/// \[AMENDMENT\] In the dummy port, this decrements the counter.
 /// A real port would re-enable interrupts when nesting reaches zero.
 #[inline(always)]
 pub fn portEXIT_CRITICAL() {
@@ -65,7 +65,7 @@ pub fn portEXIT_CRITICAL() {
 
 /// Disable interrupts
 ///
-/// [AMENDMENT] Dummy implementation - no-op.
+/// \[AMENDMENT\] Dummy implementation - no-op.
 /// A real port would disable interrupts at the hardware level.
 #[inline(always)]
 pub fn portDISABLE_INTERRUPTS() {
@@ -75,7 +75,7 @@ pub fn portDISABLE_INTERRUPTS() {
 
 /// Enable interrupts
 ///
-/// [AMENDMENT] Dummy implementation - no-op.
+/// \[AMENDMENT\] Dummy implementation - no-op.
 /// A real port would enable interrupts at the hardware level.
 #[inline(always)]
 pub fn portENABLE_INTERRUPTS() {
@@ -104,7 +104,7 @@ pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(_uxSavedInterruptStatus: UBaseType_t) {
 
 /// Trigger a context switch (yield to scheduler)
 ///
-/// [AMENDMENT] Dummy implementation panics - cannot actually context switch.
+/// \[AMENDMENT\] Dummy implementation panics - cannot actually context switch.
 #[inline(always)]
 pub fn portYIELD() {
     // In a real port, this would trigger PendSV or equivalent
@@ -135,7 +135,7 @@ pub fn portEND_SWITCHING_ISR(xSwitchRequired: BaseType_t) {
 
 /// Start the scheduler
 ///
-/// [AMENDMENT] Dummy implementation panics - cannot actually start scheduler.
+/// \[AMENDMENT\] Dummy implementation panics - cannot actually start scheduler.
 /// A real port would:
 /// 1. Set up the tick timer
 /// 2. Initialize the first task's stack
@@ -146,7 +146,7 @@ pub fn xPortStartScheduler() -> BaseType_t {
 
 /// End the scheduler
 ///
-/// [AMENDMENT] Most ports don't actually support stopping the scheduler.
+/// \[AMENDMENT\] Most ports don't actually support stopping the scheduler.
 pub fn vPortEndScheduler() {
     panic!("vPortEndScheduler called on dummy port");
 }
@@ -167,7 +167,7 @@ pub fn vPortEndScheduler() {
 /// # Returns
 /// Pointer to the new top of stack after initialization
 ///
-/// [AMENDMENT] Dummy implementation returns the input pointer unchanged.
+/// \[AMENDMENT\] Dummy implementation returns the input pointer unchanged.
 /// A real port would set up:
 /// - Initial register values
 /// - Return address (task function)
@@ -189,7 +189,7 @@ pub fn pxPortInitialiseStack(
 
 /// Set up the tick timer interrupt
 ///
-/// [AMENDMENT] Dummy implementation - no-op.
+/// \[AMENDMENT\] Dummy implementation - no-op.
 /// A real port would configure the SysTick or equivalent timer.
 pub fn vPortSetupTimerInterrupt() {
     // Dummy: no-op
@@ -202,7 +202,7 @@ pub fn vPortSetupTimerInterrupt() {
 
 /// Check if currently executing in an interrupt context
 ///
-/// [AMENDMENT] Dummy implementation always returns false (not in ISR).
+/// \[AMENDMENT\] Dummy implementation always returns false (not in ISR).
 #[inline(always)]
 pub fn xPortIsInsideInterrupt() -> BaseType_t {
     // Dummy: always report not in interrupt
@@ -218,7 +218,7 @@ pub fn portNOP() {
 
 /// Memory barrier
 ///
-/// [AMENDMENT] Using compiler fence as portable memory barrier.
+/// \[AMENDMENT\] Using compiler fence as portable memory barrier.
 #[inline(always)]
 pub fn portMEMORY_BARRIER() {
     core::sync::atomic::compiler_fence(Ordering::SeqCst);

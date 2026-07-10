@@ -1,5 +1,5 @@
 /*
- * ARM Cortex-A9 Startup Code for FreeRusTOS Demo
+ * ARM Cortex-A9 Startup Code for FreeRTOS-in-Rust Demo
  *
  * This file provides:
  * - Exception vector table

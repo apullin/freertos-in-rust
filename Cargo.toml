@@ -1,4 +1,4 @@
-# FreeRusTOS - FreeRTOS Kernel ported to Rust
+# FreeRTOS-in-Rust - FreeRTOS Kernel ported to Rust
 #
 # SPDX-License-Identifier: MIT
 #
@@ -7,17 +7,38 @@
 
 [package]
 name = "freertos-in-rust"
-version = "0.1.2"
+version = "0.3.0"
 edition = "2021"
-authors = ["FreeRusTOS Contributors"]
-description = "FreeRTOS kernel ported to Rust - no_std, no C FFI"
+authors = ["FreeRTOS-in-Rust Contributors"]
+description = "Pure-Rust no_std FreeRTOS kernel translation with safe Rust APIs"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/apullin/freertos-in-rust"
+documentation = "https://docs.rs/freertos-in-rust"
 keywords = ["rtos", "embedded", "no-std", "freertos"]
 categories = ["embedded", "no-std", "concurrency"]
+exclude = [
+    ".agents/",
+    ".claude/",
+    ".codex/",
+    ".github/",
+    "**/.DS_Store",
+    "AGENTS.md",
+    "Cargo.toml.orig",
+    "EXECPLAN.md",
+    "FreeRTOS-Kernel/",
+    "hardware-tests/",
+    "QUESTIONS.md",
+    "demo/",
+    "tests/",
+    "upstream/",
+    "xtask/",
+]
 
 [features]
-default = []
+# Compile-only default. Production targets must disable default features and
+# select exactly one hardware port.
+default = ["port-dummy"]
 
 # Port selection (exactly one should be enabled)
 # Each port specifies its arch width and tick width
@@ -29,13 +50,13 @@ port-cortex-m7 = ["dep:cortex-m", "dep:cortex-m-rt", "arch-32bit", "tick-32bit"]
 port-riscv32 = ["dep:riscv", "dep:riscv-rt", "arch-32bit", "tick-32bit"]
 port-cortex-a9 = ["arch-32bit", "tick-32bit"]
 port-cortex-a53 = ["arch-64bit", "tick-64bit"]
+port-test = ["std", "arch-32bit", "tick-32bit"]  # Deterministic host test port
 
 # Architecture width for BaseType_t, UBaseType_t, StackType_t
 arch-32bit = []
 arch-64bit = []
 
-# Tick counter width for TickType_t
-tick-16bit = []
+# Tick counter width for TickType_t (selected by each supported port)
 tick-32bit = []
 tick-64bit = []
 
@@ -44,8 +65,35 @@ heap-4 = []  # FreeRTOS heap_4: first-fit with coalescing, single contiguous reg
 heap-5 = []  # FreeRTOS heap_5: like heap_4 but supports multiple non-contiguous regions (PSRAM, etc.)
 alloc = []   # Wrap Rust's #[global_allocator] instead
 
-# Testing support (enables std for host tests)
-std = ["alloc"]
+# Testing support.  Allocation is selected independently so every allocator
+# configuration, including static-only operation, can be exercised on the host.
+std = []
+
+# Capability-only test matrix.  This deliberately selects no port,
+# architecture width, tick width, allocator, user configuration, or SMP mode.
+all-kernel-features = [
+    "list-data-integrity-check",
+    "trace-facility",
+    "stack-overflow-check",
+    "record-stack-high-address",
+    "task-delete",
+    "task-suspend",
+    "abort-delay",
+    "task-priority-set",
+    "stack-high-water-mark",
+    "use-mutexes",
+    "timers",
+    "stream-buffers",
+    "queue-sets",
+    "queue-registry",
+    "pend-function-call",
+    "application-task-tag",
+    "thread-local-storage",
+    "idle-yield",
+    "stats-formatting",
+    "generate-run-time-stats",
+    "tickless-idle",
+]
 
 # Debug/diagnostic features
 list-data-integrity-check = []  # configUSE_LIST_DATA_INTEGRITY_CHECK_BYTES
@@ -69,11 +117,9 @@ timers = []                   # configUSE_TIMERS
 stream-buffers = []           # configUSE_STREAM_BUFFERS
 queue-sets = []               # configUSE_QUEUE_SETS
 queue-registry = []           # configQUEUE_REGISTRY_SIZE > 0
-posix-errno = []              # configUSE_POSIX_ERRNO
 pend-function-call = []       # INCLUDE_xTimerPendFunctionCall
 application-task-tag = []     # configUSE_APPLICATION_TASK_TAG
 thread-local-storage = []     # configNUM_THREAD_LOCAL_STORAGE_POINTERS
-critical-nesting-in-tcb = []  # portCRITICAL_NESTING_IN_TCB
 idle-yield = []               # Yield in idle task
 stats-formatting = []         # configUSE_STATS_FORMATTING_FUNCTIONS
 generate-run-time-stats = []  # configGENERATE_RUN_TIME_STATS
@@ -96,10 +142,5 @@ riscv-rt = { version = "0.13", optional = true }
 
 # Exclude the upstream C source from published crate
 [package.metadata.docs.rs]
-all-features = true
-
-# Exclude upstream reference sources from package
-exclude = [
-    "FreeRTOS-Kernel/",
-    "upstream/",
-]
+no-default-features = true
+features = ["port-dummy", "heap-4", "all-kernel-features"]

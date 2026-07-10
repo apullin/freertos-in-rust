@@ -93,22 +93,22 @@ mod integrity {
     use super::*;
 
     #[inline(always)]
-    pub fn listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(_pxItem: &mut ListItem_t) {}
+    pub unsafe fn listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(_pxItem: *mut ListItem_t) {}
 
     #[inline(always)]
-    pub fn listSET_SECOND_LIST_ITEM_INTEGRITY_CHECK_VALUE(_pxItem: &mut ListItem_t) {}
+    pub unsafe fn listSET_SECOND_LIST_ITEM_INTEGRITY_CHECK_VALUE(_pxItem: *mut ListItem_t) {}
 
     #[inline(always)]
-    pub fn listSET_LIST_INTEGRITY_CHECK_1_VALUE(_pxList: &mut List_t) {}
+    pub unsafe fn listSET_LIST_INTEGRITY_CHECK_1_VALUE(_pxList: *mut List_t) {}
 
     #[inline(always)]
-    pub fn listSET_LIST_INTEGRITY_CHECK_2_VALUE(_pxList: &mut List_t) {}
+    pub unsafe fn listSET_LIST_INTEGRITY_CHECK_2_VALUE(_pxList: *mut List_t) {}
 
     #[inline(always)]
-    pub fn listTEST_LIST_ITEM_INTEGRITY(_pxItem: &ListItem_t) {}
+    pub unsafe fn listTEST_LIST_ITEM_INTEGRITY(_pxItem: *const ListItem_t) {}
 
     #[inline(always)]
-    pub fn listTEST_LIST_INTEGRITY(_pxList: &List_t) {}
+    pub unsafe fn listTEST_LIST_INTEGRITY(_pxList: *const List_t) {}
 }
 
 #[cfg(feature = "list-data-integrity-check")]
@@ -117,38 +117,38 @@ mod integrity {
     use crate::configASSERT;
 
     #[inline(always)]
-    pub fn listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxItem: &mut ListItem_t) {
-        pxItem.xListItemIntegrityValue1 = pdINTEGRITY_CHECK_VALUE;
+    pub unsafe fn listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxItem: *mut ListItem_t) {
+        (*pxItem).xListItemIntegrityValue1 = pdINTEGRITY_CHECK_VALUE;
     }
 
     #[inline(always)]
-    pub fn listSET_SECOND_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxItem: &mut ListItem_t) {
-        pxItem.xListItemIntegrityValue2 = pdINTEGRITY_CHECK_VALUE;
+    pub unsafe fn listSET_SECOND_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxItem: *mut ListItem_t) {
+        (*pxItem).xListItemIntegrityValue2 = pdINTEGRITY_CHECK_VALUE;
     }
 
     #[inline(always)]
-    pub fn listSET_LIST_INTEGRITY_CHECK_1_VALUE(pxList: &mut List_t) {
-        pxList.xListIntegrityValue1 = pdINTEGRITY_CHECK_VALUE;
+    pub unsafe fn listSET_LIST_INTEGRITY_CHECK_1_VALUE(pxList: *mut List_t) {
+        (*pxList).xListIntegrityValue1 = pdINTEGRITY_CHECK_VALUE;
     }
 
     #[inline(always)]
-    pub fn listSET_LIST_INTEGRITY_CHECK_2_VALUE(pxList: &mut List_t) {
-        pxList.xListIntegrityValue2 = pdINTEGRITY_CHECK_VALUE;
+    pub unsafe fn listSET_LIST_INTEGRITY_CHECK_2_VALUE(pxList: *mut List_t) {
+        (*pxList).xListIntegrityValue2 = pdINTEGRITY_CHECK_VALUE;
     }
 
     #[inline(always)]
-    pub fn listTEST_LIST_ITEM_INTEGRITY(pxItem: &ListItem_t) {
+    pub unsafe fn listTEST_LIST_ITEM_INTEGRITY(pxItem: *const ListItem_t) {
         configASSERT(
-            pxItem.xListItemIntegrityValue1 == pdINTEGRITY_CHECK_VALUE
-                && pxItem.xListItemIntegrityValue2 == pdINTEGRITY_CHECK_VALUE,
+            (*pxItem).xListItemIntegrityValue1 == pdINTEGRITY_CHECK_VALUE
+                && (*pxItem).xListItemIntegrityValue2 == pdINTEGRITY_CHECK_VALUE,
         );
     }
 
     #[inline(always)]
-    pub fn listTEST_LIST_INTEGRITY(pxList: &List_t) {
+    pub unsafe fn listTEST_LIST_INTEGRITY(pxList: *const List_t) {
         configASSERT(
-            pxList.xListIntegrityValue1 == pdINTEGRITY_CHECK_VALUE
-                && pxList.xListIntegrityValue2 == pdINTEGRITY_CHECK_VALUE,
+            (*pxList).xListIntegrityValue1 == pdINTEGRITY_CHECK_VALUE
+                && (*pxList).xListIntegrityValue2 == pdINTEGRITY_CHECK_VALUE,
         );
     }
 }
@@ -213,7 +213,7 @@ pub struct ListItem_t {
 impl ListItem_t {
     /// Create a new uninitialized ListItem_t
     ///
-    /// [AMENDMENT] Creates a zeroed list item. Use vListInitialiseItem for proper initialization.
+    /// \[AMENDMENT\] Creates a zeroed list item. Use vListInitialiseItem for proper initialization.
     pub const fn new() -> Self {
         ListItem_t {
             #[cfg(feature = "list-data-integrity-check")]
@@ -233,13 +233,13 @@ impl ListItem_t {
 // For now, MiniListItem_t is the same as ListItem_t (configUSE_MINI_LIST_ITEM = 0)
 /// Mini list item (currently same as ListItem_t)
 ///
-/// [AMENDMENT] TODO: Implement proper MiniListItem_t optimization.
+/// \[AMENDMENT\] TODO: Implement proper MiniListItem_t optimization.
 /// When configUSE_MINI_LIST_ITEM is enabled, this would be a smaller struct
 /// without pvOwner and pxContainer fields.
 pub type MiniListItem_t = ListItem_t;
 
 /// Static list item type for static allocation
-/// [AMENDMENT] Same size as ListItem_t for static allocation compatibility
+/// \[AMENDMENT\] Same size as ListItem_t for static allocation compatibility
 pub type StaticListItem_t = ListItem_t;
 
 // =============================================================================
@@ -281,7 +281,7 @@ pub struct List_t {
 impl List_t {
     /// Create a new uninitialized List_t
     ///
-    /// [AMENDMENT] Creates a zeroed list. Use vListInitialise for proper initialization.
+    /// \[AMENDMENT\] Creates a zeroed list. Use vListInitialise for proper initialization.
     pub const fn new() -> Self {
         List_t {
             #[cfg(feature = "list-data-integrity-check")]
@@ -307,7 +307,13 @@ impl List_t {
  * \ingroup LinkedList
  */
 
-/// Set the owner of a list item
+/// Set the owner of a list item.
+///
+/// # Safety
+///
+/// `pxListItem` must be non-null, aligned, and uniquely writable as a live
+/// [`ListItem_t`]. `pxOwner` is stored opaquely and must satisfy every later
+/// use made by the list's caller.
 #[inline(always)]
 pub unsafe fn listSET_LIST_ITEM_OWNER(
     pxListItem: *mut ListItem_t,
@@ -324,7 +330,13 @@ pub unsafe fn listSET_LIST_ITEM_OWNER(
  * \ingroup LinkedList
  */
 
-/// Get the owner of a list item
+/// Get the owner of a list item.
+///
+/// # Safety
+///
+/// `pxListItem` must be non-null, aligned, and readable as a live
+/// [`ListItem_t`]. The returned pointer is opaque and inherits the lifetime
+/// and validity contract established when the owner was installed.
 #[inline(always)]
 pub unsafe fn listGET_LIST_ITEM_OWNER(pxListItem: *const ListItem_t) -> *mut core::ffi::c_void {
     (*pxListItem).pvOwner
@@ -338,7 +350,13 @@ pub unsafe fn listGET_LIST_ITEM_OWNER(pxListItem: *const ListItem_t) -> *mut cor
  * \ingroup LinkedList
  */
 
-/// Set the value of a list item
+/// Set the value of a list item.
+///
+/// # Safety
+///
+/// `pxListItem` must be non-null, aligned, and uniquely writable as a live
+/// [`ListItem_t`]. The caller must preserve any ordering invariant of the list
+/// containing the item.
 #[inline(always)]
 pub unsafe fn listSET_LIST_ITEM_VALUE(pxListItem: *mut ListItem_t, xValue: TickType_t) {
     (*pxListItem).xItemValue = xValue;
@@ -353,7 +371,12 @@ pub unsafe fn listSET_LIST_ITEM_VALUE(pxListItem: *mut ListItem_t, xValue: TickT
  * \ingroup LinkedList
  */
 
-/// Get the value of a list item
+/// Get the value of a list item.
+///
+/// # Safety
+///
+/// `pxListItem` must be non-null, aligned, and readable as a live
+/// [`ListItem_t`].
 #[inline(always)]
 pub unsafe fn listGET_LIST_ITEM_VALUE(pxListItem: *const ListItem_t) -> TickType_t {
     (*pxListItem).xItemValue
@@ -367,7 +390,12 @@ pub unsafe fn listGET_LIST_ITEM_VALUE(pxListItem: *const ListItem_t) -> TickType
  * \ingroup LinkedList
  */
 
-/// Get the value of the head entry
+/// Get the value of the head entry.
+///
+/// # Safety
+///
+/// `pxList` must be non-null, aligned, and point to a live initialized list.
+/// Its link structure must remain valid and stable for this read.
 #[inline(always)]
 pub unsafe fn listGET_ITEM_VALUE_OF_HEAD_ENTRY(pxList: *const List_t) -> TickType_t {
     (*(*pxList).xListEnd.pxNext).xItemValue
@@ -380,7 +408,13 @@ pub unsafe fn listGET_ITEM_VALUE_OF_HEAD_ENTRY(pxList: *const List_t) -> TickTyp
  * \ingroup LinkedList
  */
 
-/// Get the head entry of a list
+/// Get the head entry of a list.
+///
+/// # Safety
+///
+/// `pxList` must be non-null, aligned, and point to a live initialized list.
+/// The returned pointer is valid only while that list remains live, unmoved,
+/// and is not concurrently mutated without kernel exclusion.
 #[inline(always)]
 pub unsafe fn listGET_HEAD_ENTRY(pxList: *const List_t) -> *mut ListItem_t {
     (*pxList).xListEnd.pxNext
@@ -393,7 +427,12 @@ pub unsafe fn listGET_HEAD_ENTRY(pxList: *const List_t) -> *mut ListItem_t {
  * \ingroup LinkedList
  */
 
-/// Get the next item in the list
+/// Get the next item in the list.
+///
+/// # Safety
+///
+/// `pxListItem` must be non-null, aligned, and part of a valid initialized
+/// list link structure. The returned pointer inherits that list's lifetime.
 #[inline(always)]
 pub unsafe fn listGET_NEXT(pxListItem: *const ListItem_t) -> *mut ListItem_t {
     (*pxListItem).pxNext
@@ -406,10 +445,16 @@ pub unsafe fn listGET_NEXT(pxListItem: *const ListItem_t) -> *mut ListItem_t {
  * \ingroup LinkedList
  */
 
-/// Get the end marker of a list
+/// Get the end marker of a list.
+///
+/// # Safety
+///
+/// `pxList` must be non-null, aligned, and point to a live initialized list.
+/// The returned prefix-layout pointer must not be used to access fields that
+/// are absent from [`MiniListItem_t`].
 #[inline(always)]
 pub unsafe fn listGET_END_MARKER(pxList: *const List_t) -> *const ListItem_t {
-    &(*pxList).xListEnd as *const MiniListItem_t as *const ListItem_t
+    core::ptr::addr_of!((*pxList).xListEnd).cast::<ListItem_t>()
 }
 
 /*
@@ -420,7 +465,12 @@ pub unsafe fn listGET_END_MARKER(pxList: *const List_t) -> *const ListItem_t {
  * \ingroup LinkedList
  */
 
-/// Check if a list is empty
+/// Check if a list is empty.
+///
+/// # Safety
+///
+/// `pxList` must be non-null, aligned, and readable as a live [`List_t`]. The
+/// caller must synchronize this read with mutations of the list.
 #[inline(always)]
 pub unsafe fn listLIST_IS_EMPTY(pxList: *const List_t) -> BaseType_t {
     if (*pxList).uxNumberOfItems == 0 {
@@ -434,7 +484,12 @@ pub unsafe fn listLIST_IS_EMPTY(pxList: *const List_t) -> BaseType_t {
  * Access macro to return the number of items in the list.
  */
 
-/// Get the current length of a list
+/// Get the current length of a list.
+///
+/// # Safety
+///
+/// `pxList` must be non-null, aligned, and readable as a live [`List_t`]. The
+/// caller must synchronize this read with mutations of the list.
 #[inline(always)]
 pub unsafe fn listCURRENT_LIST_LENGTH(pxList: *const List_t) -> UBaseType_t {
     (*pxList).uxNumberOfItems
@@ -448,7 +503,13 @@ pub unsafe fn listCURRENT_LIST_LENGTH(pxList: *const List_t) -> UBaseType_t {
  * \ingroup LinkedList
  */
 
-/// Get the owner of the head entry
+/// Get the owner of the head entry.
+///
+/// # Safety
+///
+/// `pxList` must be non-null, aligned, initialized, and nonempty, with valid
+/// links and an owner pointer installed on its head item. The returned owner
+/// is opaque and inherits its separately established lifetime contract.
 #[inline(always)]
 pub unsafe fn listGET_OWNER_OF_HEAD_ENTRY(pxList: *const List_t) -> *mut core::ffi::c_void {
     (*(*pxList).xListEnd.pxNext).pvOwner
@@ -464,7 +525,13 @@ pub unsafe fn listGET_OWNER_OF_HEAD_ENTRY(pxList: *const List_t) -> *mut core::f
  * @return pdTRUE if the list item is in the list, otherwise pdFALSE.
  */
 
-/// Check if a list item is contained within a list
+/// Check if a list item is contained within a list.
+///
+/// # Safety
+///
+/// `pxListItem` must be non-null, aligned, and readable as a live
+/// [`ListItem_t`]. `pxList` may be null for the FreeRTOS "not contained"
+/// query; otherwise it must identify the list whose address is being tested.
 #[inline(always)]
 pub unsafe fn listIS_CONTAINED_WITHIN(
     pxList: *const List_t,
@@ -484,7 +551,13 @@ pub unsafe fn listIS_CONTAINED_WITHIN(
  * @return A pointer to the List_t object that references the pxListItem
  */
 
-/// Get the container of a list item
+/// Get the container of a list item.
+///
+/// # Safety
+///
+/// `pxListItem` must be non-null, aligned, and readable as a live
+/// [`ListItem_t`]. A non-null returned pointer is valid only while the item
+/// remains linked into that live, unmoved list.
 #[inline(always)]
 pub unsafe fn listLIST_ITEM_CONTAINER(pxListItem: *const ListItem_t) -> *mut List_t {
     (*pxListItem).pxContainer
@@ -496,7 +569,12 @@ pub unsafe fn listLIST_ITEM_CONTAINER(pxListItem: *const ListItem_t) -> *mut Lis
  * function.
  */
 
-/// Check if a list has been initialized
+/// Check if a list has been initialized.
+///
+/// # Safety
+///
+/// `pxList` must be non-null, aligned, and readable as allocated [`List_t`]
+/// storage. Its fields must be initialized enough for reading the end marker.
 #[inline(always)]
 pub unsafe fn listLIST_IS_INITIALISED(pxList: *const List_t) -> BaseType_t {
     if (*pxList).xListEnd.xItemValue == portMAX_DELAY {
@@ -533,8 +611,15 @@ pub unsafe fn listLIST_IS_INITIALISED(pxList: *const List_t) -> BaseType_t {
 
 /// Get owner of next entry and advance the index
 ///
-/// [AMENDMENT] This is a macro in C that modifies pxTCB. In Rust, we return
+/// \[AMENDMENT\] This is a macro in C that modifies pxTCB. In Rust, we return
 /// the owner and let the caller assign it.
+///
+/// # Safety
+///
+/// `pxList` must be non-null, aligned, uniquely writable, initialized, and
+/// nonempty. Every link and item owner must be valid. The caller must exclude
+/// concurrent list mutation, and the returned opaque owner must not outlive
+/// the object whose pointer was installed in the item.
 #[inline(always)]
 pub unsafe fn listGET_OWNER_OF_NEXT_ENTRY(pxList: *mut List_t) -> *mut core::ffi::c_void {
     let pxConstList = pxList;
@@ -542,8 +627,6 @@ pub unsafe fn listGET_OWNER_OF_NEXT_ENTRY(pxList: *mut List_t) -> *mut core::ffi
     /* we don't return the marker used at the end of the list.  */
     (*pxConstList).pxIndex = (*(*pxConstList).pxIndex).pxNext;
     if (*pxConstList).pxIndex as *const ListItem_t == listGET_END_MARKER(pxConstList) {
-        (*pxConstList).pxIndex = (*(*pxConstList).xListEnd.pxNext).pxNext;
-        // [AMENDMENT] Fixed: should be xListEnd.pxNext, not xListEnd.pxNext.pxNext
         (*pxConstList).pxIndex = (*pxConstList).xListEnd.pxNext;
     }
     (*(*pxConstList).pxIndex).pvOwner
@@ -569,12 +652,22 @@ pub unsafe fn listGET_OWNER_OF_NEXT_ENTRY(pxList: *mut List_t) -> *mut core::ffi
 pub unsafe fn vListInitialise(pxList: *mut List_t) {
     traceENTER_vListInitialise(pxList);
 
+    /* Write known values into the list if
+     * configUSE_LIST_DATA_INTEGRITY_CHECK_BYTES is set to 1. */
+    /* [AMENDMENT] Initialise every field through raw pointers before the
+     * self-referential links are formed. The helpers deliberately retain a
+     * raw-pointer interface: forming a later Rust reference to xListEnd or
+     * List_t could invalidate the intrusive pointers retained by the list. */
+    let pxListEnd = core::ptr::addr_of_mut!((*pxList).xListEnd).cast::<ListItem_t>();
+    listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxListEnd);
+    listSET_SECOND_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxListEnd);
+    listSET_LIST_INTEGRITY_CHECK_1_VALUE(pxList);
+    listSET_LIST_INTEGRITY_CHECK_2_VALUE(pxList);
+
     /* The list structure contains a list item which is used to mark the
      * end of the list.  To initialise the list the list end is inserted
      * as the only list entry. */
-    (*pxList).pxIndex = &mut (*pxList).xListEnd as *mut MiniListItem_t as *mut ListItem_t;
-
-    listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(&mut (*pxList).xListEnd);
+    (*pxList).pxIndex = pxListEnd;
 
     /* The list end value is the highest possible value in the list to
      * ensure it remains at the end of the list. */
@@ -582,22 +675,15 @@ pub unsafe fn vListInitialise(pxList: *mut List_t) {
 
     /* The list end next and previous pointers point to itself so we know
      * when the list is empty. */
-    (*pxList).xListEnd.pxNext = &mut (*pxList).xListEnd as *mut MiniListItem_t as *mut ListItem_t;
-    (*pxList).xListEnd.pxPrevious =
-        &mut (*pxList).xListEnd as *mut MiniListItem_t as *mut ListItem_t;
+    (*pxList).xListEnd.pxNext = pxListEnd;
+    (*pxList).xListEnd.pxPrevious = pxListEnd;
 
     /* Initialize the remaining fields of xListEnd when it is a proper ListItem_t */
     // [AMENDMENT] configUSE_MINI_LIST_ITEM == 0, so we always initialize these
     (*pxList).xListEnd.pvOwner = core::ptr::null_mut();
     (*pxList).xListEnd.pxContainer = core::ptr::null_mut();
-    listSET_SECOND_LIST_ITEM_INTEGRITY_CHECK_VALUE(&mut (*pxList).xListEnd);
 
     (*pxList).uxNumberOfItems = 0;
-
-    /* Write known values into the list if
-     * configUSE_LIST_DATA_INTEGRITY_CHECK_BYTES is set to 1. */
-    listSET_LIST_INTEGRITY_CHECK_1_VALUE(&mut *pxList);
-    listSET_LIST_INTEGRITY_CHECK_2_VALUE(&mut *pxList);
 
     traceRETURN_vListInitialise();
 }
@@ -619,8 +705,8 @@ pub unsafe fn vListInitialiseItem(pxItem: *mut ListItem_t) {
 
     /* Write known values into the list item if
      * configUSE_LIST_DATA_INTEGRITY_CHECK_BYTES is set to 1. */
-    listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(&mut *pxItem);
-    listSET_SECOND_LIST_ITEM_INTEGRITY_CHECK_VALUE(&mut *pxItem);
+    listSET_FIRST_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxItem);
+    listSET_SECOND_LIST_ITEM_INTEGRITY_CHECK_VALUE(pxItem);
 
     traceRETURN_vListInitialiseItem();
 }
@@ -643,8 +729,8 @@ pub unsafe fn vListInsertEnd(pxList: *mut List_t, pxNewListItem: *mut ListItem_t
     /* Only effective when configASSERT() is also defined, these tests may catch
      * the list data structures being overwritten in memory.  They will not catch
      * data errors caused by incorrect configuration or use of FreeRTOS. */
-    listTEST_LIST_INTEGRITY(&*pxList);
-    listTEST_LIST_ITEM_INTEGRITY(&*pxNewListItem);
+    listTEST_LIST_INTEGRITY(pxList);
+    listTEST_LIST_ITEM_INTEGRITY(pxNewListItem);
 
     /* Insert a new list item into pxList, but rather than sort the list,
      * makes the new list item the last item to be removed by a call to
@@ -684,8 +770,8 @@ pub unsafe fn vListInsert(pxList: *mut List_t, pxNewListItem: *mut ListItem_t) {
     /* Only effective when configASSERT() is also defined, these tests may catch
      * the list data structures being overwritten in memory.  They will not catch
      * data errors caused by incorrect configuration or use of FreeRTOS. */
-    listTEST_LIST_INTEGRITY(&*pxList);
-    listTEST_LIST_ITEM_INTEGRITY(&*pxNewListItem);
+    listTEST_LIST_INTEGRITY(pxList);
+    listTEST_LIST_ITEM_INTEGRITY(pxNewListItem);
 
     /* Insert the new list item into the list, sorted in xItemValue order.
      *
@@ -723,7 +809,7 @@ pub unsafe fn vListInsert(pxList: *mut List_t, pxNewListItem: *mut ListItem_t) {
          *      configMAX_SYSCALL_INTERRUPT_PRIORITY.
          **********************************************************************/
 
-        pxIterator = &mut (*pxList).xListEnd as *mut MiniListItem_t as *mut ListItem_t;
+        pxIterator = core::ptr::addr_of_mut!((*pxList).xListEnd).cast::<ListItem_t>();
         while (*(*pxIterator).pxNext).xItemValue <= xValueOfInsertion {
             pxIterator = (*pxIterator).pxNext;
             /* There is nothing to do here, just iterating to the wanted
@@ -835,8 +921,8 @@ pub unsafe fn listINSERT_END(pxList: *mut List_t, pxNewListItem: *mut ListItem_t
     /* Only effective when configASSERT() is also defined, these tests may catch
      * the list data structures being overwritten in memory.  They will not catch
      * data errors caused by incorrect configuration or use of FreeRTOS. */
-    listTEST_LIST_INTEGRITY(&*pxList);
-    listTEST_LIST_ITEM_INTEGRITY(&*pxNewListItem);
+    listTEST_LIST_INTEGRITY(pxList);
+    listTEST_LIST_ITEM_INTEGRITY(pxNewListItem);
 
     /* Insert a new list item into ( pxList ), but rather than sort the list,
      * makes the new list item the last item to be removed by a call to

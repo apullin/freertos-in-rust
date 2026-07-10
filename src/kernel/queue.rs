@@ -42,7 +42,8 @@
 use crate::config::*;
 use crate::kernel::list::*;
 use crate::kernel::tasks::*;
-use crate::memory::*;
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::memory::{pvPortMalloc, vPortFree};
 use crate::port::*;
 use crate::trace::*;
 use crate::types::*;
@@ -141,7 +142,7 @@ pub struct SemaphoreData_t {
 
 /// Union of queue and semaphore data
 ///
-/// [AMENDMENT] Using Copy-able raw types to avoid ManuallyDrop complexity.
+/// \[AMENDMENT\] Using Copy-able raw types to avoid ManuallyDrop complexity.
 /// Both variants contain only raw pointers and primitive types which are Copy.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -166,7 +167,7 @@ pub union QueueUnion_t {
 #[repr(C)]
 pub struct xQUEUE {
     /// Points to the beginning of the queue storage area.
-    /// [AMENDMENT] Also used as uxQueueType - NULL means mutex
+    /// \[AMENDMENT\] Also used as uxQueueType - NULL means mutex
     pub pcHead: *mut i8,
 
     /// Points to the free next place in the storage area.
@@ -232,7 +233,7 @@ pub type QueueSetMemberHandle_t = *mut Queue_t;
 // =============================================================================
 
 /// StaticQueue_t - same size as Queue_t for static allocation
-/// [AMENDMENT] This must be the same size as Queue_t
+/// \[AMENDMENT\] This must be the same size as Queue_t
 #[repr(C)]
 pub struct StaticQueue_t {
     _data: xQUEUE,
@@ -290,7 +291,7 @@ fn mtCOVERAGE_TEST_MARKER() {}
 
 /// Yield if using preemption
 #[inline(always)]
-fn queueYIELD_IF_USING_PREEMPTION() {
+unsafe fn queueYIELD_IF_USING_PREEMPTION() {
     if configUSE_PREEMPTION != 0 {
         portYIELD_WITHIN_API();
     }
@@ -311,11 +312,39 @@ unsafe fn prvLockQueue(pxQueue: *mut Queue_t) {
     taskEXIT_CRITICAL();
 }
 
+/// Increment a queue transmit lock without recording more deferred events than
+/// there are tasks that could be unblocked.
+#[inline(always)]
+unsafe fn prvIncrementQueueTxLock(pxQueue: *mut Queue_t, cTxLock: i8) {
+    let uxNumberOfTasks = uxTaskGetNumberOfTasks();
+
+    if (cTxLock as UBaseType_t) < uxNumberOfTasks {
+        configASSERT(cTxLock != queueINT8_MAX);
+        (*pxQueue).cTxLock = cTxLock + 1;
+    }
+}
+
+/// Increment a queue receive lock without recording more deferred events than
+/// there are tasks that could be unblocked.
+#[inline(always)]
+unsafe fn prvIncrementQueueRxLock(pxQueue: *mut Queue_t, cRxLock: i8) {
+    let uxNumberOfTasks = uxTaskGetNumberOfTasks();
+
+    if (cRxLock as UBaseType_t) < uxNumberOfTasks {
+        configASSERT(cRxLock != queueINT8_MAX);
+        (*pxQueue).cRxLock = cRxLock + 1;
+    }
+}
+
 // =============================================================================
 // Queue Reset
 // =============================================================================
 
 /// Reset a queue to its initial state
+///
+/// Note: Prefer using `sync::Queue::reset()` which provides a safe wrapper
+/// around this function. Direct use of xQueueGenericReset is only needed
+/// for interop with raw FreeRTOS code.
 ///
 /// # Safety
 ///
@@ -351,8 +380,10 @@ pub unsafe fn xQueueGenericReset(xQueue: QueueHandle_t, xNewQueue: BaseType_t) -
                  * will still be empty.  If there are tasks blocked waiting to write to
                  * the queue, then one should be unblocked as after this function exits
                  * it will be possible to write to it. */
-                if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToSend) == pdFALSE {
-                    if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToSend) != pdFALSE {
+                if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToSend)) == pdFALSE {
+                    if xTaskRemoveFromEventList(ptr::addr_of!((*pxQueue).xTasksWaitingToSend))
+                        != pdFALSE
+                    {
                         queueYIELD_IF_USING_PREEMPTION();
                     } else {
                         mtCOVERAGE_TEST_MARKER();
@@ -362,8 +393,10 @@ pub unsafe fn xQueueGenericReset(xQueue: QueueHandle_t, xNewQueue: BaseType_t) -
                 }
             } else {
                 /* Ensure the event queues start in the correct state. */
-                vListInitialise(&mut (*pxQueue).xTasksWaitingToSend);
-                vListInitialise(&mut (*pxQueue).xTasksWaitingToReceive);
+                /* [AMENDMENT] Queue event lists retain self-links, so form
+                 * their addresses without creating Rust references. */
+                vListInitialise(ptr::addr_of_mut!((*pxQueue).xTasksWaitingToSend));
+                vListInitialise(ptr::addr_of_mut!((*pxQueue).xTasksWaitingToReceive));
             }
         }
         taskEXIT_CRITICAL();
@@ -553,6 +586,11 @@ pub unsafe fn xQueueGenericGetStaticBuffers(
 
 /// Create a queue using dynamically allocated memory
 ///
+/// Note: Prefer using `sync::Queue::new()` which provides a type-safe wrapper.
+/// For mutexes, use `sync::Mutex::new()`. For semaphores, use
+/// `sync::BinarySemaphore::new()` or `sync::CountingSemaphore::new()`.
+/// Direct use of xQueueGenericCreate is only needed for raw FreeRTOS interop.
+///
 /// # Safety
 ///
 /// Requires the `alloc` feature for dynamic allocation
@@ -615,14 +653,28 @@ pub unsafe fn xQueueGenericCreate(
 // Convenience Macros as Functions
 // =============================================================================
 
-/// Create a queue (wrapper for xQueueGenericCreate)
+/// Create a queue (wrapper for xQueueGenericCreate).
+///
+/// # Safety
+///
+/// The selected allocator and task-context critical-section primitives must
+/// be initialized. The caller owns a non-null returned handle and must keep it
+/// live until a matching [`vQueueDelete`] with no outstanding users.
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 pub unsafe fn xQueueCreate(uxQueueLength: UBaseType_t, uxItemSize: UBaseType_t) -> QueueHandle_t {
     xQueueGenericCreate(uxQueueLength, uxItemSize, queueQUEUE_TYPE_BASE)
 }
 
-/// Create a queue using static memory (wrapper for xQueueGenericCreateStatic)
+/// Create a queue using static memory (wrapper for xQueueGenericCreateStatic).
+///
+/// # Safety
+///
+/// `pxQueueBuffer` must be non-null, aligned, uniquely writable initialized
+/// storage for a [`StaticQueue_t`]. For nonzero item size,
+/// `pucQueueStorage` must remain valid for `uxQueueLength * uxItemSize` bytes
+/// until the queue is retired. Neither allocation may move or be reused while
+/// the returned handle can be accessed.
 #[inline(always)]
 pub unsafe fn xQueueCreateStatic(
     uxQueueLength: UBaseType_t,
@@ -651,16 +703,20 @@ unsafe fn prvCopyDataToQueue(
     pvItemToQueue: *const c_void,
     xPosition: BaseType_t,
 ) -> BaseType_t {
+    #[allow(unused_mut)] // Assigned only when mutex support is compiled in.
     let mut xReturn: BaseType_t = pdFALSE;
     let uxMessagesWaiting: UBaseType_t = (*pxQueue).uxMessagesWaiting;
 
     if (*pxQueue).uxItemSize == 0 {
         /* This is a mutex - handle priority inheritance */
-        #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))] // configUSE_MUTEXES
+        #[cfg(feature = "use-mutexes")]
         {
             if (*pxQueue).pcHead.is_null() {
                 /* Queue is being used as a mutex */
-                xReturn = xTaskPriorityDisinherit((*pxQueue).u.xSemaphore.xMutexHolder);
+                // SAFETY: the mutex holder was recorded on successful take;
+                // this give path runs in the task critical section and only
+                // the owning current task can release the mutex.
+                xReturn = unsafe { xTaskPriorityDisinherit((*pxQueue).u.xSemaphore.xMutexHolder) };
                 (*pxQueue).u.xSemaphore.xMutexHolder = ptr::null_mut();
             } else {
                 mtCOVERAGE_TEST_MARKER();
@@ -684,20 +740,17 @@ unsafe fn prvCopyDataToQueue(
             (*pxQueue).u.xQueue.pcReadFrom as *mut u8,
             (*pxQueue).uxItemSize as usize,
         );
+        /* [AMENDMENT] The C source subtracts first and then compares against
+         * pcHead. Rust may not even form a pointer before the allocation, so
+         * perform the equivalent wrap before subtraction. */
+        if (*pxQueue).u.xQueue.pcReadFrom == (*pxQueue).pcHead {
+            (*pxQueue).u.xQueue.pcReadFrom = (*pxQueue).u.xQueue.pcTail;
+        }
         (*pxQueue).u.xQueue.pcReadFrom = (*pxQueue)
             .u
             .xQueue
             .pcReadFrom
             .sub((*pxQueue).uxItemSize as usize);
-        if (*pxQueue).u.xQueue.pcReadFrom < (*pxQueue).pcHead {
-            (*pxQueue).u.xQueue.pcReadFrom = (*pxQueue)
-                .u
-                .xQueue
-                .pcTail
-                .sub((*pxQueue).uxItemSize as usize);
-        } else {
-            mtCOVERAGE_TEST_MARKER();
-        }
 
         if xPosition == queueOVERWRITE {
             if uxMessagesWaiting > 0 {
@@ -784,6 +837,11 @@ unsafe fn prvIsQueueFull(pxQueue: *const Queue_t) -> BaseType_t {
 
 /// Send an item to a queue
 ///
+/// Note: Prefer using `sync::Queue::send()` or `sync::Queue::send_to_front()`
+/// which provide type-safe wrappers. For mutex/semaphore operations, use the
+/// corresponding `sync::Mutex` or `sync::Semaphore` methods.
+/// Direct use of xQueueGenericSend is only needed for raw FreeRTOS interop.
+///
 /// # Safety
 ///
 /// xQueue must be a valid queue handle
@@ -791,7 +849,7 @@ unsafe fn prvIsQueueFull(pxQueue: *const Queue_t) -> BaseType_t {
 pub unsafe fn xQueueGenericSend(
     xQueue: QueueHandle_t,
     pvItemToQueue: *const c_void,
-    xTicksToWait: TickType_t,
+    mut xTicksToWait: TickType_t,
     xCopyPosition: BaseType_t,
 ) -> BaseType_t {
     let mut xEntryTimeSet: BaseType_t = pdFALSE;
@@ -809,6 +867,7 @@ pub unsafe fn xQueueGenericSend(
     configASSERT(!pxQueue.is_null());
     configASSERT(!(pvItemToQueue.is_null() && (*pxQueue).uxItemSize != 0));
     configASSERT(!(xCopyPosition == queueOVERWRITE && (*pxQueue).uxLength != 1));
+    configASSERT(!(xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED && xTicksToWait != 0));
 
     loop {
         taskENTER_CRITICAL();
@@ -840,9 +899,12 @@ pub unsafe fn xQueueGenericSend(
                         }
                     } else {
                         // Not a member of a queue set - normal unblock logic
-                        if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                            if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive)
-                                != pdFALSE
+                        if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                            == pdFALSE
+                        {
+                            if xTaskRemoveFromEventList(ptr::addr_of!(
+                                (*pxQueue).xTasksWaitingToReceive
+                            )) != pdFALSE
                             {
                                 queueYIELD_IF_USING_PREEMPTION();
                             }
@@ -857,8 +919,13 @@ pub unsafe fn xQueueGenericSend(
                 {
                     /* If there was a task waiting for data to arrive on the
                      * queue then unblock it now. */
-                    if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                        if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+                    if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                        == pdFALSE
+                    {
+                        if xTaskRemoveFromEventList(ptr::addr_of!(
+                            (*pxQueue).xTasksWaitingToReceive
+                        )) != pdFALSE
+                        {
                             /* The unblocked task has a priority higher than
                              * our own so yield immediately. */
                             queueYIELD_IF_USING_PREEMPTION();
@@ -889,7 +956,9 @@ pub unsafe fn xQueueGenericSend(
                     return errQUEUE_FULL;
                 } else if xEntryTimeSet == pdFALSE {
                     /* Queue is full and a block time was specified */
-                    vTaskSetTimeOutState(&mut xTimeOut);
+                    // SAFETY: xTimeOut is uniquely owned and this call is
+                    // inside the queue's task critical section.
+                    unsafe { vTaskInternalSetTimeOutState(&mut xTimeOut) };
                     xEntryTimeSet = pdTRUE;
                 } else {
                     mtCOVERAGE_TEST_MARKER();
@@ -903,10 +972,15 @@ pub unsafe fn xQueueGenericSend(
         prvLockQueue(pxQueue);
 
         /* Check timeout */
-        if xTaskCheckForTimeOut(&mut xTimeOut, &mut (xTicksToWait as TickType_t)) == pdFALSE {
+        // SAFETY: both timeout values are initialized, uniquely owned locals;
+        // this queue API runs in task context.
+        if unsafe { xTaskCheckForTimeOut(&mut xTimeOut, &mut xTicksToWait) } == pdFALSE {
             if prvIsQueueFull(pxQueue) != pdFALSE {
                 traceBLOCKING_ON_QUEUE_SEND(pxQueue as *mut c_void);
-                vTaskPlaceOnEventList(&mut (*pxQueue).xTasksWaitingToSend, xTicksToWait);
+                vTaskPlaceOnEventList(
+                    ptr::addr_of_mut!((*pxQueue).xTasksWaitingToSend),
+                    xTicksToWait,
+                );
                 prvUnlockQueue(pxQueue);
 
                 if xTaskResumeAll() == pdFALSE {
@@ -943,7 +1017,7 @@ pub unsafe fn xQueueGenericSend(
 pub unsafe fn xQueueReceive(
     xQueue: QueueHandle_t,
     pvBuffer: *mut c_void,
-    xTicksToWait: TickType_t,
+    mut xTicksToWait: TickType_t,
 ) -> BaseType_t {
     let mut xEntryTimeSet: BaseType_t = pdFALSE;
     let mut xTimeOut = TimeOut_t::new();
@@ -953,6 +1027,7 @@ pub unsafe fn xQueueReceive(
 
     configASSERT(!pxQueue.is_null());
     configASSERT(!(pvBuffer.is_null() && (*pxQueue).uxItemSize != 0));
+    configASSERT(!(xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED && xTicksToWait != 0));
 
     loop {
         taskENTER_CRITICAL();
@@ -966,8 +1041,10 @@ pub unsafe fn xQueueReceive(
                 (*pxQueue).uxMessagesWaiting = uxMessagesWaiting - 1;
 
                 /* If there was a task waiting to send, unblock it */
-                if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToSend) == pdFALSE {
-                    if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToSend) != pdFALSE {
+                if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToSend)) == pdFALSE {
+                    if xTaskRemoveFromEventList(ptr::addr_of!((*pxQueue).xTasksWaitingToSend))
+                        != pdFALSE
+                    {
                         queueYIELD_IF_USING_PREEMPTION();
                     } else {
                         mtCOVERAGE_TEST_MARKER();
@@ -987,7 +1064,9 @@ pub unsafe fn xQueueReceive(
                     traceRETURN_xQueueReceive(errQUEUE_EMPTY);
                     return errQUEUE_EMPTY;
                 } else if xEntryTimeSet == pdFALSE {
-                    vTaskSetTimeOutState(&mut xTimeOut);
+                    // SAFETY: xTimeOut is uniquely owned and this call is
+                    // inside the queue's task critical section.
+                    unsafe { vTaskInternalSetTimeOutState(&mut xTimeOut) };
                     xEntryTimeSet = pdTRUE;
                 } else {
                     mtCOVERAGE_TEST_MARKER();
@@ -999,10 +1078,15 @@ pub unsafe fn xQueueReceive(
         vTaskSuspendAll();
         prvLockQueue(pxQueue);
 
-        if xTaskCheckForTimeOut(&mut xTimeOut, &mut (xTicksToWait as TickType_t)) == pdFALSE {
+        // SAFETY: both timeout values are initialized, uniquely owned locals;
+        // this queue API runs in task context.
+        if unsafe { xTaskCheckForTimeOut(&mut xTimeOut, &mut xTicksToWait) } == pdFALSE {
             if prvIsQueueEmpty(pxQueue) != pdFALSE {
                 traceBLOCKING_ON_QUEUE_RECEIVE(pxQueue as *mut c_void);
-                vTaskPlaceOnEventList(&mut (*pxQueue).xTasksWaitingToReceive, xTicksToWait);
+                vTaskPlaceOnEventList(
+                    ptr::addr_of_mut!((*pxQueue).xTasksWaitingToReceive),
+                    xTicksToWait,
+                );
                 prvUnlockQueue(pxQueue);
 
                 if xTaskResumeAll() == pdFALSE {
@@ -1016,9 +1100,14 @@ pub unsafe fn xQueueReceive(
             prvUnlockQueue(pxQueue);
             xTaskResumeAll();
 
-            traceQUEUE_RECEIVE_FAILED(pxQueue as *mut c_void);
-            traceRETURN_xQueueReceive(errQUEUE_EMPTY);
-            return errQUEUE_EMPTY;
+            /* Timed out. If data arrived while the queue was being unlocked,
+             * loop once more and receive it rather than reporting a false
+             * timeout. */
+            if prvIsQueueEmpty(pxQueue) != pdFALSE {
+                traceQUEUE_RECEIVE_FAILED(pxQueue as *mut c_void);
+                traceRETURN_xQueueReceive(errQUEUE_EMPTY);
+                return errQUEUE_EMPTY;
+            }
         }
     }
 }
@@ -1031,10 +1120,17 @@ pub unsafe fn xQueueReceive(
 /// [ORIGINAL C] BaseType_t xQueuePeek( QueueHandle_t xQueue,
 ///                                     void * const pvBuffer,
 ///                                     TickType_t xTicksToWait )
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue and remain valid for the call. For a
+/// queue with nonzero item size, `pvBuffer` must be non-null, aligned for the
+/// queued item, and writable for that many bytes. This is a task-context API;
+/// a nonzero wait requires a running, unsuspended scheduler.
 pub unsafe fn xQueuePeek(
     xQueue: QueueHandle_t,
     pvBuffer: *mut c_void,
-    xTicksToWait: TickType_t,
+    mut xTicksToWait: TickType_t,
 ) -> BaseType_t {
     let mut xEntryTimeSet: BaseType_t = pdFALSE;
     let mut xTimeOut = TimeOut_t::new();
@@ -1044,6 +1140,7 @@ pub unsafe fn xQueuePeek(
 
     configASSERT(!pxQueue.is_null());
     configASSERT(!(pvBuffer.is_null() && (*pxQueue).uxItemSize != 0));
+    configASSERT(!(xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED && xTicksToWait != 0));
 
     loop {
         taskENTER_CRITICAL();
@@ -1064,8 +1161,10 @@ pub unsafe fn xQueuePeek(
 
                 // If there was a task waiting to receive, unblock it
                 // (another task might also want to peek)
-                if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                    if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+                if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive)) == pdFALSE {
+                    if xTaskRemoveFromEventList(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                        != pdFALSE
+                    {
                         queueYIELD_IF_USING_PREEMPTION();
                     }
                 }
@@ -1081,7 +1180,9 @@ pub unsafe fn xQueuePeek(
                     traceRETURN_xQueuePeek(errQUEUE_EMPTY);
                     return errQUEUE_EMPTY;
                 } else if xEntryTimeSet == pdFALSE {
-                    vTaskSetTimeOutState(&mut xTimeOut);
+                    // SAFETY: xTimeOut is uniquely owned and this call is
+                    // inside the queue's task critical section.
+                    unsafe { vTaskInternalSetTimeOutState(&mut xTimeOut) };
                     xEntryTimeSet = pdTRUE;
                 }
             }
@@ -1091,10 +1192,15 @@ pub unsafe fn xQueuePeek(
         vTaskSuspendAll();
         prvLockQueue(pxQueue);
 
-        if xTaskCheckForTimeOut(&mut xTimeOut, &mut (xTicksToWait as TickType_t)) == pdFALSE {
+        // SAFETY: both timeout values are initialized, uniquely owned locals;
+        // this queue API runs in task context.
+        if unsafe { xTaskCheckForTimeOut(&mut xTimeOut, &mut xTicksToWait) } == pdFALSE {
             if prvIsQueueEmpty(pxQueue) != pdFALSE {
                 traceBLOCKING_ON_QUEUE_PEEK(pxQueue as *mut c_void);
-                vTaskPlaceOnEventList(&mut (*pxQueue).xTasksWaitingToReceive, xTicksToWait);
+                vTaskPlaceOnEventList(
+                    ptr::addr_of_mut!((*pxQueue).xTasksWaitingToReceive),
+                    xTicksToWait,
+                );
                 prvUnlockQueue(pxQueue);
 
                 if xTaskResumeAll() == pdFALSE {
@@ -1108,9 +1214,14 @@ pub unsafe fn xQueuePeek(
             prvUnlockQueue(pxQueue);
             xTaskResumeAll();
 
-            traceQUEUE_PEEK_FAILED(pxQueue as *mut c_void);
-            traceRETURN_xQueuePeek(errQUEUE_EMPTY);
-            return errQUEUE_EMPTY;
+            /* Data can arrive between the timeout check and the queue being
+             * unlocked. In that case loop back and peek at the available
+             * item, matching the upstream race handling. */
+            if prvIsQueueEmpty(pxQueue) != pdFALSE {
+                traceQUEUE_PEEK_FAILED(pxQueue as *mut c_void);
+                traceRETURN_xQueuePeek(errQUEUE_EMPTY);
+                return errQUEUE_EMPTY;
+            }
         }
     }
 }
@@ -1122,6 +1233,14 @@ pub unsafe fn xQueuePeek(
 /// [ORIGINAL C] BaseType_t xQueueReceiveFromISR( QueueHandle_t xQueue,
 ///                                               void * const pvBuffer,
 ///                                               BaseType_t * const pxHigherPriorityTaskWoken )
+///
+/// # Safety
+///
+/// The caller must be in an interrupt priority permitted to call FreeRTOS.
+/// `xQueue` must remain live for the call. For nonzero item size, `pvBuffer`
+/// must be writable for one complete item. If non-null,
+/// `pxHigherPriorityTaskWoken` must be aligned and writable for a
+/// [`BaseType_t`], normally initialized to `pdFALSE` by the caller.
 pub unsafe fn xQueueReceiveFromISR(
     xQueue: QueueHandle_t,
     pvBuffer: *mut c_void,
@@ -1149,16 +1268,17 @@ pub unsafe fn xQueueReceiveFromISR(
 
             // If the queue was locked, increment lock count
             if cRxLock == queueUNLOCKED {
-                if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToSend) == pdFALSE {
-                    if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToSend) != pdFALSE {
+                if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToSend)) == pdFALSE {
+                    if xTaskRemoveFromEventList(ptr::addr_of!((*pxQueue).xTasksWaitingToSend))
+                        != pdFALSE
+                    {
                         if !pxHigherPriorityTaskWoken.is_null() {
                             *pxHigherPriorityTaskWoken = pdTRUE;
                         }
                     }
                 }
             } else {
-                configASSERT(cRxLock != queueINT8_MAX);
-                (*pxQueue).cRxLock = cRxLock + 1;
+                prvIncrementQueueRxLock(pxQueue, cRxLock);
             }
 
             xReturn = pdPASS;
@@ -1180,6 +1300,12 @@ pub unsafe fn xQueueReceiveFromISR(
 ///
 /// [ORIGINAL C] BaseType_t xQueuePeekFromISR( QueueHandle_t xQueue,
 ///                                            void * const pvBuffer )
+///
+/// # Safety
+///
+/// The caller must be in an interrupt priority permitted to call FreeRTOS.
+/// `xQueue` must be a live data queue, not a semaphore, and `pvBuffer` must be
+/// non-null, aligned for its item type, and writable for one complete item.
 pub unsafe fn xQueuePeekFromISR(xQueue: QueueHandle_t, pvBuffer: *mut c_void) -> BaseType_t {
     let xReturn: BaseType_t;
     let pxQueue = xQueue as *mut Queue_t;
@@ -1227,8 +1353,40 @@ unsafe fn prvUnlockQueue(pxQueue: *mut Queue_t) {
 
         /* See if data was added while locked */
         while cTxLock > queueLOCKED_UNMODIFIED {
-            /* Data was posted while locked - unblock waiting tasks */
-            // TODO: Full implementation with task unblocking
+            /* Data was posted while the queue was locked. Are any tasks
+             * blocked waiting for data to become available? */
+            #[cfg(feature = "queue-sets")]
+            {
+                if !(*pxQueue).pxQueueSetContainer.is_null() {
+                    if prvNotifyQueueSetContainer(pxQueue) != pdFALSE {
+                        vTaskMissedYield();
+                    }
+                } else if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                    == pdFALSE
+                {
+                    if xTaskRemoveFromEventList(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                        != pdFALSE
+                    {
+                        vTaskMissedYield();
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            #[cfg(not(feature = "queue-sets"))]
+            {
+                if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive)) == pdFALSE {
+                    if xTaskRemoveFromEventList(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                        != pdFALSE
+                    {
+                        vTaskMissedYield();
+                    }
+                } else {
+                    break;
+                }
+            }
+
             cTxLock -= 1;
         }
 
@@ -1241,8 +1399,16 @@ unsafe fn prvUnlockQueue(pxQueue: *mut Queue_t) {
         let mut cRxLock: i8 = (*pxQueue).cRxLock;
 
         while cRxLock > queueLOCKED_UNMODIFIED {
-            // TODO: Full implementation
-            cRxLock -= 1;
+            if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToSend)) == pdFALSE {
+                if xTaskRemoveFromEventList(ptr::addr_of!((*pxQueue).xTasksWaitingToSend))
+                    != pdFALSE
+                {
+                    vTaskMissedYield();
+                }
+                cRxLock -= 1;
+            } else {
+                break;
+            }
         }
 
         (*pxQueue).cRxLock = queueUNLOCKED;
@@ -1254,7 +1420,12 @@ unsafe fn prvUnlockQueue(pxQueue: *mut Queue_t) {
 // Queue Utility Functions
 // =============================================================================
 
-/// Get the number of messages waiting in a queue
+/// Get the number of messages waiting in a queue.
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue and must not be concurrently deleted.
+/// This task-context API requires the active port critical-section machinery.
 pub unsafe fn uxQueueMessagesWaiting(xQueue: QueueHandle_t) -> UBaseType_t {
     let uxReturn: UBaseType_t;
 
@@ -1269,7 +1440,12 @@ pub unsafe fn uxQueueMessagesWaiting(xQueue: QueueHandle_t) -> UBaseType_t {
     uxReturn
 }
 
-/// Get the number of free spaces in a queue
+/// Get the number of free spaces in a queue.
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue and must not be concurrently deleted.
+/// This task-context API requires the active port critical-section machinery.
 pub unsafe fn uxQueueSpacesAvailable(xQueue: QueueHandle_t) -> UBaseType_t {
     let uxReturn: UBaseType_t;
 
@@ -1289,6 +1465,12 @@ pub unsafe fn uxQueueSpacesAvailable(xQueue: QueueHandle_t) -> UBaseType_t {
 /// This function can be called from an ISR.
 ///
 /// [ORIGINAL C] UBaseType_t uxQueueMessagesWaitingFromISR( const QueueHandle_t xQueue )
+///
+/// # Safety
+///
+/// The caller must be in an interrupt priority permitted to call FreeRTOS,
+/// and `xQueue` must identify a live queue that cannot be deleted during the
+/// read.
 pub unsafe fn uxQueueMessagesWaitingFromISR(xQueue: QueueHandle_t) -> UBaseType_t {
     let uxReturn: UBaseType_t;
 
@@ -1307,11 +1489,16 @@ pub unsafe fn uxQueueMessagesWaitingFromISR(xQueue: QueueHandle_t) -> UBaseType_
 /// Delete a queue.
 ///
 /// This function frees all memory allocated for storing the queue structure
-/// and the items placed in the queue. If the queue was created with static
-/// memory, only resets the queue.
+/// and the items placed in the queue. A statically allocated queue has no
+/// storage to release; it is only unregistered and traced, as upstream does.
 ///
 /// [ORIGINAL C] void vQueueDelete( QueueHandle_t xQueue )
-#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue owned by the caller. No task, ISR,
+/// queue set, registry user, or raw alias may access or be blocked on it after
+/// this call. This is not an ISR-safe operation and may free dynamic storage.
 pub unsafe fn vQueueDelete(xQueue: QueueHandle_t) {
     let pxQueue = xQueue as *mut Queue_t;
 
@@ -1327,13 +1514,16 @@ pub unsafe fn vQueueDelete(xQueue: QueueHandle_t) {
         vQueueUnregisterQueue(xQueue);
     }
 
-    // Check if dynamically allocated
-    if (*pxQueue).ucStaticallyAllocated == pdFALSE as u8 {
-        // Free the queue memory
-        vPortFree(pxQueue as *mut c_void);
-    } else {
-        // Static queue - just reset it
-        mtCOVERAGE_TEST_MARKER();
+    #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+    {
+        // Check if dynamically allocated
+        if (*pxQueue).ucStaticallyAllocated == pdFALSE as u8 {
+            // Free the queue memory
+            vPortFree(pxQueue as *mut c_void);
+        } else {
+            // A statically allocated queue has no storage to release.
+            mtCOVERAGE_TEST_MARKER();
+        }
     }
 
     traceRETURN_vQueueDelete();
@@ -1342,6 +1532,10 @@ pub unsafe fn vQueueDelete(xQueue: QueueHandle_t) {
 /// Get the item size of a queue.
 ///
 /// [ORIGINAL C] UBaseType_t uxQueueGetQueueItemSize( QueueHandle_t xQueue )
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue and remain readable for the call.
 pub unsafe fn uxQueueGetQueueItemSize(xQueue: QueueHandle_t) -> UBaseType_t {
     configASSERT(!xQueue.is_null());
     (*xQueue).uxItemSize
@@ -1350,6 +1544,10 @@ pub unsafe fn uxQueueGetQueueItemSize(xQueue: QueueHandle_t) -> UBaseType_t {
 /// Get the length (capacity) of a queue.
 ///
 /// [ORIGINAL C] UBaseType_t uxQueueGetQueueLength( QueueHandle_t xQueue )
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue and remain readable for the call.
 pub unsafe fn uxQueueGetQueueLength(xQueue: QueueHandle_t) -> UBaseType_t {
     configASSERT(!xQueue.is_null());
     (*xQueue).uxLength
@@ -1358,6 +1556,12 @@ pub unsafe fn uxQueueGetQueueLength(xQueue: QueueHandle_t) -> UBaseType_t {
 /// Check if a queue is empty (ISR safe).
 ///
 /// [ORIGINAL C] BaseType_t xQueueIsQueueEmptyFromISR( const QueueHandle_t xQueue )
+///
+/// # Safety
+///
+/// The caller must be in an interrupt priority permitted to call FreeRTOS,
+/// and `xQueue` must identify a live queue that cannot be deleted during the
+/// read.
 pub unsafe fn xQueueIsQueueEmptyFromISR(xQueue: QueueHandle_t) -> BaseType_t {
     let xReturn: BaseType_t;
 
@@ -1379,6 +1583,12 @@ pub unsafe fn xQueueIsQueueEmptyFromISR(xQueue: QueueHandle_t) -> BaseType_t {
 /// Check if a queue is full (ISR safe).
 ///
 /// [ORIGINAL C] BaseType_t xQueueIsQueueFullFromISR( const QueueHandle_t xQueue )
+///
+/// # Safety
+///
+/// The caller must be in an interrupt priority permitted to call FreeRTOS,
+/// and `xQueue` must identify a live queue that cannot be deleted during the
+/// read.
 pub unsafe fn xQueueIsQueueFullFromISR(xQueue: QueueHandle_t) -> BaseType_t {
     let xReturn: BaseType_t;
 
@@ -1407,6 +1617,11 @@ pub unsafe fn xQueueIsQueueFullFromISR(xQueue: QueueHandle_t) -> BaseType_t {
 /// this queue. It is assigned using vQueueSetQueueNumber().
 ///
 /// [ORIGINAL C] UBaseType_t uxQueueGetQueueNumber( QueueHandle_t xQueue )
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue with trace-facility fields present and
+/// remain readable for the call.
 #[cfg(feature = "trace-facility")]
 pub unsafe fn uxQueueGetQueueNumber(xQueue: QueueHandle_t) -> UBaseType_t {
     traceENTER_uxQueueGetQueueNumber(xQueue);
@@ -1425,6 +1640,11 @@ pub unsafe fn uxQueueGetQueueNumber(xQueue: QueueHandle_t) -> UBaseType_t {
 ///
 /// [ORIGINAL C] void vQueueSetQueueNumber( QueueHandle_t xQueue,
 ///                                         UBaseType_t uxQueueNumber )
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue with trace-facility fields present.
+/// The caller must exclude conflicting access while the number is updated.
 #[cfg(feature = "trace-facility")]
 pub unsafe fn vQueueSetQueueNumber(xQueue: QueueHandle_t, uxQueueNumber: UBaseType_t) {
     traceENTER_vQueueSetQueueNumber(xQueue, uxQueueNumber);
@@ -1439,6 +1659,11 @@ pub unsafe fn vQueueSetQueueNumber(xQueue: QueueHandle_t, uxQueueNumber: UBaseTy
 /// Returns the type of the queue (base queue, mutex, counting semaphore, etc.).
 ///
 /// [ORIGINAL C] uint8_t ucQueueGetQueueType( QueueHandle_t xQueue )
+///
+/// # Safety
+///
+/// `xQueue` must identify a live queue with trace-facility fields present and
+/// remain readable for the call.
 #[cfg(feature = "trace-facility")]
 pub unsafe fn ucQueueGetQueueType(xQueue: QueueHandle_t) -> u8 {
     traceENTER_ucQueueGetQueueType(xQueue);
@@ -1526,6 +1751,14 @@ fn traceENTER_xQueueCreateMutexStatic(_ucQueueType: u8, _pxStaticQueue: *mut Sta
 #[cfg(feature = "use-mutexes")]
 #[inline(always)]
 fn traceRETURN_xQueueCreateMutexStatic(_xNewQueue: QueueHandle_t) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceENTER_xQueueCreateMutex(_ucQueueType: u8) {}
+
+#[cfg(feature = "use-mutexes")]
+#[inline(always)]
+fn traceRETURN_xQueueCreateMutex(_xNewQueue: QueueHandle_t) {}
 
 #[cfg(feature = "use-mutexes")]
 #[inline(always)]
@@ -1685,15 +1918,12 @@ fn traceENTER_uxQueueMessagesWaitingFromISR(_xQueue: QueueHandle_t) {}
 #[inline(always)]
 fn traceRETURN_uxQueueMessagesWaitingFromISR(_uxReturn: UBaseType_t) {}
 
-#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 fn traceENTER_vQueueDelete(_xQueue: QueueHandle_t) {}
 
-#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 fn traceRETURN_vQueueDelete() {}
 
-#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 fn traceQUEUE_DELETE(_pxQueue: *mut c_void) {}
 
@@ -1738,7 +1968,12 @@ fn traceRETURN_ucQueueGetQueueType(_ucReturn: u8) {}
 // Queue Wrapper Functions
 // =============================================================================
 
-/// Send an item to the back of a queue (wrapper for xQueueGenericSend)
+/// Send an item to the back of a queue (wrapper for xQueueGenericSend).
+///
+/// # Safety
+///
+/// The caller must uphold [`xQueueGenericSend`]'s handle, item-buffer, and
+/// task-context requirements.
 #[inline(always)]
 pub unsafe fn xQueueSendToBack(
     xQueue: QueueHandle_t,
@@ -1748,7 +1983,12 @@ pub unsafe fn xQueueSendToBack(
     xQueueGenericSend(xQueue, pvItemToQueue, xTicksToWait, queueSEND_TO_BACK)
 }
 
-/// Send an item to the front of a queue (wrapper for xQueueGenericSend)
+/// Send an item to the front of a queue (wrapper for xQueueGenericSend).
+///
+/// # Safety
+///
+/// The caller must uphold [`xQueueGenericSend`]'s handle, item-buffer, and
+/// task-context requirements.
 #[inline(always)]
 pub unsafe fn xQueueSendToFront(
     xQueue: QueueHandle_t,
@@ -1758,7 +1998,12 @@ pub unsafe fn xQueueSendToFront(
     xQueueGenericSend(xQueue, pvItemToQueue, xTicksToWait, queueSEND_TO_FRONT)
 }
 
-/// Send an item to a queue (same as xQueueSendToBack)
+/// Send an item to a queue (same as xQueueSendToBack).
+///
+/// # Safety
+///
+/// The caller must uphold [`xQueueGenericSend`]'s handle, item-buffer, and
+/// task-context requirements.
 #[inline(always)]
 pub unsafe fn xQueueSend(
     xQueue: QueueHandle_t,
@@ -1768,10 +2013,24 @@ pub unsafe fn xQueueSend(
     xQueueSendToBack(xQueue, pvItemToQueue, xTicksToWait)
 }
 
-/// Send an item to the back of a queue from an ISR
+/// Overwrite the item in a queue of length one.
 ///
-/// This is a simplified version that doesn't handle all the
-/// complexity of the full implementation.
+/// # Safety
+///
+/// `xQueue` must identify a live queue of exactly length one. For nonzero item
+/// size, `pvItemToQueue` must be readable for one complete item and must not
+/// overlap queue storage. This is a task-context operation.
+#[inline(always)]
+pub unsafe fn xQueueOverwrite(xQueue: QueueHandle_t, pvItemToQueue: *const c_void) -> BaseType_t {
+    xQueueGenericSend(xQueue, pvItemToQueue, 0, queueOVERWRITE)
+}
+
+/// Send an item to the back of a queue from an ISR.
+///
+/// # Safety
+///
+/// The caller must uphold [`xQueueGenericSendFromISR`]'s queue, item-buffer,
+/// wake-flag, and interrupt-priority requirements.
 #[inline(always)]
 pub unsafe fn xQueueSendToBackFromISR(
     xQueue: QueueHandle_t,
@@ -1786,7 +2045,52 @@ pub unsafe fn xQueueSendToBackFromISR(
     )
 }
 
-/// Send an item to a queue from an ISR (same as xQueueSendToBackFromISR)
+/// Send an item to the front of a queue from an ISR.
+///
+/// # Safety
+///
+/// The caller must uphold [`xQueueGenericSendFromISR`]'s queue, item-buffer,
+/// wake-flag, and interrupt-priority requirements.
+#[inline(always)]
+pub unsafe fn xQueueSendToFrontFromISR(
+    xQueue: QueueHandle_t,
+    pvItemToQueue: *const c_void,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> BaseType_t {
+    xQueueGenericSendFromISR(
+        xQueue,
+        pvItemToQueue,
+        pxHigherPriorityTaskWoken,
+        queueSEND_TO_FRONT,
+    )
+}
+
+/// Overwrite the item in a queue of length one from an ISR.
+///
+/// # Safety
+///
+/// The caller must uphold [`xQueueGenericSendFromISR`]'s requirements, and
+/// `xQueue` must have exactly one slot.
+#[inline(always)]
+pub unsafe fn xQueueOverwriteFromISR(
+    xQueue: QueueHandle_t,
+    pvItemToQueue: *const c_void,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> BaseType_t {
+    xQueueGenericSendFromISR(
+        xQueue,
+        pvItemToQueue,
+        pxHigherPriorityTaskWoken,
+        queueOVERWRITE,
+    )
+}
+
+/// Send an item to a queue from an ISR (same as xQueueSendToBackFromISR).
+///
+/// # Safety
+///
+/// The caller must uphold [`xQueueGenericSendFromISR`]'s queue, item-buffer,
+/// wake-flag, and interrupt-priority requirements.
 #[inline(always)]
 pub unsafe fn xQueueSendFromISR(
     xQueue: QueueHandle_t,
@@ -1796,10 +2100,16 @@ pub unsafe fn xQueueSendFromISR(
     xQueueSendToBackFromISR(xQueue, pvItemToQueue, pxHigherPriorityTaskWoken)
 }
 
-/// Generic send to queue from ISR
+/// Generic send to queue from ISR.
 ///
-/// [AMENDMENT] Simplified implementation - full version would handle
-/// queue locking and unblocking waiting tasks.
+/// # Safety
+///
+/// The caller must execute at an interrupt priority permitted to call
+/// FreeRTOS. `xQueue` must remain live for the call. For nonzero item size,
+/// `pvItemToQueue` must be non-null and readable for one complete item. If
+/// non-null, `pxHigherPriorityTaskWoken` must be aligned and writable for a
+/// [`BaseType_t`], normally initialized to `pdFALSE`. `xCopyPosition` must be
+/// a supported queue position, and overwrite requires a one-slot queue.
 #[allow(unused_assignments)] // C pattern: initialize to fail
 pub unsafe fn xQueueGenericSendFromISR(
     xQueue: QueueHandle_t,
@@ -1811,13 +2121,16 @@ pub unsafe fn xQueueGenericSendFromISR(
     let pxQueue = xQueue as *mut Queue_t;
 
     configASSERT(!pxQueue.is_null());
-    configASSERT(!(!pvItemToQueue.is_null() && (*pxQueue).uxItemSize == 0));
+    configASSERT(!(pvItemToQueue.is_null() && (*pxQueue).uxItemSize != 0));
+    configASSERT(!(xCopyPosition == queueOVERWRITE && (*pxQueue).uxLength != 1));
 
     // Critical section for ISR - using interrupt mask
     let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
     {
-        if (*pxQueue).uxMessagesWaiting < (*pxQueue).uxLength {
+        if (*pxQueue).uxMessagesWaiting < (*pxQueue).uxLength || xCopyPosition == queueOVERWRITE {
             let cTxLock = (*pxQueue).cTxLock;
+            #[cfg(feature = "queue-sets")]
+            let uxPreviousMessagesWaiting = (*pxQueue).uxMessagesWaiting;
 
             traceQUEUE_SEND_FROM_ISR(pxQueue as *mut c_void);
 
@@ -1827,18 +2140,25 @@ pub unsafe fn xQueueGenericSendFromISR(
             // Queue set handling for ISR context
             #[cfg(feature = "queue-sets")]
             {
-                if !(*pxQueue).pxQueueSetContainer.is_null() {
-                    if prvNotifyQueueSetContainer(pxQueue) != pdFALSE {
+                if cTxLock == queueUNLOCKED && !(*pxQueue).pxQueueSetContainer.is_null() {
+                    if xCopyPosition == queueOVERWRITE && uxPreviousMessagesWaiting != 0 {
+                        /* An existing item was overwritten, so queue-set
+                         * membership did not gain another readable item. */
+                        mtCOVERAGE_TEST_MARKER();
+                    } else if prvNotifyQueueSetContainer(pxQueue) != pdFALSE {
                         if !pxHigherPriorityTaskWoken.is_null() {
                             *pxHigherPriorityTaskWoken = pdTRUE;
                         }
                     }
-                } else {
+                } else if (*pxQueue).pxQueueSetContainer.is_null() {
                     // Not a member of a queue set - normal unblock logic
                     if cTxLock == queueUNLOCKED {
-                        if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                            if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive)
-                                != pdFALSE
+                        if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                            == pdFALSE
+                        {
+                            if xTaskRemoveFromEventList(ptr::addr_of!(
+                                (*pxQueue).xTasksWaitingToReceive
+                            )) != pdFALSE
                             {
                                 if !pxHigherPriorityTaskWoken.is_null() {
                                     *pxHigherPriorityTaskWoken = pdTRUE;
@@ -1846,9 +2166,10 @@ pub unsafe fn xQueueGenericSendFromISR(
                             }
                         }
                     } else {
-                        configASSERT(cTxLock != queueINT8_MAX);
-                        (*pxQueue).cTxLock = cTxLock + 1;
+                        prvIncrementQueueTxLock(pxQueue, cTxLock);
                     }
+                } else {
+                    prvIncrementQueueTxLock(pxQueue, cTxLock);
                 }
             }
 
@@ -1858,8 +2179,13 @@ pub unsafe fn xQueueGenericSendFromISR(
                 // If queue was locked, increment lock count instead of waking tasks
                 if cTxLock == queueUNLOCKED {
                     // Queue not locked - can unblock waiting task
-                    if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                        if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+                    if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                        == pdFALSE
+                    {
+                        if xTaskRemoveFromEventList(ptr::addr_of!(
+                            (*pxQueue).xTasksWaitingToReceive
+                        )) != pdFALSE
+                        {
                             if !pxHigherPriorityTaskWoken.is_null() {
                                 *pxHigherPriorityTaskWoken = pdTRUE;
                             }
@@ -1867,8 +2193,7 @@ pub unsafe fn xQueueGenericSendFromISR(
                     }
                 } else {
                     // Queue is locked - increment tx lock count
-                    configASSERT(cTxLock != queueINT8_MAX);
-                    (*pxQueue).cTxLock = cTxLock + 1;
+                    prvIncrementQueueTxLock(pxQueue, cTxLock);
                 }
             }
 
@@ -1891,6 +2216,13 @@ pub unsafe fn xQueueGenericSendFromISR(
 /// [ORIGINAL C] BaseType_t xQueueGiveFromISR(
 ///                  QueueHandle_t xQueue,
 ///                  BaseType_t * const pxHigherPriorityTaskWoken )
+///
+/// # Safety
+///
+/// The caller must execute at an interrupt priority permitted to call
+/// FreeRTOS. `xQueue` must be a live non-mutex semaphore with zero item size.
+/// If non-null, `pxHigherPriorityTaskWoken` must be aligned and writable for a
+/// [`BaseType_t`], normally initialized to `pdFALSE`.
 pub unsafe fn xQueueGiveFromISR(
     xQueue: QueueHandle_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
@@ -1926,43 +2258,52 @@ pub unsafe fn xQueueGiveFromISR(
             // Handle queue set membership
             #[cfg(feature = "queue-sets")]
             {
-                if !(*pxQueue).pxQueueSetContainer.is_null() {
-                    if prvNotifyQueueSetContainer(pxQueue) != pdFALSE {
-                        if !pxHigherPriorityTaskWoken.is_null() {
-                            *pxHigherPriorityTaskWoken = pdTRUE;
+                /* The event list and queue-set container must not be altered
+                 * while the queue is locked.  Defer exactly as upstream does
+                 * for both set members and ordinary semaphores. */
+                if cTxLock == queueUNLOCKED {
+                    if !(*pxQueue).pxQueueSetContainer.is_null() {
+                        if prvNotifyQueueSetContainer(pxQueue) != pdFALSE {
+                            if !pxHigherPriorityTaskWoken.is_null() {
+                                *pxHigherPriorityTaskWoken = pdTRUE;
+                            }
                         }
-                    }
-                } else {
-                    if cTxLock == queueUNLOCKED {
-                        if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                            if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive)
-                                != pdFALSE
+                    } else {
+                        if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                            == pdFALSE
+                        {
+                            if xTaskRemoveFromEventList(ptr::addr_of!(
+                                (*pxQueue).xTasksWaitingToReceive
+                            )) != pdFALSE
                             {
                                 if !pxHigherPriorityTaskWoken.is_null() {
                                     *pxHigherPriorityTaskWoken = pdTRUE;
                                 }
                             }
                         }
-                    } else {
-                        configASSERT(cTxLock != queueINT8_MAX);
-                        (*pxQueue).cTxLock = cTxLock + 1;
                     }
+                } else {
+                    prvIncrementQueueTxLock(pxQueue, cTxLock);
                 }
             }
 
             #[cfg(not(feature = "queue-sets"))]
             {
                 if cTxLock == queueUNLOCKED {
-                    if listLIST_IS_EMPTY(&(*pxQueue).xTasksWaitingToReceive) == pdFALSE {
-                        if xTaskRemoveFromEventList(&(*pxQueue).xTasksWaitingToReceive) != pdFALSE {
+                    if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                        == pdFALSE
+                    {
+                        if xTaskRemoveFromEventList(ptr::addr_of!(
+                            (*pxQueue).xTasksWaitingToReceive
+                        )) != pdFALSE
+                        {
                             if !pxHigherPriorityTaskWoken.is_null() {
                                 *pxHigherPriorityTaskWoken = pdTRUE;
                             }
                         }
                     }
                 } else {
-                    configASSERT(cTxLock != queueINT8_MAX);
-                    (*pxQueue).cTxLock = cTxLock + 1;
+                    prvIncrementQueueTxLock(pxQueue, cTxLock);
                 }
             }
 
@@ -1984,8 +2325,13 @@ pub unsafe fn xQueueGiveFromISR(
 /// This function is used by the timer task to wait for timer commands.
 /// It places the calling task on the queue's receive wait list.
 ///
-/// [AMENDMENT] This is a simplified version. The full version handles
-/// complex interactions with the delayed task list.
+/// # Safety
+///
+/// `xQueue` must be the live timer-command queue. The scheduler must already
+/// be suspended by the caller, the current task must be the timer daemon, and
+/// the caller must preserve the required lock/resume pairing around this
+/// operation.
+#[cfg(feature = "timers")]
 pub unsafe fn vQueueWaitForMessageRestricted(
     xQueue: QueueHandle_t,
     xTicksToWait: TickType_t,
@@ -2001,7 +2347,7 @@ pub unsafe fn vQueueWaitForMessageRestricted(
         // Place ourselves on the waiting list
         // The actual blocking is handled by the caller (vTaskSuspendAll was already called)
         vTaskPlaceOnEventListRestricted(
-            &mut (*pxQueue).xTasksWaitingToReceive,
+            ptr::addr_of_mut!((*pxQueue).xTasksWaitingToReceive),
             xTicksToWait,
             xWaitIndefinitely,
         );
@@ -2017,29 +2363,31 @@ pub unsafe fn vQueueWaitForMessageRestricted(
 
 /// Create a mutex using dynamic allocation
 ///
+/// Note: Prefer using `sync::Mutex::new()` which provides a safe, RAII-based
+/// wrapper with automatic unlock on drop. Direct use of xQueueCreateMutex
+/// is only needed for raw FreeRTOS interop.
+///
 /// Mutexes support priority inheritance - if a high priority task blocks
 /// on a mutex held by a low priority task, the low priority task inherits
 /// the high priority until it releases the mutex.
+///
+/// # Safety
+///
+/// The allocator and task-context critical-section machinery must be ready.
+/// `ucQueueType` must be a supported mutex type. A non-null returned handle is
+/// uniquely owned by the caller until deletion and must not be used from ISR
+/// context.
 #[cfg(all(
     any(feature = "alloc", feature = "heap-4", feature = "heap-5"),
     feature = "use-mutexes"
 ))]
 pub unsafe fn xQueueCreateMutex(ucQueueType: u8) -> QueueHandle_t {
+    traceENTER_xQueueCreateMutex(ucQueueType);
+
     let xNewQueue = xQueueGenericCreate(1, 0, ucQueueType);
+    prvInitialiseMutex(xNewQueue as *mut Queue_t);
 
-    if !xNewQueue.is_null() {
-        let pxQueue = xNewQueue as *mut Queue_t;
-
-        // Initialize mutex-specific fields
-        (*pxQueue).u.xSemaphore.xMutexHolder = ptr::null_mut();
-        (*pxQueue).u.xSemaphore.uxRecursiveCallCount = 0;
-
-        // Set pcHead to NULL to indicate this is a mutex
-        (*pxQueue).pcHead = ptr::null_mut();
-
-        // Give the mutex initially (it starts available)
-        xQueueGenericSend(xNewQueue, ptr::null(), 0, queueSEND_TO_BACK);
-    }
+    traceRETURN_xQueueCreateMutex(xNewQueue);
 
     xNewQueue
 }
@@ -2052,6 +2400,12 @@ pub unsafe fn xQueueCreateMutex(ucQueueType: u8) -> QueueHandle_t {
 ///
 /// [ORIGINAL C] QueueHandle_t xQueueCreateMutexStatic( const uint8_t ucQueueType,
 ///                                                     StaticQueue_t * pxStaticQueue )
+///
+/// # Safety
+///
+/// `ucQueueType` must be a supported mutex type. `pxStaticQueue` must be
+/// non-null, aligned, uniquely writable initialized storage that remains live
+/// and unmoved for the mutex lifetime. The returned mutex is task-context only.
 #[cfg(feature = "use-mutexes")]
 pub unsafe fn xQueueCreateMutexStatic(
     ucQueueType: u8,
@@ -2062,9 +2416,7 @@ pub unsafe fn xQueueCreateMutexStatic(
     // Mutexes have length 1 and item size 0
     let xNewQueue = xQueueGenericCreateStatic(1, 0, ptr::null_mut(), pxStaticQueue, ucQueueType);
 
-    if !xNewQueue.is_null() {
-        prvInitialiseMutex(xNewQueue as *mut Queue_t);
-    }
+    prvInitialiseMutex(xNewQueue as *mut Queue_t);
 
     traceRETURN_xQueueCreateMutexStatic(xNewQueue);
 
@@ -2085,6 +2437,8 @@ unsafe fn prvInitialiseMutex(pxNewQueue: *mut Queue_t) {
         // (This is how FreeRTOS distinguishes mutexes from queues)
         (*pxNewQueue).pcHead = ptr::null_mut();
 
+        traceCREATE_MUTEX(pxNewQueue as *mut c_void);
+
         // Give the mutex initially (it starts available)
         xQueueGenericSend(
             pxNewQueue as QueueHandle_t,
@@ -2092,8 +2446,6 @@ unsafe fn prvInitialiseMutex(pxNewQueue: *mut Queue_t) {
             0,
             queueSEND_TO_BACK,
         );
-
-        traceCREATE_MUTEX(pxNewQueue as *mut c_void);
     } else {
         traceCREATE_MUTEX_FAILED();
     }
@@ -2105,6 +2457,13 @@ unsafe fn prvInitialiseMutex(pxNewQueue: *mut Queue_t) {
 /// if the mutex is not held.
 ///
 /// [ORIGINAL C] TaskHandle_t xQueueGetMutexHolder( QueueHandle_t xSemaphore )
+///
+/// # Safety
+///
+/// `xSemaphore` must identify a live mutex and remain valid for the call. This
+/// is a task-context query; the returned non-owning task handle can become
+/// stale immediately and must not be dereferenced or retained without further
+/// synchronization.
 #[cfg(feature = "use-mutexes")]
 pub unsafe fn xQueueGetMutexHolder(xSemaphore: QueueHandle_t) -> TaskHandle_t {
     let mut pxReturn: TaskHandle_t = ptr::null_mut();
@@ -2136,6 +2495,12 @@ pub unsafe fn xQueueGetMutexHolder(xSemaphore: QueueHandle_t) -> TaskHandle_t {
 /// Get the task handle of the task that holds the mutex (ISR safe).
 ///
 /// [ORIGINAL C] TaskHandle_t xQueueGetMutexHolderFromISR( QueueHandle_t xSemaphore )
+///
+/// # Safety
+///
+/// The caller must execute at an interrupt priority permitted to call
+/// FreeRTOS. `xSemaphore` must identify a live mutex. The returned non-owning
+/// task handle may become stale after interrupt exit.
 #[cfg(feature = "use-mutexes")]
 pub unsafe fn xQueueGetMutexHolderFromISR(xSemaphore: QueueHandle_t) -> TaskHandle_t {
     let pxReturn: TaskHandle_t;
@@ -2166,6 +2531,12 @@ pub unsafe fn xQueueGetMutexHolderFromISR(xSemaphore: QueueHandle_t) -> TaskHand
 /// for each successful take.
 ///
 /// [ORIGINAL C] BaseType_t xQueueGiveMutexRecursive( QueueHandle_t xMutex )
+///
+/// # Safety
+///
+/// `xMutex` must identify a live recursive mutex owned by the current task.
+/// This is a task-context operation, and the caller must not concurrently
+/// delete or reconfigure the mutex.
 #[cfg(feature = "use-mutexes")]
 pub unsafe fn xQueueGiveMutexRecursive(xMutex: QueueHandle_t) -> BaseType_t {
     let xReturn: BaseType_t;
@@ -2205,22 +2576,147 @@ pub unsafe fn xQueueGiveMutexRecursive(xMutex: QueueHandle_t) -> BaseType_t {
 
 /// Take a semaphore (or mutex)
 ///
+/// Note: Prefer using `sync::Mutex::lock()`, `sync::BinarySemaphore::take()`,
+/// or `sync::CountingSemaphore::take()` which provide safe wrappers.
+/// Direct use of xQueueSemaphoreTake is only needed for raw FreeRTOS interop.
+///
 /// This wraps xQueueReceive with mutex-specific handling for priority inheritance.
-#[inline(always)]
-pub unsafe fn xQueueSemaphoreTake(xQueue: QueueHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
+///
+/// # Safety
+///
+/// `xQueue` must identify a live semaphore or mutex with zero item size. This
+/// must run in task context; a nonzero wait requires a running, unsuspended
+/// scheduler. The object must not be deleted while this call can block.
+pub unsafe fn xQueueSemaphoreTake(
+    xQueue: QueueHandle_t,
+    mut xTicksToWait: TickType_t,
+) -> BaseType_t {
     let pxQueue = xQueue as *mut Queue_t;
-
-    // For mutexes (pcHead == NULL), we need to handle priority inheritance
+    let mut xEntryTimeSet = pdFALSE;
+    let mut xTimeOut = TimeOut_t::new();
     #[cfg(feature = "use-mutexes")]
-    {
-        if (*pxQueue).pcHead.is_null() {
-            // This is a mutex - use the special mutex take logic
-            return xQueueTakeMutexRecursive(xQueue, xTicksToWait);
+    let mut xInheritanceOccurred = pdFALSE;
+
+    configASSERT(!pxQueue.is_null());
+    configASSERT((*pxQueue).uxItemSize == 0);
+    configASSERT(!(xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED && xTicksToWait != 0));
+
+    loop {
+        taskENTER_CRITICAL();
+        {
+            let uxSemaphoreCount = (*pxQueue).uxMessagesWaiting;
+
+            if uxSemaphoreCount > 0 {
+                traceQUEUE_RECEIVE(pxQueue as *mut c_void);
+                (*pxQueue).uxMessagesWaiting = uxSemaphoreCount - 1;
+
+                #[cfg(feature = "use-mutexes")]
+                {
+                    if (*pxQueue).pcHead.is_null() {
+                        /* Record both ownership and the number of mutexes held
+                         * for priority inheritance/disinheritance. */
+                        (*pxQueue).u.xSemaphore.xMutexHolder = pvTaskIncrementMutexHeldCount();
+                    }
+                }
+
+                if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueue).xTasksWaitingToSend)) == pdFALSE
+                    && xTaskRemoveFromEventList(ptr::addr_of!((*pxQueue).xTasksWaitingToSend))
+                        != pdFALSE
+                {
+                    queueYIELD_IF_USING_PREEMPTION();
+                }
+
+                taskEXIT_CRITICAL();
+                return pdPASS;
+            }
+
+            if xTicksToWait == 0 {
+                taskEXIT_CRITICAL();
+                traceQUEUE_RECEIVE_FAILED(pxQueue as *mut c_void);
+                return errQUEUE_EMPTY;
+            } else if xEntryTimeSet == pdFALSE {
+                // SAFETY: xTimeOut is uniquely owned and this call is inside
+                // the queue's task critical section.
+                unsafe { vTaskInternalSetTimeOutState(&mut xTimeOut) };
+                xEntryTimeSet = pdTRUE;
+            }
+        }
+        taskEXIT_CRITICAL();
+
+        vTaskSuspendAll();
+        prvLockQueue(pxQueue);
+
+        // SAFETY: both timeout values are initialized, uniquely owned locals;
+        // this queue API runs in task context.
+        if unsafe { xTaskCheckForTimeOut(&mut xTimeOut, &mut xTicksToWait) } == pdFALSE {
+            if prvIsQueueEmpty(pxQueue) != pdFALSE {
+                traceBLOCKING_ON_QUEUE_RECEIVE(pxQueue as *mut c_void);
+
+                #[cfg(feature = "use-mutexes")]
+                {
+                    if (*pxQueue).pcHead.is_null() {
+                        taskENTER_CRITICAL();
+                        // SAFETY: the queue records a live mutex holder, and
+                        // the required task critical section is active.
+                        xInheritanceOccurred =
+                            unsafe { xTaskPriorityInherit((*pxQueue).u.xSemaphore.xMutexHolder) };
+                        taskEXIT_CRITICAL();
+                    }
+                }
+
+                vTaskPlaceOnEventList(
+                    ptr::addr_of_mut!((*pxQueue).xTasksWaitingToReceive),
+                    xTicksToWait,
+                );
+                prvUnlockQueue(pxQueue);
+
+                if xTaskResumeAll() == pdFALSE {
+                    portYIELD_WITHIN_API();
+                }
+            } else {
+                prvUnlockQueue(pxQueue);
+                xTaskResumeAll();
+            }
+        } else {
+            prvUnlockQueue(pxQueue);
+            xTaskResumeAll();
+
+            if prvIsQueueEmpty(pxQueue) != pdFALSE {
+                #[cfg(feature = "use-mutexes")]
+                {
+                    if xInheritanceOccurred != pdFALSE {
+                        taskENTER_CRITICAL();
+                        let uxHighestWaitingPriority =
+                            prvGetHighestPriorityOfWaitToReceiveList(pxQueue);
+                        // SAFETY: the recorded holder remains live while the
+                        // queue is locked, and the task critical section is
+                        // active for list/priority mutation.
+                        unsafe {
+                            vTaskPriorityDisinheritAfterTimeout(
+                                (*pxQueue).u.xSemaphore.xMutexHolder,
+                                uxHighestWaitingPriority,
+                            )
+                        };
+                        taskEXIT_CRITICAL();
+                    }
+                }
+
+                traceQUEUE_RECEIVE_FAILED(pxQueue as *mut c_void);
+                return errQUEUE_EMPTY;
+            }
         }
     }
+}
 
-    // For regular semaphores, just receive from queue
-    xQueueReceive(xQueue, ptr::null_mut(), xTicksToWait)
+#[cfg(feature = "use-mutexes")]
+unsafe fn prvGetHighestPriorityOfWaitToReceiveList(pxQueue: *const Queue_t) -> UBaseType_t {
+    if listCURRENT_LIST_LENGTH(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive)) > 0 {
+        configMAX_PRIORITIES
+            - listGET_ITEM_VALUE_OF_HEAD_ENTRY(ptr::addr_of!((*pxQueue).xTasksWaitingToReceive))
+                as UBaseType_t
+    } else {
+        tskIDLE_PRIORITY
+    }
 }
 
 /// Take a recursive mutex.
@@ -2231,13 +2727,17 @@ pub unsafe fn xQueueSemaphoreTake(xQueue: QueueHandle_t, xTicksToWait: TickType_
 ///
 /// [ORIGINAL C] BaseType_t xQueueTakeMutexRecursive( QueueHandle_t xMutex,
 ///                                                   TickType_t xTicksToWait )
+///
+/// # Safety
+///
+/// `xMutex` must identify a live recursive mutex. This must run in task
+/// context; a nonzero wait requires a running, unsuspended scheduler, and the
+/// mutex must remain live while the call can block.
 #[cfg(feature = "use-mutexes")]
 pub unsafe fn xQueueTakeMutexRecursive(
     xMutex: QueueHandle_t,
     xTicksToWait: TickType_t,
 ) -> BaseType_t {
-    use crate::kernel::tasks::{pvTaskIncrementMutexHeldCount, xTaskGetCurrentTaskHandle};
-
     let xReturn: BaseType_t;
     let pxMutex = xMutex as *mut Queue_t;
 
@@ -2251,19 +2751,18 @@ pub unsafe fn xQueueTakeMutexRecursive(
     let xCurrentTaskHandle = xTaskGetCurrentTaskHandle();
 
     if (*pxMutex).u.xSemaphore.xMutexHolder == xCurrentTaskHandle {
-        // Already hold it, increment recursive call count
-        (*pxMutex).u.xSemaphore.uxRecursiveCallCount += 1;
+        (*pxMutex).u.xSemaphore.uxRecursiveCallCount =
+            (*pxMutex).u.xSemaphore.uxRecursiveCallCount.wrapping_add(1);
+        configASSERT((*pxMutex).u.xSemaphore.uxRecursiveCallCount != 0);
         xReturn = pdPASS;
         traceTAKE_MUTEX_RECURSIVE(pxMutex as *mut c_void);
     } else {
-        // Could not take the mutex, try to receive from queue
-        xReturn = xQueueReceive(xMutex, ptr::null_mut(), xTicksToWait);
+        xReturn = xQueueSemaphoreTake(xMutex, xTicksToWait);
 
-        // If pdPASS was returned, then the task successfully obtained the mutex
         if xReturn == pdPASS {
-            // We got it - record ownership
-            (*pxMutex).u.xSemaphore.uxRecursiveCallCount = 1;
-            pvTaskIncrementMutexHeldCount();
+            (*pxMutex).u.xSemaphore.uxRecursiveCallCount =
+                (*pxMutex).u.xSemaphore.uxRecursiveCallCount.wrapping_add(1);
+            configASSERT((*pxMutex).u.xSemaphore.uxRecursiveCallCount != 0);
             traceTAKE_MUTEX_RECURSIVE(pxMutex as *mut c_void);
         } else {
             traceTAKE_MUTEX_RECURSIVE_FAILED(pxMutex as *mut c_void);
@@ -2288,6 +2787,12 @@ pub unsafe fn xQueueTakeMutexRecursive(
 /// [ORIGINAL C] QueueHandle_t xQueueCreateCountingSemaphore(
 ///                  const UBaseType_t uxMaxCount,
 ///                  const UBaseType_t uxInitialCount )
+///
+/// # Safety
+///
+/// The allocator and task-context critical-section machinery must be ready.
+/// `uxMaxCount` must be nonzero and `uxInitialCount <= uxMaxCount`. The caller
+/// uniquely owns a non-null returned handle until deletion.
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub unsafe fn xQueueCreateCountingSemaphore(
     uxMaxCount: UBaseType_t,
@@ -2325,6 +2830,12 @@ pub unsafe fn xQueueCreateCountingSemaphore(
 ///                  const UBaseType_t uxMaxCount,
 ///                  const UBaseType_t uxInitialCount,
 ///                  StaticQueue_t * pxStaticQueue )
+///
+/// # Safety
+///
+/// `uxMaxCount` must be nonzero and `uxInitialCount <= uxMaxCount`.
+/// `pxStaticQueue` must be non-null, aligned, uniquely writable initialized
+/// storage that remains live and unmoved for the semaphore lifetime.
 pub unsafe fn xQueueCreateCountingSemaphoreStatic(
     uxMaxCount: UBaseType_t,
     uxInitialCount: UBaseType_t,
@@ -2394,9 +2905,12 @@ unsafe fn prvNotifyQueueSetContainer(pxQueue: *const Queue_t) -> BaseType_t {
         );
 
         if cTxLock == queueUNLOCKED {
-            if listLIST_IS_EMPTY(&(*pxQueueSetContainer).xTasksWaitingToReceive) == pdFALSE {
-                if xTaskRemoveFromEventList(&(*pxQueueSetContainer).xTasksWaitingToReceive)
-                    != pdFALSE
+            if listLIST_IS_EMPTY(ptr::addr_of!((*pxQueueSetContainer).xTasksWaitingToReceive))
+                == pdFALSE
+            {
+                if xTaskRemoveFromEventList(ptr::addr_of!(
+                    (*pxQueueSetContainer).xTasksWaitingToReceive
+                )) != pdFALSE
                 {
                     // The task waiting has a higher priority.
                     xReturn = pdTRUE;
@@ -2404,9 +2918,7 @@ unsafe fn prvNotifyQueueSetContainer(pxQueue: *const Queue_t) -> BaseType_t {
             }
         } else {
             // Queue set is locked, increment tx lock count.
-            if cTxLock < queueINT8_MAX {
-                (*pxQueueSetContainer).cTxLock = cTxLock + 1;
-            }
+            prvIncrementQueueTxLock(pxQueueSetContainer, cTxLock);
         }
     }
 
@@ -2430,7 +2942,10 @@ unsafe fn prvNotifyQueueSetContainer(pxQueue: *const Queue_t) -> BaseType_t {
 ///
 /// # Safety
 /// - Requires heap allocation (alloc feature)
-#[cfg(all(feature = "queue-sets", feature = "alloc"))]
+#[cfg(all(
+    feature = "queue-sets",
+    any(feature = "alloc", feature = "heap-4", feature = "heap-5")
+))]
 pub unsafe fn xQueueCreateSet(uxEventQueueLength: UBaseType_t) -> QueueSetHandle_t {
     // A queue set is just a queue where each item is a pointer to a queue/semaphore.
     // [AMENDMENT] In C, this uses sizeof(Queue_t *). In Rust, we use size_of::<*mut Queue_t>().
@@ -2605,35 +3120,14 @@ pub unsafe fn xQueueSelectFromSet(
 #[cfg(feature = "queue-sets")]
 pub unsafe fn xQueueSelectFromSetFromISR(xQueueSet: QueueSetHandle_t) -> QueueSetMemberHandle_t {
     let mut xReturn: QueueSetMemberHandle_t = ptr::null_mut();
-    let pxQueue = xQueueSet as *mut Queue_t;
 
-    // ISR-safe receive: try to get an item from the queue set without blocking
-    let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
-    {
-        if (*pxQueue).uxMessagesWaiting > 0 {
-            // There's data available - copy it out
-            let pcReadFrom = (*pxQueue).u.xQueue.pcReadFrom;
-            let pcNextReadFrom = pcReadFrom.add((*pxQueue).uxItemSize as usize);
-
-            // Wrap if needed
-            let pcActualRead = if pcNextReadFrom >= (*pxQueue).u.xQueue.pcTail {
-                (*pxQueue).pcHead
-            } else {
-                pcNextReadFrom
-            };
-            (*pxQueue).u.xQueue.pcReadFrom = pcActualRead;
-
-            // Copy the queue handle
-            ptr::copy_nonoverlapping(
-                pcActualRead as *const QueueSetMemberHandle_t,
-                &mut xReturn,
-                1,
-            );
-
-            (*pxQueue).uxMessagesWaiting -= 1;
-        }
-    }
-    portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+    /* Keep the queue-set receive path identical to the queue ISR path.  In
+     * particular this preserves cRxLock accounting when the set is locked. */
+    let _ = xQueueReceiveFromISR(
+        xQueueSet,
+        &mut xReturn as *mut QueueSetMemberHandle_t as *mut c_void,
+        ptr::null_mut(),
+    );
 
     xReturn
 }
@@ -2813,3 +3307,206 @@ mod queue_registry {
 
 #[cfg(feature = "queue-registry")]
 pub use queue_registry::*;
+
+#[cfg(all(test, feature = "port-test"))]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "use-mutexes")]
+    use crate::kernel::tasks::{pxCurrentTCB, TCB_t};
+
+    #[test]
+    fn capacity_one_send_to_front_wraps_within_storage() {
+        let mut queue_buffer = StaticQueue_t::new();
+        let mut storage = [0u32; 1];
+        let queue = unsafe {
+            xQueueCreateStatic(
+                1,
+                core::mem::size_of::<u32>() as UBaseType_t,
+                storage.as_mut_ptr() as *mut u8,
+                &mut queue_buffer,
+            )
+        };
+        assert!(!queue.is_null());
+
+        let sent = 0x1234_5678u32;
+        assert_eq!(
+            unsafe {
+                xQueueGenericSend(
+                    queue,
+                    &sent as *const u32 as *const c_void,
+                    0,
+                    queueSEND_TO_FRONT,
+                )
+            },
+            pdPASS
+        );
+
+        let mut received = 0u32;
+        assert_eq!(
+            unsafe { xQueueReceive(queue, &mut received as *mut u32 as *mut c_void, 0,) },
+            pdPASS
+        );
+        assert_eq!(received, sent);
+    }
+
+    #[test]
+    fn capacity_one_overwrite_from_isr_replaces_existing_item() {
+        let mut queue_buffer = StaticQueue_t::new();
+        let mut storage = [0u32; 1];
+        let queue = unsafe {
+            xQueueCreateStatic(
+                1,
+                core::mem::size_of::<u32>() as UBaseType_t,
+                storage.as_mut_ptr() as *mut u8,
+                &mut queue_buffer,
+            )
+        };
+        assert!(!queue.is_null());
+
+        let first = 0x1111_1111u32;
+        let replacement = 0x2222_2222u32;
+        assert_eq!(
+            unsafe {
+                xQueueGenericSend(
+                    queue,
+                    &first as *const u32 as *const c_void,
+                    0,
+                    queueSEND_TO_BACK,
+                )
+            },
+            pdPASS
+        );
+        assert_eq!(
+            unsafe {
+                xQueueOverwriteFromISR(
+                    queue,
+                    &replacement as *const u32 as *const c_void,
+                    ptr::null_mut(),
+                )
+            },
+            pdPASS
+        );
+        assert_eq!(unsafe { uxQueueMessagesWaiting(queue) }, 1);
+
+        let mut received = 0u32;
+        assert_eq!(
+            unsafe { xQueueReceive(queue, &mut received as *mut u32 as *mut c_void, 0,) },
+            pdPASS
+        );
+        assert_eq!(received, replacement);
+    }
+
+    #[cfg(feature = "queue-sets")]
+    #[test]
+    fn locked_queue_set_isr_paths_defer_events_and_cap_lock_counts() {
+        crate::port::test_port_reset();
+
+        let mut member_buffer = StaticQueue_t::new();
+        let mut set_buffer = StaticQueue_t::new();
+        let mut set_storage = [ptr::null_mut::<Queue_t>(); 1];
+
+        unsafe {
+            let member = xQueueGenericCreateStatic(
+                1,
+                queueSEMAPHORE_QUEUE_ITEM_LENGTH,
+                ptr::null_mut(),
+                &mut member_buffer,
+                queueQUEUE_TYPE_BINARY_SEMAPHORE,
+            );
+            let set =
+                xQueueCreateSetStatic(1, set_storage.as_mut_ptr().cast::<u8>(), &mut set_buffer);
+            assert!(!member.is_null() && !set.is_null());
+            assert_eq!(xQueueAddToSet(member, set), pdPASS);
+
+            /* A give while the member is locked must not touch its set.  Any
+             * deferred notification is accounted through the capped cTxLock. */
+            (*member).cTxLock = queueLOCKED_UNMODIFIED;
+            assert_eq!(xQueueGiveFromISR(member, ptr::null_mut()), pdPASS);
+            /* No tasks exist in this host fixture, so the upstream lock-count
+             * cap keeps the deferred count at zero. */
+            assert_eq!((*member).cTxLock, queueLOCKED_UNMODIFIED);
+            assert_eq!((*set).uxMessagesWaiting, 0);
+
+            /* Exercise the unlocked queue-set notification path separately. */
+            (*member).uxMessagesWaiting = 0;
+            (*member).cTxLock = queueUNLOCKED;
+            assert_eq!(xQueueGiveFromISR(member, ptr::null_mut()), pdPASS);
+            assert_eq!((*set).uxMessagesWaiting, 1);
+
+            /* Upstream implements set selection through xQueueReceiveFromISR,
+             * including deferred receive accounting while the set is locked. */
+            (*set).cRxLock = queueLOCKED_UNMODIFIED;
+            assert_eq!(xQueueSelectFromSetFromISR(set), member);
+            assert_eq!((*set).cRxLock, queueLOCKED_UNMODIFIED);
+            assert_eq!((*set).uxMessagesWaiting, 0);
+        }
+    }
+
+    #[cfg(feature = "use-mutexes")]
+    #[test]
+    fn ordinary_mutex_take_records_and_give_clears_owner() {
+        crate::port::test_port_reset();
+
+        let mut current = TCB_t::new();
+        current.uxPriority = 2;
+        current.uxBasePriority = 2;
+        let current_ptr = core::ptr::addr_of_mut!(current);
+        let mut mutex_buffer = StaticQueue_t::new();
+
+        unsafe {
+            pxCurrentTCB = current_ptr;
+            let mutex = xQueueCreateMutexStatic(queueQUEUE_TYPE_MUTEX, &mut mutex_buffer);
+            assert!(!mutex.is_null());
+            assert_eq!(xQueueSemaphoreTake(mutex, 0), pdPASS);
+            assert!((*mutex).u.xSemaphore.xMutexHolder == current_ptr.cast());
+            assert_eq!((*current_ptr).uxMutexesHeld, 1);
+            assert_eq!((*mutex).uxMessagesWaiting, 0);
+
+            assert_eq!(
+                xQueueGenericSend(mutex, ptr::null(), 0, queueSEND_TO_BACK),
+                pdPASS
+            );
+            assert!((*mutex).u.xSemaphore.xMutexHolder.is_null());
+            assert_eq!((*current_ptr).uxMutexesHeld, 0);
+            assert_eq!((*mutex).uxMessagesWaiting, 1);
+            pxCurrentTCB = ptr::null_mut();
+        }
+    }
+
+    #[cfg(feature = "use-mutexes")]
+    #[test]
+    fn recursive_mutex_counts_depth_but_only_one_held_mutex() {
+        crate::port::test_port_reset();
+
+        let mut current = TCB_t::new();
+        current.uxPriority = 2;
+        current.uxBasePriority = 2;
+        let current_ptr = core::ptr::addr_of_mut!(current);
+        let mut mutex_buffer = StaticQueue_t::new();
+
+        unsafe {
+            pxCurrentTCB = current_ptr;
+            let mutex = xQueueCreateMutexStatic(queueQUEUE_TYPE_RECURSIVE_MUTEX, &mut mutex_buffer);
+            assert!(!mutex.is_null());
+
+            assert_eq!(xQueueTakeMutexRecursive(mutex, 0), pdPASS);
+            assert_eq!(xQueueTakeMutexRecursive(mutex, 0), pdPASS);
+            assert_eq!((*mutex).u.xSemaphore.uxRecursiveCallCount, 2);
+            assert_eq!((*current_ptr).uxMutexesHeld, 1);
+            assert_eq!((*mutex).uxMessagesWaiting, 0);
+
+            assert_eq!(xQueueGiveMutexRecursive(mutex), pdPASS);
+            assert_eq!((*mutex).u.xSemaphore.uxRecursiveCallCount, 1);
+            assert_eq!((*current_ptr).uxMutexesHeld, 1);
+            assert_eq!((*mutex).uxMessagesWaiting, 0);
+
+            assert_eq!(xQueueGiveMutexRecursive(mutex), pdPASS);
+            assert_eq!((*mutex).u.xSemaphore.uxRecursiveCallCount, 0);
+            assert_eq!((*current_ptr).uxMutexesHeld, 0);
+            assert_eq!((*mutex).uxMessagesWaiting, 1);
+            assert!((*mutex).u.xSemaphore.xMutexHolder.is_null());
+            pxCurrentTCB = ptr::null_mut();
+        }
+    }
+}

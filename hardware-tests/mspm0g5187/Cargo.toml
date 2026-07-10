@@ -1,0 +1,20 @@
+[package]
+name = "freertos-mspm0g5187-hardware-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "FreeRTOS-in-Rust hardware regression for the LP-MSPM0G5187"
+
+[dependencies]
+freertos-in-rust = { path = "../..", default-features = false, features = [
+    "port-cortex-m0",
+    "heap-4",
+    "user-config",
+] }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+
+[profile.release]
+opt-level = "s"
+lto = true
+debug = true

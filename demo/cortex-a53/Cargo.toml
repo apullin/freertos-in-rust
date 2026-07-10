@@ -2,8 +2,8 @@
 name = "freertos-demo-cortex-a53"
 version = "0.1.0"
 edition = "2021"
-authors = ["FreeRusTOS Contributors"]
-description = "Demo application for FreeRusTOS on ARM Cortex-A53 (AArch64)"
+authors = ["FreeRTOS-in-Rust Contributors"]
+description = "Demo application for FreeRTOS-in-Rust on ARM Cortex-A53 (AArch64)"
 
 [[bin]]
 name = "demo"
@@ -32,9 +32,7 @@ freertos-in-rust = { path = "../..", default-features = false, features = [
     "trace-facility",
     "record-stack-high-address",
     "application-task-tag",
-    "posix-errno",
     "thread-local-storage",
-    "critical-nesting-in-tcb",
     "stats-formatting",
     "queue-registry",
     "list-data-integrity-check",

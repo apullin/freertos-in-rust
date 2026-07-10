@@ -41,7 +41,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! freertos-in-rust = { version = "0.1", features = ["heap-4"] }
+//! freertos-in-rust = { version = "0.3", default-features = false, features = ["port-cortex-m4f", "heap-4"] }
 //! ```
 //!
 //! ### heap-5 (Multiple regions)
@@ -53,7 +53,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! freertos-in-rust = { version = "0.1", features = ["heap-5"] }
+//! freertos-in-rust = { version = "0.3", default-features = false, features = ["port-cortex-m4f", "heap-5"] }
 //! ```
 //!
 //! ```ignore
@@ -76,7 +76,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! freertos-in-rust = { version = "0.1", features = ["alloc"] }
+//! freertos-in-rust = { version = "0.3", default-features = false, features = ["port-cortex-m4f", "alloc"] }
 //! ```
 //!
 //! Note: This wraps whatever allocator you provide. The kernel doesn't
@@ -163,15 +163,64 @@ mod alloc_impl {
     use alloc::alloc::{alloc, dealloc, Layout};
     use core::ffi::c_void;
     use core::ptr;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
     /// Track total allocated bytes (approximate, for xPortGetFreeHeapSize)
-    static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
-
-    /// Allocate memory
     ///
-    /// [AMENDMENT] This wraps Rust's global allocator. The returned pointer
-    /// has 8-byte alignment (matching portBYTE_ALIGNMENT).
+    /// \[AMENDMENT\] This is protected by the port critical-section primitives
+    /// rather than atomic read-modify-write operations. ARMv6-M exposes atomic
+    /// loads and stores but not the `AtomicUsize::fetch_add/fetch_sub` operations
+    /// used by the original Rust wrapper.
+    static mut ALLOCATED_BYTES: usize = 0;
+
+    const ALLOCATION_ALIGNMENT: usize = {
+        let port_alignment = crate::port::portBYTE_ALIGNMENT;
+        let metadata_alignment = core::mem::align_of::<usize>();
+        if port_alignment > metadata_alignment {
+            port_alignment
+        } else {
+            metadata_alignment
+        }
+    };
+
+    const ALLOCATION_HEADER_SIZE: usize = {
+        let mask = ALLOCATION_ALIGNMENT - 1;
+        (core::mem::size_of::<usize>() + mask) & !mask
+    };
+
+    #[inline(always)]
+    unsafe fn add_allocated_bytes(size: usize) {
+        crate::port::portENTER_CRITICAL();
+        ALLOCATED_BYTES += size;
+        crate::port::portEXIT_CRITICAL();
+    }
+
+    #[inline(always)]
+    unsafe fn subtract_allocated_bytes(size: usize) {
+        crate::port::portENTER_CRITICAL();
+        ALLOCATED_BYTES -= size;
+        crate::port::portEXIT_CRITICAL();
+    }
+
+    #[inline(always)]
+    fn allocated_bytes() -> usize {
+        crate::port::portENTER_CRITICAL();
+        let allocated = unsafe { ALLOCATED_BYTES };
+        crate::port::portEXIT_CRITICAL();
+        allocated
+    }
+
+    /// Allocate memory through Rust's global allocator.
+    ///
+    /// \[AMENDMENT\] This wraps Rust's global allocator. The allocation metadata
+    /// occupies a complete alignment unit, so the returned pointer retains
+    /// `portBYTE_ALIGNMENT` alignment on both 32-bit and 64-bit targets.
+    ///
+    /// # Safety
+    ///
+    /// The selected global allocator and port critical-section implementation
+    /// must be initialized for the current execution context. A non-null result
+    /// designates exactly `xWantedSize` writable, uninitialized bytes and must
+    /// be passed exactly once to [`vPortFree`] when no access can remain.
     pub unsafe fn pvPortMalloc(xWantedSize: usize) -> *mut c_void {
         if xWantedSize == 0 {
             return ptr::null_mut();
@@ -179,8 +228,11 @@ mod alloc_impl {
 
         // Create layout with proper alignment
         // We store the size at the beginning for deallocation
-        let total_size = xWantedSize + core::mem::size_of::<usize>();
-        let layout = match Layout::from_size_align(total_size, crate::port::portBYTE_ALIGNMENT) {
+        let total_size = match xWantedSize.checked_add(ALLOCATION_HEADER_SIZE) {
+            Some(size) => size,
+            None => return ptr::null_mut(),
+        };
+        let layout = match Layout::from_size_align(total_size, ALLOCATION_ALIGNMENT) {
             Ok(l) => l,
             Err(_) => return ptr::null_mut(),
         };
@@ -192,34 +244,40 @@ mod alloc_impl {
 
         // Store the size at the beginning
         *(ptr as *mut usize) = total_size;
-        ALLOCATED_BYTES.fetch_add(total_size, Ordering::Relaxed);
+        add_allocated_bytes(total_size);
 
-        // Return pointer after the size field
-        ptr.add(core::mem::size_of::<usize>()) as *mut c_void
+        // Return pointer after the padded metadata header.
+        ptr.add(ALLOCATION_HEADER_SIZE) as *mut c_void
     }
 
-    /// Free previously allocated memory
+    /// Free previously allocated memory.
+    ///
+    /// # Safety
+    ///
+    /// Apart from null, `pv` must be the live pointer returned by this module's
+    /// `pvPortMalloc`/`pvPortCalloc`, must not have been freed already, and no
+    /// pointer derived from the allocation may be accessed after this call.
     pub unsafe fn vPortFree(pv: *mut c_void) {
         if pv.is_null() {
             return;
         }
 
         // Get the original pointer (before size field)
-        let size_ptr = (pv as *mut u8).sub(core::mem::size_of::<usize>()) as *mut usize;
+        let size_ptr = (pv as *mut u8).sub(ALLOCATION_HEADER_SIZE) as *mut usize;
         let total_size = *size_ptr;
 
-        let layout = Layout::from_size_align_unchecked(total_size, crate::port::portBYTE_ALIGNMENT);
+        let layout = Layout::from_size_align_unchecked(total_size, ALLOCATION_ALIGNMENT);
 
-        ALLOCATED_BYTES.fetch_sub(total_size, Ordering::Relaxed);
+        subtract_allocated_bytes(total_size);
         dealloc(size_ptr as *mut u8, layout);
     }
 
     /// Get approximate free heap size
     ///
-    /// [AMENDMENT] With Rust's global allocator, we can't accurately report
+    /// \[AMENDMENT\] With Rust's global allocator, we can't accurately report
     /// free heap. Returns a large placeholder value.
     pub fn xPortGetFreeHeapSize() -> usize {
-        usize::MAX - ALLOCATED_BYTES.load(Ordering::Relaxed)
+        usize::MAX - allocated_bytes()
     }
 
     /// Get minimum ever free heap size
@@ -227,7 +285,14 @@ mod alloc_impl {
         xPortGetFreeHeapSize()
     }
 
-    /// Allocate and zero memory
+    /// Allocate and zero memory.
+    ///
+    /// # Safety
+    ///
+    /// The allocator and port must be initialized as required by
+    /// [`pvPortMalloc`]. A non-null result owns exactly `xNum * xSize` writable
+    /// zeroed bytes and must eventually be passed exactly once to
+    /// [`vPortFree`].
     pub unsafe fn pvPortCalloc(xNum: usize, xSize: usize) -> *mut c_void {
         let total = match xNum.checked_mul(xSize) {
             Some(t) => t,
@@ -244,14 +309,28 @@ mod alloc_impl {
     /// Initialize heap blocks (no-op with global allocator)
     pub fn vPortInitialiseBlocks() {}
 
-    /// Reset heap state (no-op with global allocator)
-    pub fn vPortHeapResetState() {}
+    /// Reset heap state (no-op with global allocator).
+    ///
+    /// # Safety
+    ///
+    /// Kept unsafe for API consistency with the FreeRTOS heap backends, where
+    /// reset requires exclusive allocator access and no live allocations.
+    pub unsafe fn vPortHeapResetState() {}
 
     /// Reset minimum ever free heap tracking
     pub fn xPortResetHeapMinimumEverFreeHeapSize() {}
 
-    /// Get heap statistics (placeholder values)
-    pub fn vPortGetHeapStats(pxHeapStats: *mut super::HeapStats_t) {
+    /// Get heap statistics (placeholder values).
+    ///
+    /// # Safety
+    ///
+    /// `pxHeapStats` must be non-null, aligned, and valid for one complete
+    /// `HeapStats_t` write, with no conflicting access for the duration.
+    pub unsafe fn vPortGetHeapStats(pxHeapStats: *mut super::HeapStats_t) {
+        if pxHeapStats.is_null() {
+            return;
+        }
+
         unsafe {
             (*pxHeapStats).xAvailableHeapSpaceInBytes = xPortGetFreeHeapSize();
             (*pxHeapStats).xSizeOfLargestFreeBlockInBytes = xPortGetFreeHeapSize();
@@ -274,14 +353,23 @@ pub use alloc_impl::*;
 #[cfg(not(any(feature = "heap-4", feature = "heap-5", feature = "alloc")))]
 mod stub_impl {
     use core::ffi::c_void;
-    use core::ptr;
 
-    /// Allocate memory (stub - panics)
+    /// Allocate memory (stub - panics).
+    ///
+    /// # Safety
+    ///
+    /// This stub never returns. The signature matches allocator-enabled
+    /// configurations so feature changes cannot silently weaken call sites.
     pub unsafe fn pvPortMalloc(_xWantedSize: usize) -> *mut c_void {
         panic!("pvPortMalloc called but no heap feature is enabled (use `heap-4` or `alloc`)");
     }
 
-    /// Free memory (stub - panics)
+    /// Free memory (stub - panics).
+    ///
+    /// # Safety
+    ///
+    /// This stub never returns. The signature matches allocator-enabled
+    /// configurations.
     pub unsafe fn vPortFree(_pv: *mut c_void) {
         panic!("vPortFree called but no heap feature is enabled");
     }
@@ -296,7 +384,12 @@ mod stub_impl {
         0
     }
 
-    /// Allocate and zero memory (stub - panics)
+    /// Allocate and zero memory (stub - panics).
+    ///
+    /// # Safety
+    ///
+    /// This stub never returns. The signature matches allocator-enabled
+    /// configurations.
     pub unsafe fn pvPortCalloc(_xNum: usize, _xSize: usize) -> *mut c_void {
         panic!("pvPortCalloc called but no heap feature is enabled");
     }
@@ -304,14 +397,27 @@ mod stub_impl {
     /// Initialize heap blocks (stub)
     pub fn vPortInitialiseBlocks() {}
 
-    /// Reset heap state (stub)
-    pub fn vPortHeapResetState() {}
+    /// Reset heap state (stub).
+    ///
+    /// # Safety
+    ///
+    /// Kept unsafe for API consistency with allocator-enabled configurations.
+    pub unsafe fn vPortHeapResetState() {}
 
     /// Reset minimum ever free heap tracking (stub)
     pub fn xPortResetHeapMinimumEverFreeHeapSize() {}
 
-    /// Get heap statistics (stub)
-    pub fn vPortGetHeapStats(pxHeapStats: *mut super::HeapStats_t) {
+    /// Get heap statistics (stub).
+    ///
+    /// # Safety
+    ///
+    /// `pxHeapStats` must be non-null, aligned, and valid for one complete
+    /// `HeapStats_t` write, with no conflicting access for the duration.
+    pub unsafe fn vPortGetHeapStats(pxHeapStats: *mut super::HeapStats_t) {
+        if pxHeapStats.is_null() {
+            return;
+        }
+
         unsafe {
             (*pxHeapStats).xAvailableHeapSpaceInBytes = 0;
             (*pxHeapStats).xSizeOfLargestFreeBlockInBytes = 0;

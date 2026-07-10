@@ -1,0 +1,74 @@
+[package]
+name = "freertos-qemu-cortex-m7"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["fpu-context", "basepri-port"]
+small-memory = []
+integer-context = []
+fpu-context = []
+primask-port = []
+basepri-port = []
+tickless = [
+    "freertos-in-rust/generate-run-time-stats",
+    "freertos-in-rust/tickless-idle",
+]
+
+[lib]
+name = "freertos_qemu_cortex_m4f"
+path = "../cortex-m4f/src/lib.rs"
+
+[[bin]]
+name = "smoke"
+path = "../cortex-m4f/src/bin/smoke.rs"
+
+[[bin]]
+name = "kernel-core"
+path = "../cortex-m4f/src/bin/kernel_core.rs"
+
+[[bin]]
+name = "isr"
+path = "../cortex-m4f/src/bin/isr.rs"
+
+[[bin]]
+name = "allocator"
+path = "../cortex-m4f/src/bin/allocator.rs"
+
+[[bin]]
+name = "stream-event-timer"
+path = "../cortex-m4f/src/bin/stream-event-timer.rs"
+
+[[bin]]
+name = "port"
+path = "../cortex-m4f/src/bin/port.rs"
+
+[[bin]]
+name = "tickless"
+path = "../cortex-m4f/src/bin/tickless.rs"
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+freertos-in-rust = { path = "../../..", default-features = false, features = [
+    "port-cortex-m7",
+    "heap-4",
+    "stream-buffers",
+    "timers",
+    "pend-function-call",
+    "use-mutexes",
+    "task-priority-set",
+] }
+freertos-qemu-test-common = { path = "../common" }
+panic-semihosting = { version = "0.6", features = ["exit"] }
+
+[profile.dev]
+opt-level = "s"
+debug = true
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

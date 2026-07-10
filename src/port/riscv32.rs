@@ -26,6 +26,8 @@ use core::ffi::c_void;
 
 use crate::config::*;
 // The kernel task functions are called from assembly via their symbol names
+#[cfg(feature = "tickless-idle")]
+use crate::kernel::tasks::{eTaskConfirmSleepModeStatus, vTaskStepTick};
 #[allow(unused_imports)]
 use crate::kernel::tasks::{pxCurrentTCB, vTaskSwitchContext, xTaskIncrementTick};
 use crate::types::*;
@@ -99,7 +101,7 @@ pub fn portDISABLE_INTERRUPTS() {
         core::arch::asm!(
             "csrc mstatus, {mie_bit}",
             mie_bit = in(reg) 0x8,
-            options(nomem, nostack)
+            options(nostack)
         );
     }
 }
@@ -111,7 +113,7 @@ pub fn portENABLE_INTERRUPTS() {
         core::arch::asm!(
             "csrs mstatus, {mie_bit}",
             mie_bit = in(reg) 0x8,
-            options(nomem, nostack)
+            options(nostack)
         );
     }
 }
@@ -120,13 +122,19 @@ pub fn portENABLE_INTERRUPTS() {
 pub fn portENTER_CRITICAL() {
     portDISABLE_INTERRUPTS();
     unsafe {
-        xCriticalNesting += 1;
+        xCriticalNesting = xCriticalNesting
+            .checked_add(1)
+            .expect("RISC-V critical nesting overflow");
     }
 }
 
 /// Exit critical section
 pub fn portEXIT_CRITICAL() {
     unsafe {
+        configASSERT(xCriticalNesting > 0);
+        if xCriticalNesting == 0 {
+            return;
+        }
         xCriticalNesting -= 1;
         if xCriticalNesting == 0 {
             portENABLE_INTERRUPTS();
@@ -140,11 +148,10 @@ pub fn portSET_INTERRUPT_MASK_FROM_ISR() -> UBaseType_t {
     let mstatus: u32;
     unsafe {
         core::arch::asm!(
-            "csrr {mstatus}, mstatus",
-            "csrc mstatus, {mie_bit}",
+            "csrrc {mstatus}, mstatus, {mie_bit}",
             mstatus = out(reg) mstatus,
             mie_bit = in(reg) 0x8,
-            options(nomem, nostack)
+            options(nostack)
         );
     }
     mstatus as UBaseType_t
@@ -154,11 +161,19 @@ pub fn portSET_INTERRUPT_MASK_FROM_ISR() -> UBaseType_t {
 #[inline(always)]
 pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(saved_mstatus: UBaseType_t) {
     unsafe {
-        core::arch::asm!(
-            "csrw mstatus, {mstatus}",
-            mstatus = in(reg) saved_mstatus as u32,
-            options(nomem, nostack)
-        );
+        if (saved_mstatus as u32 & 0x8) != 0 {
+            core::arch::asm!(
+                "csrs mstatus, {mie_bit}",
+                mie_bit = in(reg) 0x8,
+                options(nostack)
+            );
+        } else {
+            core::arch::asm!(
+                "csrc mstatus, {mie_bit}",
+                mie_bit = in(reg) 0x8,
+                options(nostack)
+            );
+        }
     }
 }
 
@@ -170,7 +185,7 @@ pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(saved_mstatus: UBaseType_t) {
 #[inline(always)]
 pub fn portYIELD() {
     unsafe {
-        core::arch::asm!("ecall", options(nomem, nostack));
+        core::arch::asm!("ecall", options(nostack));
     }
 }
 
@@ -178,9 +193,9 @@ pub fn portYIELD() {
 #[inline(always)]
 pub fn portYIELD_FROM_ISR(xSwitchRequired: BaseType_t) {
     if xSwitchRequired != crate::types::pdFALSE {
-        // Set a flag that the trap handler will check
+        // The common interrupt epilogue consumes this before restoring a task.
         unsafe {
-            YIELD_PENDING = true;
+            core::ptr::write_volatile(&raw mut xPortYieldPending, 1);
         }
     }
 }
@@ -191,8 +206,45 @@ pub fn portEND_SWITCHING_ISR(xSwitchRequired: BaseType_t) {
     portYIELD_FROM_ISR(xSwitchRequired);
 }
 
-/// Flag indicating a yield is pending from ISR
-static mut YIELD_PENDING: bool = false;
+/// Deferred context-switch request consumed by the interrupt epilogue.
+#[no_mangle]
+static mut xPortYieldPending: u32 = 0;
+
+/// Number of active asynchronous interrupt frames.
+#[no_mangle]
+static mut uxPortInterruptNesting: UBaseType_t = 0;
+
+/// Application machine-external interrupt dispatcher.
+pub type ExternalInterruptHandler_t = extern "C" fn(UBaseType_t) -> BaseType_t;
+
+static mut pxExternalInterruptHandler: Option<ExternalInterruptHandler_t> = None;
+
+/// Install the machine-external interrupt dispatcher.
+///
+/// The callback runs on the port ISR stack and must claim and complete the
+/// platform interrupt at its controller. Its return value follows the normal
+/// `xHigherPriorityTaskWoken` convention.
+///
+/// # Safety
+///
+/// Install or clear this only while machine external interrupts cannot run,
+/// normally before starting the scheduler.
+pub unsafe fn vPortSetExternalInterruptHandler(pxHandler: Option<ExternalInterruptHandler_t>) {
+    pxExternalInterruptHandler = pxHandler;
+}
+
+/// Called by the assembly trap path for machine-external interrupts.
+#[no_mangle]
+extern "C" fn xPortHandleExternalInterrupt(uxCause: UBaseType_t) -> BaseType_t {
+    let pxHandler = unsafe { pxExternalInterruptHandler };
+    configASSERT(pxHandler.is_some());
+
+    if let Some(pxHandler) = pxHandler {
+        pxHandler(uxCause)
+    } else {
+        pdFALSE
+    }
+}
 
 // =============================================================================
 // Stack Initialization
@@ -214,7 +266,14 @@ extern "C" fn prvTaskExitError() -> ! {
 ///
 /// Creates the initial stack frame that will be restored when the task
 /// first runs. The frame simulates what would be saved during a context switch.
-pub fn pxPortInitialiseStack(
+///
+/// # Safety
+///
+/// `pxTopOfStack` must be non-null and lie near the high end of a uniquely
+/// writable allocation with enough lower-addressed room for the aligned
+/// `portCONTEXT_SIZE` frame. The allocation must remain live and stationary
+/// for the task lifetime. `pvParameters` must satisfy `pxCode` when invoked.
+pub unsafe fn pxPortInitialiseStack(
     pxTopOfStack: *mut StackType_t,
     pxCode: TaskFunction_t,
     pvParameters: *mut c_void,
@@ -261,43 +320,90 @@ pub fn pxPortInitialiseStack(
 // Timer Configuration
 // =============================================================================
 
-/// Timer increment for one tick
+/// Whole MTIME counts in each kernel tick.
 static mut TIMER_INCREMENT: u64 = 0;
+
+/// Numerator left over after dividing MTIME frequency by tick frequency.
+static mut TIMER_REMAINDER: u32 = 0;
+
+/// Fractional phase after the compare value in `ullNextTime`.
+static mut TIMER_FRACTION: u32 = 0;
 
 /// Next timer compare value
 #[no_mangle]
 pub static mut ullNextTime: u64 = 0;
 
+/// Read RV32's 64-bit MTIME without returning a torn value at low-word wrap.
+#[inline(always)]
+pub fn ullPortReadMtime() -> u64 {
+    unsafe {
+        let pulTimeLow = MTIME_ADDR as *const u32;
+        let pulTimeHigh = (MTIME_ADDR + 4) as *const u32;
+        let mut ulTimeHigh = core::ptr::read_volatile(pulTimeHigh);
+
+        loop {
+            let ulTimeLow = core::ptr::read_volatile(pulTimeLow);
+            let ulTimeHighAfter = core::ptr::read_volatile(pulTimeHigh);
+
+            if ulTimeHigh == ulTimeHighAfter {
+                return ((ulTimeHigh as u64) << 32) | ulTimeLow as u64;
+            }
+
+            ulTimeHigh = ulTimeHighAfter;
+        }
+    }
+}
+
+/// Write one RV32 MTIMECMP value without exposing a transient earlier compare.
+#[inline(always)]
+unsafe fn prvWriteMtimeCompare(ullCompare: u64) {
+    /* The low word is first raised to its maximum, then the high and final low
+     * words are installed. This is the sequence recommended by the RISC-V
+     * privileged specification for RV32. */
+    core::ptr::write_volatile(MTIMECMP_ADDR as *mut u32, u32::MAX);
+    core::ptr::write_volatile((MTIMECMP_ADDR + 4) as *mut u32, (ullCompare >> 32) as u32);
+    core::ptr::write_volatile(MTIMECMP_ADDR as *mut u32, ullCompare as u32);
+}
+
+/// Advance a fractional tick phase by `ullTicks` timer intervals.
+#[inline(always)]
+unsafe fn prvTimerAdvance(ulInitialFraction: u32, ullTicks: u64) -> (u64, u32) {
+    let ullFraction =
+        (ulInitialFraction as u64).wrapping_add(ullTicks.wrapping_mul(TIMER_REMAINDER as u64));
+    let ullTickRate = configTICK_RATE_HZ as u64;
+    let ullExtraCounts = ullFraction / ullTickRate;
+    let ulFinalFraction = (ullFraction % ullTickRate) as u32;
+    let ullCounts = ullTicks
+        .wrapping_mul(TIMER_INCREMENT)
+        .wrapping_add(ullExtraCounts);
+
+    (ullCounts, ulFinalFraction)
+}
+
+/// Advance the programmed compare value by one exact fractional tick.
+#[inline(always)]
+unsafe fn prvAdvanceNextTime() {
+    let (ullIncrement, ulNewFraction) = prvTimerAdvance(TIMER_FRACTION, 1);
+    TIMER_FRACTION = ulNewFraction;
+    ullNextTime = ullNextTime.wrapping_add(ullIncrement);
+}
+
 /// Set up the timer to generate tick interrupts
 #[no_mangle]
 pub extern "C" fn vPortSetupTimerInterrupt() {
     unsafe {
-        // Calculate timer increment for one tick
-        // RISC-V uses MTIME which may run at a different frequency than CPU
-        TIMER_INCREMENT = (configMTIME_HZ / configTICK_RATE_HZ as u32) as u64;
+        let ulMtimeHz = configMTIME_HZ;
+        let ulTickRate = configTICK_RATE_HZ as u32;
+        configASSERT(ulTickRate > 0);
+        configASSERT(ulMtimeHz >= ulTickRate);
 
-        // Read current MTIME value
-        let mtime_lo = core::ptr::read_volatile(MTIME_ADDR as *const u32);
-        let mtime_hi = core::ptr::read_volatile((MTIME_ADDR + 4) as *const u32);
-        let mtime = ((mtime_hi as u64) << 32) | (mtime_lo as u64);
+        TIMER_INCREMENT = (ulMtimeHz / ulTickRate) as u64;
+        TIMER_REMAINDER = ulMtimeHz % ulTickRate;
+        TIMER_FRACTION = 0;
 
-        // Set first compare value
-        ullNextTime = mtime + TIMER_INCREMENT;
-
-        // Write to MTIMECMP (write high word first with max value to avoid spurious interrupt)
-        core::ptr::write_volatile((MTIMECMP_ADDR + 4) as *mut u32, 0xFFFFFFFF);
-        core::ptr::write_volatile(MTIMECMP_ADDR as *mut u32, ullNextTime as u32);
-        core::ptr::write_volatile((MTIMECMP_ADDR + 4) as *mut u32, (ullNextTime >> 32) as u32);
-
-        // Prepare next compare value
-        ullNextTime += TIMER_INCREMENT;
-
-        // Enable machine timer interrupt (mie.MTIE = bit 7)
-        core::arch::asm!(
-            "csrs mie, {mtie}",
-            mtie = in(reg) 0x80,
-            options(nomem, nostack)
-        );
+        ullNextTime = ullPortReadMtime();
+        prvAdvanceNextTime();
+        prvWriteMtimeCompare(ullNextTime);
     }
 }
 
@@ -305,13 +411,8 @@ pub extern "C" fn vPortSetupTimerInterrupt() {
 #[no_mangle]
 pub extern "C" fn vPortUpdateTimerCompare() {
     unsafe {
-        // Write to MTIMECMP
-        core::ptr::write_volatile((MTIMECMP_ADDR + 4) as *mut u32, 0xFFFFFFFF);
-        core::ptr::write_volatile(MTIMECMP_ADDR as *mut u32, ullNextTime as u32);
-        core::ptr::write_volatile((MTIMECMP_ADDR + 4) as *mut u32, (ullNextTime >> 32) as u32);
-
-        // Prepare next compare value
-        ullNextTime += TIMER_INCREMENT;
+        prvAdvanceNextTime();
+        prvWriteMtimeCompare(ullNextTime);
     }
 }
 
@@ -337,14 +438,21 @@ pub fn xPortStartScheduler() -> BaseType_t {
 
         // Initialize critical nesting
         xCriticalNesting = 0;
-
-        // Set up the timer
-        vPortSetupTimerInterrupt();
+        xPortYieldPending = 0;
+        uxPortInterruptNesting = 0;
 
         // Set trap vector to our handler (direct mode)
         core::arch::asm!(
             "la t0, freertos_risc_v_trap_handler",
             "csrw mtvec, t0",
+            options(nomem, nostack)
+        );
+
+        // Set up the timer, then enable machine timer and external sources.
+        vPortSetupTimerInterrupt();
+        core::arch::asm!(
+            "csrs mie, {interrupts}",
+            interrupts = in(reg) 0x880,
             options(nomem, nostack)
         );
 
@@ -375,8 +483,8 @@ unsafe extern "C" fn vRestoreContextOfFirstTask() -> ! {
         "csrw mepc, t0",
         // Load mstatus from stack[1]
         "lw t0, 4(sp)",
-        // Set MIE bit so interrupts are enabled after mret
-        "ori t0, t0, 0x8",
+        // MPIE in the initial frame enables interrupts atomically at mret.
+        // MIE must remain clear while registers are still being restored.
         "csrw mstatus, t0",
         // Load xCriticalNesting from stack[30]
         "lw t0, 120(sp)", // 30 * 4 = 120
@@ -503,30 +611,70 @@ handle_interrupt:
     csrr t0, mepc
     sw t0, 0(sp)                    # [0] = mepc
 
-    # Check if machine timer interrupt (mcause & 0x7FF == 7)
-    andi a0, a0, 0x7FF
-    li t1, 7
-    bne a0, t1, unhandled_interrupt
-
-    # Machine timer interrupt - switch to ISR stack
+    # Switch to the aligned ISR stack before calling Rust code.
     la sp, xISRStackTop
     lw sp, 0(sp)
 
-    # Update timer for next tick
+    # Record real interrupt context independently of mstatus.MIE. Critical
+    # sections also clear MIE and must not be mistaken for an ISR.
+    la t0, uxPortInterruptNesting
+    lw t1, 0(t0)
+    addi t1, t1, 1
+    sw t1, 0(t0)
+
+    # Check the asynchronous cause code.
+    andi a0, a0, 0x7FF
+    li t1, 7                       # Machine timer interrupt.
+    beq a0, t1, handle_timer_interrupt
+    li t1, 11                      # Machine external interrupt.
+    beq a0, t1, handle_external_interrupt
+    j unhandled_interrupt
+
+handle_timer_interrupt:
     call vPortUpdateTimerCompare
-
-    # Process tick
     call xTaskIncrementTick
-    beqz a0, restore_context        # No context switch needed
+    beqz a0, complete_interrupt
 
-    # Context switch needed
+    # Defer all ISR-requested switches to one common epilogue.
+    la t0, xPortYieldPending
+    li t1, 1
+    sw t1, 0(t0)
+    j complete_interrupt
+
+handle_external_interrupt:
+    # a0 remains the decoded machine-external cause (11). The registered
+    # application callback claims/completes the platform interrupt controller.
+    call xPortHandleExternalInterrupt
+    beqz a0, complete_interrupt
+
+    la t0, xPortYieldPending
+    li t1, 1
+    sw t1, 0(t0)
+
+complete_interrupt:
+    # Atomically consume a request made either by the tick path, the external
+    # dispatcher return value, or portYIELD_FROM_ISR() inside a callback.
+    la t0, xPortYieldPending
+    lw t1, 0(t0)
+    sw zero, 0(t0)
+    beqz t1, interrupt_switch_complete
+
     call vTaskSwitchContext
+
+interrupt_switch_complete:
+    la t0, uxPortInterruptNesting
+    lw t1, 0(t0)
+    addi t1, t1, -1
+    sw t1, 0(t0)
     j restore_context
 
 unhandled_exception:
-unhandled_interrupt:
     # Loop forever on unhandled trap
     j unhandled_exception
+
+unhandled_interrupt:
+    # Preserve an accurate nesting count for debugger inspection, then stop.
+    j unhandled_interrupt
 
 restore_context:
     # Load pxCurrentTCB
@@ -591,18 +739,8 @@ restore_context:
 
 /// Check if currently executing in an interrupt context
 pub fn xPortIsInsideInterrupt() -> BaseType_t {
-    // Check if we're in an interrupt by looking at mstatus.MIE
-    // When in a trap handler, MIE is cleared
-    let mstatus: u32;
-    unsafe {
-        core::arch::asm!(
-            "csrr {mstatus}, mstatus",
-            mstatus = out(reg) mstatus,
-            options(nomem, nostack)
-        );
-    }
-    // If MIE is 0 and we're running, we're in an interrupt
-    if (mstatus & 0x8) == 0 {
+    let uxNesting = unsafe { core::ptr::read_volatile(&raw const uxPortInterruptNesting) };
+    if uxNesting != 0 {
         crate::types::pdTRUE
     } else {
         crate::types::pdFALSE
@@ -621,7 +759,7 @@ pub fn portNOP() {
 #[inline(always)]
 pub fn portMEMORY_BARRIER() {
     unsafe {
-        core::arch::asm!("fence iorw, iorw", options(nomem, nostack));
+        core::arch::asm!("fence iorw, iorw", options(nostack));
     }
 }
 
@@ -630,30 +768,141 @@ pub fn portMEMORY_BARRIER() {
 // =============================================================================
 
 #[cfg(feature = "generate-run-time-stats")]
-static mut RUN_TIME_COUNTER: u32 = 0;
-
-#[cfg(feature = "generate-run-time-stats")]
-pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
-    unsafe {
-        RUN_TIME_COUNTER = 0;
-    }
-}
+pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {}
 
 #[cfg(feature = "generate-run-time-stats")]
 pub fn portGET_RUN_TIME_COUNTER_VALUE() -> u32 {
-    // Use MTIME as the run-time counter source
-    unsafe { core::ptr::read_volatile(MTIME_ADDR as *const u32) }
+    // The task kernel subtracts its scheduler-start baseline.
+    ullPortReadMtime() as u32
 }
 
 // =============================================================================
-// Tickless Idle (Optional - not implemented for RISC-V yet)
+// Tickless Idle
 // =============================================================================
 
 #[cfg(feature = "tickless-idle")]
-pub fn vPortSuppressTicksAndSleep(_xExpectedIdleTime: TickType_t) {
-    // TODO: Implement tickless idle for RISC-V
-    // For now, just do a WFI
+static mut uxTicklessSleepCount: UBaseType_t = 0;
+#[cfg(feature = "tickless-idle")]
+static mut xLastSuppressedTicks: TickType_t = 0;
+#[cfg(feature = "tickless-idle")]
+static mut xLastCompletedSleepTicks: TickType_t = 0;
+
+/// Number of non-aborted tickless sleeps entered since boot.
+#[cfg(feature = "tickless-idle")]
+pub fn uxPortGetTicklessSleepCount() -> UBaseType_t {
+    unsafe { core::ptr::read_volatile(&raw const uxTicklessSleepCount) }
+}
+
+/// Most recent expected-idle interval programmed by the tickless path.
+#[cfg(feature = "tickless-idle")]
+pub fn xPortGetLastSuppressedTicks() -> TickType_t {
+    unsafe { core::ptr::read_volatile(&raw const xLastSuppressedTicks) }
+}
+
+/// Complete ticks stepped during the most recent tickless sleep.
+#[cfg(feature = "tickless-idle")]
+pub fn xPortGetLastCompletedSleepTicks() -> TickType_t {
+    unsafe { core::ptr::read_volatile(&raw const xLastCompletedSleepTicks) }
+}
+
+/// Suppress periodic MTIME interrupts while the idle task sleeps.
+///
+/// A timer-expiry wake steps all but the final tick, then leaves MTIP pending;
+/// the normal trap path accounts the final tick and advances the shared
+/// fractional phase. An early external-interrupt wake instead installs the
+/// first still-future fractional tick boundary.
+#[cfg(feature = "tickless-idle")]
+pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
+    if xExpectedIdleTime == 0 {
+        return;
+    }
+
     unsafe {
-        core::arch::asm!("wfi", options(nomem, nostack));
+        let uxSavedMstatus = portSET_INTERRUPT_MASK_FROM_ISR();
+
+        // Safety: the idle task suspended the scheduler and MIE is masked for
+        // this tickless confirmation point.
+        if eTaskConfirmSleepModeStatus() == crate::types::eSleepModeStatus::eAbortSleep {
+            portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedMstatus);
+            return;
+        }
+
+        let ullOriginalNextTime = ullNextTime;
+        let ulOriginalFraction = TIMER_FRACTION;
+        let ullAdditionalIntervals = xExpectedIdleTime.saturating_sub(1) as u64;
+        let (ullSuppressedCounts, ulTargetFraction) =
+            prvTimerAdvance(ulOriginalFraction, ullAdditionalIntervals);
+        let ullWakeTime = ullOriginalNextTime.wrapping_add(ullSuppressedCounts);
+
+        ullNextTime = ullWakeTime;
+        TIMER_FRACTION = ulTargetFraction;
+        prvWriteMtimeCompare(ullWakeTime);
+
+        uxTicklessSleepCount = uxTicklessSleepCount.wrapping_add(1);
+        xLastSuppressedTicks = xExpectedIdleTime;
+        xLastCompletedSleepTicks = 0;
+
+        core::arch::asm!("wfi", options(nostack));
+
+        let ullNow = ullPortReadMtime();
+        let xCompleteTicks: TickType_t;
+
+        if ullNow >= ullWakeTime {
+            /* MTIP is pending. Keep the elapsed compare value installed so
+             * restoring MIE enters the normal timer trap for the final tick. */
+            xCompleteTicks = xExpectedIdleTime.saturating_sub(1);
+        } else {
+            /* An external interrupt woke WFI early. Count boundaries at or
+             * before ullNow, then program the first boundary still in the
+             * future. */
+            let mut ullElapsedIntervals = 0u64;
+
+            if ullNow >= ullOriginalNextTime {
+                let ullCountsAfterFirst = ullNow - ullOriginalNextTime;
+                let ulMtimeHz = configMTIME_HZ as u64;
+                let ulTickRate = configTICK_RATE_HZ as u64;
+
+                ullElapsedIntervals = ullCountsAfterFirst.saturating_mul(ulTickRate) / ulMtimeHz;
+                ullElapsedIntervals = ullElapsedIntervals.min(ullAdditionalIntervals);
+
+                while ullElapsedIntervals < ullAdditionalIntervals {
+                    let (ullCounts, _) =
+                        prvTimerAdvance(ulOriginalFraction, ullElapsedIntervals + 1);
+                    if ullCounts > ullCountsAfterFirst {
+                        break;
+                    }
+                    ullElapsedIntervals += 1;
+                }
+
+                while ullElapsedIntervals > 0 {
+                    let (ullCounts, _) = prvTimerAdvance(ulOriginalFraction, ullElapsedIntervals);
+                    if ullCounts <= ullCountsAfterFirst {
+                        break;
+                    }
+                    ullElapsedIntervals -= 1;
+                }
+            }
+
+            let ullComplete = if ullNow >= ullOriginalNextTime {
+                1u64.saturating_add(ullElapsedIntervals)
+            } else {
+                0
+            };
+            xCompleteTicks = ullComplete.min(xExpectedIdleTime as u64) as TickType_t;
+
+            let (ullNextDelta, ulNextFraction) = prvTimerAdvance(ulOriginalFraction, ullComplete);
+            ullNextTime = ullOriginalNextTime.wrapping_add(ullNextDelta);
+            TIMER_FRACTION = ulNextFraction;
+            prvWriteMtimeCompare(ullNextTime);
+        }
+
+        xLastCompletedSleepTicks = xCompleteTicks;
+        if xCompleteTicks > 0 {
+            // Safety: MIE remains masked, the scheduler is suspended, and the
+            // elapsed count was bounded by the programmed compare interval.
+            vTaskStepTick(xCompleteTicks);
+        }
+
+        portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedMstatus);
     }
 }

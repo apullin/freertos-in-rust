@@ -1,412 +1,323 @@
-# FreeRusTOS
+# FreeRTOS-in-Rust
 
 [![CI](https://github.com/apullin/freertos-in-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/apullin/freertos-in-rust/actions/workflows/ci.yml)
 
-A line-by-line port of the FreeRTOS kernel from C to Rust.
+FreeRTOS-in-Rust is a monolithic, `no_std`, pure-Rust translation of the
+FreeRTOS kernel. It links no FreeRTOS C code; only the small amount of
+architecture assembly needed for context switching remains non-Rust.
 
-## Crate
+The goal of this project is to provide a "simple", but fully functional, RTOS
+in Rust for embedded systems. Embedded developers should be able to follow
+standard FreeRTOS design patterns with 100% of the supported feature surface
+available, while also gaining Rust syntax sugar.
 
-This project is published on [crates.io](https://crates.io/crates/freertos-in-rust). Note that the project is still in active development and the API/feature set may evolve.
+The 0.3.x line combines two interfaces in one crate:
 
-- **0.1.x** — Direct port from `master` branch. Closely mirrors C FreeRTOS semantics; uses `unsafe` throughout.
-- **0.2.x** — From `safe_shim` branch. Adds Rust-idiomatic safe wrappers that reduce `unsafe` usage.
+- `freertos_in_rust::kernel` is the close, C-shaped translation. It preserves
+  FreeRTOS names, handles, storage rules, and control flow, and marks contracts
+  that Rust cannot verify as `unsafe`.
+- `freertos_in_rust::sync` is the safe Rust veneer. It adds owned handles,
+  typed queues, stable static-storage borrows, checked parameters, and an
+  explicit task-context capability without redesigning the kernel.
 
-## Intent
+See [RUST_WRAPPER.md](RUST_WRAPPER.md) for details on the veneer API and its
+safety model.
+The crate remains under active development, so 0.3.x APIs _may_ still evolve.
 
-The goal here is to duplicate the FreeRTOS C implementation in Rust, as closely as possible. Ideally, this gives us a package that runs fully in Rust (plus minimal assembly for context switching), while retaining FreeRTOS usage semantics and API structure.
+## Translation baseline
 
-This is **not** a Rust wrapper around FreeRTOS C code. There is no C FFI. The kernel is pure Rust.
+This is a source translation and derivative of the MIT-licensed FreeRTOS
+kernel, not a wrapper or a clean-room reimplementation. The translation target
+is pinned to upstream commit
+`3ace38969bd05558918f815ae75528cb656c64b0` (`git describe`:
+`V10.4.3-744-g3ace38969`). Upstream notices and amendment comments are retained
+in the Rust sources. The reference `FreeRTOS-Kernel/` tree is excluded from
+crate packages and is not compiled.
 
-## Project Structure
+Version 0.3.x is single-core. Separate SMP work remains experimental on the
+`smp` branch. Its early boot scaffolding has run in QEMU, but it has not passed
+the two-core scheduler gate and is not part of the 0.3.0 crate API or the
+qualification below.
 
-The `master` branch contains the most direct port, with all features except SMP. This heavily uses `unsafe`, as all constructs are kept as close to the C code as possible.
+## Feature support
 
-The `safe_shim` branch adds an interface shim that elides most of the `unsafe` usage, and is more Rust-idiomatic. See `RUST_WRAPPER.md` for details.
+The supported single-core FreeRTOS feature surface is implemented. The concise
+table below is backed by the symbol-by-symbol source audit in
+[PARITY.md](PARITY.md); the later qualification table distinguishes compilation
+coverage from code actually exercised in QEMU or on hardware.
 
-SMP support does appear to work, and is in `smp` branch - separated because it steps on a fair amount of definitions throughout the code.
+| Feature | Status | Notes |
+|---|---:|---|
+| **Task management** | | |
+| `xTaskCreate` (dynamic) | ✅ | Requires `alloc`, `heap-4`, or `heap-5` |
+| `xTaskCreateStatic` | ✅ | No allocator required |
+| `vTaskDelete` | ✅ | Requires `task-delete` |
+| `vTaskDelay` / `xTaskDelayUntil` | ✅ | |
+| `vTaskSuspend` / `vTaskResume` | ✅ | Requires `task-suspend` |
+| `vTaskPrioritySet` / priority queries | ✅ | Mutation requires `task-priority-set` |
+| `xTaskAbortDelay` | ✅ | Requires `abort-delay` |
+| `eTaskGetState` | ✅ | |
+| Indexed task notifications | ✅ | Task and FromISR variants |
+| Thread-local storage | ✅ | Requires `thread-local-storage` |
+| Application task tags | ✅ | Requires `application-task-tag` |
+| Stack high-water marks | ✅ | Requires `stack-high-water-mark` |
+| Stack-overflow checking | ✅ | Requires `stack-overflow-check` and an application hook |
+| `vTaskGetInfo` / `uxTaskGetSystemState` | ✅ | Requires `trace-facility` |
+| Task-list and run-time formatting | ✅ | Requires `stats-formatting` |
+| **Queues and semaphores** | | |
+| Dynamic and static queues | ✅ | Typed safe queues are also available |
+| Send / receive / peek | ✅ | Front, back, overwrite, blocking, and FromISR variants |
+| Binary and counting semaphores | ✅ | Dynamic and static creation |
+| Mutexes and recursive mutexes | ✅ | Requires `use-mutexes` |
+| Priority inheritance and disinheritance | ✅ | Including timeout paths |
+| Queue sets | ✅ | Requires `queue-sets` |
+| Queue registry | ✅ | Requires `queue-registry` |
+| Queue trace metadata | ✅ | Requires `trace-facility` |
+| **Software timers** | | |
+| Timer daemon task | ✅ | Requires `timers` |
+| Dynamic and static timers | ✅ | One-shot and auto-reload |
+| Start / stop / reset / period changes | ✅ | Task and FromISR command variants |
+| Pended function calls | ✅ | Requires `pend-function-call` |
+| **Event groups** | | |
+| Create / wait / set / clear / sync | ✅ | Dynamic and static creation |
+| Deferred FromISR set and clear | ✅ | Uses the timer-daemon command queue |
+| **Stream and message buffers** | | |
+| Stream buffers | ✅ | Requires `stream-buffers` |
+| Message buffers | ✅ | Message-boundary semantics preserved |
+| Static and dynamic construction | ✅ | Includes callback variants |
+| **Memory management** | | |
+| Static-only operation | ✅ | No allocator feature required |
+| Rust global-allocator bridge | ✅ | `alloc` feature |
+| `heap_4` | ✅ | First-fit allocator with coalescing |
+| `heap_5` | ✅ | Multiple non-contiguous regions |
+| `heap_1`, `heap_2`, `heap_3` | ➖ | Intentionally omitted; use static allocation, `heap-4`/`heap-5`, or a Rust allocator |
+| **Diagnostics and scheduling options** | | |
+| Tickless idle | ✅ | QEMU-tested on every registered single-core port |
+| Run-time statistics | ✅ | Requires `generate-run-time-stats` |
+| Idle yielding | ✅ | Requires `idle-yield` |
+| List integrity check bytes | ✅ | Requires `list-data-integrity-check` |
+| User-replaceable trace macros | ⚠️ | Trace metadata exists; macro hooks currently use their default no-op behavior |
+| **Ports** | | |
+| Cortex-M0/M0+ | ✅ | QEMU-tested and run on LP-MSPM0G5187 hardware |
+| Cortex-M3 | ✅ | QEMU `mps2-an385` |
+| Cortex-M4F | ✅ | QEMU `mps2-an386`, including FPU context |
+| Cortex-M7 | ✅ | QEMU `mps2-an500`, including FPU context |
+| RISC-V RV32IMAC | ✅ | QEMU `sifive_e` |
+| Cortex-A9 | ✅ | QEMU `vexpress-a9` |
+| Cortex-A53 / AArch64 | ✅ | QEMU `virt` |
+| **Deliberate scope boundaries** | | |
+| SMP / multi-core scheduler | ⚠️ | Experimental `smp` branch; two-core scheduler gate does not yet pass |
+| MPU ports | ➖ | Out of scope for the current translation |
+| Co-routines | ➖ | Deprecated upstream and intentionally omitted |
 
-File tree for the core code:
+**Legend:** ✅ implemented · ⚠️ partial/experimental · ➖ deliberately out of scope
 
-```
-src/
-├── lib.rs              # Crate root, re-exports
-├── config.rs           # FreeRTOSConfig.h equivalent
-├── types.rs            # Base types (BaseType_t, TickType_t, etc.)
-├── kernel/
-│   ├── tasks.rs        # Task management (tasks.c)
-│   ├── queue.rs        # Queues & semaphores (queue.c)
-│   ├── list.rs         # Linked list implementation (list.c)
-│   ├── timers.rs       # Software timers (timers.c)
-│   ├── event_groups.rs # Event groups (event_groups.c)
-│   └── stream_buffer.rs# Stream buffers (stream_buffer.c)
-├── port/
-│   ├── cortex_m4f.rs   # Cortex-M4F port (ARMv7E-M with FPU)
-│   ├── cortex_m7.rs    # Cortex-M7 port (reexports CM4F)
-│   ├── cortex_m3.rs    # Cortex-M3 port (ARMv7-M, no FPU)
-│   ├── cortex_m0.rs    # Cortex-M0/M0+ port (ARMv6-M, Thumb-1)
-│   ├── cortex_a9.rs    # Cortex-A9 port (ARMv7-A, GIC, SWI)
-│   ├── cortex_a53.rs   # Cortex-A53 port (ARMv8-A/AArch64, GIC, SVC)
-│   ├── riscv32.rs      # RISC-V RV32 port (RV32I/RV32IMAC)
-│   └── dummy.rs        # Dummy port for testing
-├── memory/
-│   └── mod.rs          # pvPortMalloc/vPortFree
-└── trace.rs            # Trace macros (no-op by default)
-```
+## Configure a target
 
-## Configuration
-
-Rust doesn't have header files, so `FreeRTOSConfig.h` is replaced by two mechanisms:
-
-**Boolean flags** (e.g., `#define configUSE_MUTEXES 1`) become Cargo features:
+The default feature is only `port-dummy`, a compile-only scaffold that cannot
+start a scheduler. Every production dependency must disable defaults and
+select exactly one hardware port:
 
 ```toml
 [dependencies]
-freertos-in-rust = { version = "0.1", features = [
-    "port-cortex-m4f",    # Select your port (or port-cortex-m3, port-cortex-m0, port-cortex-m7, port-riscv32, port-cortex-a9, port-cortex-a53)
-    "heap-4",             # Allocator: heap_4 (or "heap-5" for multi-region, or "alloc" for external)
-    "use-mutexes",        # configUSE_MUTEXES
-    "timers",             # configUSE_TIMERS
-    "task-delete",        # INCLUDE_vTaskDelete
-    "task-suspend",       # INCLUDE_vTaskSuspend
+freertos-in-rust = { version = "0.3", default-features = false, features = [
+    "port-cortex-m0",
+    "heap-4",
+    "user-config",
+    "task-delete",
+    "task-suspend",
+    "use-mutexes",
+    "timers",
+    "stream-buffers",
 ] }
 ```
 
-See [Memory Allocator](#memory-allocator) for choosing between `heap-4`, `heap-5`, and `alloc`.
+The port features are:
 
-**Numeric constants** (e.g., `#define configTOTAL_HEAP_SIZE 10240`) live in `src/config.rs` and are referenced as `crate::config::configTOTAL_HEAP_SIZE`:
+- `port-cortex-m0`, `port-cortex-m3`, `port-cortex-m4f`, `port-cortex-m7`
+- `port-riscv32`
+- `port-cortex-a9`, `port-cortex-a53`
+
+Port features are mutually exclusive and automatically select both the native
+integer width and tick width. Applications should not add `arch-*` or `tick-*`
+features themselves.
+
+All 32-bit ports use `u32` `TickType_t`. Cortex-A53 uses 64-bit architecture
+types and `u64` `TickType_t`. This policy avoids the unsupported 16-bit tick
+combinations and lets event-group reserved bits and timer arithmetic follow the
+selected tick type consistently.
+
+Optional kernel capabilities map the corresponding FreeRTOS configuration
+switches. The available names are defined in [Cargo.toml](Cargo.toml), including
+`task-delete`, `task-suspend`, `abort-delay`, `task-priority-set`,
+`use-mutexes`, `timers`, `stream-buffers`, `queue-sets`, `queue-registry`,
+`pend-function-call`, `thread-local-storage`, `tickless-idle`, and
+`generate-run-time-stats`. `all-kernel-features` is a test aggregate; it does
+not select a port, width, allocator, or SMP mode.
+
+### Hardware configuration
+
+Enable `user-config` for production hardware and define its clock symbols in
+the final application:
 
 ```rust
-// src/config.rs
-pub const configMAX_PRIORITIES: UBaseType_t = 5;
-pub const configTICK_RATE_HZ: TickType_t = 1000;
-pub const configTOTAL_HEAP_SIZE: usize = 10240;
-pub const configTIMER_TASK_PRIORITY: UBaseType_t = 2;
-// ... etc
-```
-
-**Hardware-specific values** (CPU clock frequency) require the `user-config` feature:
-
-```toml
-[dependencies]
-freertos-in-rust = { version = "0.1", features = ["user-config", ...] }
-```
-
-Then define the required symbols in your crate:
-
-```rust
-// In your main.rs or lib.rs
 #[no_mangle]
-pub static FREERTOS_CONFIG_CPU_CLOCK_HZ: u32 = 32_000_000;  // Your CPU clock
+pub static FREERTOS_CONFIG_CPU_CLOCK_HZ: u32 = 32_000_000;
 
-// For RISC-V, also provide:
+// Required as well for port-riscv32.
 #[no_mangle]
-pub static FREERTOS_CONFIG_MTIME_HZ: u32 = 10_000_000;  // Timer frequency
+pub static FREERTOS_CONFIG_MTIME_HZ: u32 = 10_000_000;
 ```
 
-Without `user-config`, defaults are used (80MHz CPU clock) which will cause incorrect SysTick timing.
+Without `user-config`, the crate uses the repository's test-oriented defaults:
+80 MHz for the CPU clock and, on RV32, 32.768 kHz for MTIME. Those values must
+not be assumed correct for a board. Other numeric FreeRTOS configuration values
+currently live in `src/config.rs`, including a 1 kHz kernel tick.
 
-## Feature Support
+## Raw kernel and safe veneer
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| **Task Management** | | |
-| xTaskCreate (dynamic) | ✅ | Requires `alloc` feature |
-| xTaskCreateStatic | ✅ | |
-| vTaskDelete | ✅ | Requires `task-delete` feature |
-| vTaskDelay / vTaskDelayUntil | ✅ | |
-| vTaskSuspend / vTaskResume | ✅ | Requires `task-suspend` feature |
-| vTaskPrioritySet / Get | ✅ | Requires `task-priority-set` feature |
-| xTaskAbortDelay | ✅ | Requires `abort-delay` feature |
-| eTaskGetState | ✅ | |
-| Task Notifications | ✅ | |
-| Thread Local Storage | ✅ | Requires `thread-local-storage` feature |
-| Application Task Tags | ✅ | Requires `application-task-tag` feature |
-| Stack High Water Mark | ✅ | Requires `stack-high-water-mark` feature |
-| vTaskGetInfo / uxTaskGetSystemState | ✅ | Requires `trace-facility` feature |
-| vTaskListTasks | ✅ | Requires `stats-formatting` feature |
-| **Queues & Semaphores** | | |
-| xQueueCreate (dynamic) | ✅ | Requires `alloc` feature |
-| xQueueCreateStatic | ✅ | |
-| xQueueSend / Receive / Peek | ✅ | All variants (ToFront, ToBack, FromISR) |
-| xQueueGiveFromISR | ✅ | Optimized semaphore give from ISR |
-| vQueueDelete | ✅ | Requires `alloc` feature |
-| Binary Semaphores | ✅ | |
-| Counting Semaphores | ✅ | xQueueCreateCountingSemaphore/Static |
-| Mutexes | ✅ | Requires `use-mutexes` feature |
-| Recursive Mutexes | ✅ | Requires `use-mutexes` feature |
-| Priority Inheritance | ✅ | |
-| Queue Sets | ✅ | Requires `queue-sets` feature |
-| Queue Registry | ✅ | Requires `queue-registry` feature |
-| Queue Trace Functions | ✅ | Requires `trace-facility` feature |
-| **Timers** | | |
-| Software Timers | ✅ | Requires `timers` feature |
-| xTimerCreate (dynamic) | ✅ | |
-| xTimerCreateStatic | ✅ | |
-| Timer Daemon Task | ✅ | |
-| **Event Groups** | | |
-| Event Groups | ✅ | |
-| **Stream/Message Buffers** | | |
-| Stream Buffers | ✅ | Requires `stream-buffers` feature |
-| Message Buffers | ✅ | Requires `stream-buffers` feature |
-| **Memory Management** | | |
-| pvPortMalloc / vPortFree | ✅ | Wraps Rust's `#[global_allocator]` |
-| Static Allocation | ✅ | |
-| heap_4 | ✅ | Single contiguous region (see `heap-4` feature) |
-| heap_5 | ✅ | Multiple non-contiguous regions (see `heap-5` feature) |
-| heap_1, heap_2, heap_3 | ➖ | N/A - use Rust allocator crates instead |
-| **Ports** | | |
-| Cortex-M4F | ✅ | Tested on QEMU (lm3s6965evb) |
-| Cortex-M7 | ✅ <sup>[1]</sup> | Tested on QEMU |
-| Cortex-M3 | ✅ | Tested on QEMU (lm3s6965evb) |
-| Cortex-M0/M0+ | ✅ | Tested on QEMU (microbit) |
-| RISC-V RV32 | ✅ | Tested on QEMU (sifive_e) |
-| Cortex-A9 | ✅ | Tested on QEMU (vexpress-a9) |
-| Cortex-A53 (AArch64) | ✅ | Tested on QEMU (virt) |
-| x86/x64 (Linux/Windows) | ❌ | Not yet implemented |
-| **Advanced Features** | | |
-| SMP / Multi-core | ➖ | Will not implement (out of scope) |
-| MPU Support | ➖ | Will not implement (out of scope) |
-| Co-routines | ➖ | Will not implement (deprecated in FreeRTOS) |
-| Tickless Idle | ✅ <sup>[2]</sup> | Requires `tickless-idle` feature |
-| Run-time Stats | ✅ | Requires `generate-run-time-stats` feature |
-
-**Legend:** ✅ Supported | ❌ Not yet done | ⚠️ Partial | ➖ Will not implement
-
-<sup>[1]</sup> *Cortex-M7 reuses the CM4F port, per FreeRTOS's recommendation. Early CM7 silicon (r0p0/r0p1) requires ARM Errata 837070 workaround, which is not currently implemented. Most modern CM7 chips do not need this workaround.*
-
-<sup>[2]</sup> *Tickless idle support is per-port. It has been tested and appears to work correctly in QEMU for all ports included in this repository.*
-
-## Running the Demos on QEMU
-
-Demos are available for all supported ports.
-
-### Prerequisites
-
-```bash
-# Install Rust ARM targets
-rustup target add thumbv7em-none-eabihf  # CM4F, CM7
-rustup target add thumbv7m-none-eabi     # CM3
-rustup target add thumbv6m-none-eabi     # CM0
-
-# Install Rust RISC-V target
-rustup target add riscv32imac-unknown-none-elf  # RISC-V RV32
-
-# Install Rust ARM Cortex-A targets
-rustup target add armv7a-none-eabi       # Cortex-A9
-rustup target add aarch64-unknown-none   # Cortex-A53
-
-# Install QEMU (macOS)
-brew install qemu
-
-# Install QEMU (Ubuntu/Debian)
-sudo apt install qemu-system-arm qemu-system-misc
-```
-
-### Cortex-M4F Demo
-
-```bash
-cd demo/cortex-m4f
-cargo build --release
-qemu-system-arm \
-  -cpu cortex-m4 \
-  -machine lm3s6965evb \
-  -nographic \
-  -semihosting-config enable=on,target=native \
-  -kernel target/thumbv7em-none-eabihf/release/demo
-```
-
-### Cortex-M3 Demo
-
-```bash
-cd demo/cortex-m3
-cargo build --release
-qemu-system-arm \
-  -cpu cortex-m3 \
-  -machine lm3s6965evb \
-  -nographic \
-  -semihosting-config enable=on,target=native \
-  -kernel target/thumbv7m-none-eabi/release/demo
-```
-
-### Cortex-M0 Demo
-
-```bash
-cd demo/cortex-m0
-cargo build --release
-qemu-system-arm \
-  -cpu cortex-m0 \
-  -machine microbit \
-  -nographic \
-  -semihosting-config enable=on,target=native \
-  -kernel target/thumbv6m-none-eabi/release/demo
-```
-
-### RISC-V RV32 Demo
-
-```bash
-cd demo/riscv32
-cargo build --release
-qemu-system-riscv32 \
-  -machine sifive_e \
-  -nographic \
-  -kernel target/riscv32imac-unknown-none-elf/release/demo
-```
-
-### Cortex-A9 Demo
-
-```bash
-cd demo/cortex-a9
-cargo build --release
-qemu-system-arm \
-  -machine vexpress-a9 \
-  -cpu cortex-a9 \
-  -m 128M \
-  -nographic \
-  -semihosting-config enable=on,target=native \
-  -kernel target/armv7a-none-eabi/release/demo
-```
-
-### Cortex-A53 Demo (AArch64)
-
-```bash
-cd demo/cortex-a53
-cargo build --release
-qemu-system-aarch64 \
-  -machine virt \
-  -cpu cortex-a53 \
-  -nographic \
-  -semihosting-config enable=on,target=native \
-  -kernel target/aarch64-unknown-none/release/demo
-```
-
-You should see output like:
-```
-========================================
-   FreeRusTOS Demo - Cortex-M0
-========================================
-
-[Init] Creating mutex...
-[Init] Mutex created successfully
-...
-[Main] Starting scheduler...
-```
-
-Press `Ctrl-A X` to exit QEMU.
-
-## Memory Allocator
-
-FreeRusTOS supports dynamic memory allocation via Cargo feature flags. This is a project-level configuration—select the allocator that fits your needs.
-
-### Option 1: `heap-4` — Ported FreeRTOS Allocator
-
-FreeRTOS's `heap_4.c` is one of the most commonly used allocators in embedded FreeRTOS projects. We've ported it to Rust:
-
-- **First-fit allocation** with block splitting
-- **Coalescing on free** — merges adjacent free blocks to reduce fragmentation
-- **Fixed heap size** — configured via `configTOTAL_HEAP_SIZE` in `config.rs`
-- **Deterministic timing** — important for real-time systems
-
-```toml
-freertos-in-rust = { version = "0.1", features = ["heap-4"] }
-```
+The raw layer is useful for direct FreeRTOS ports and for comparing behavior
+with the C kernel:
 
 ```rust
-use freertos_in_rust::memory::FreeRtosAllocator;
+use freertos_in_rust::kernel::tasks::{vTaskDelay, xTaskGetTickCount};
 
-#[global_allocator]
-static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
+let before = xTaskGetTickCount();
+// SAFETY: this runs in a live task with the scheduler running and unsuspended.
+unsafe { vTaskDelay(10) };
 ```
 
-### Option 2: `heap-5` — Multi-Region Allocator
-
-Like `heap-4`, but supports **multiple non-contiguous memory regions**. Ideal for systems with:
-- Internal SRAM + external PSRAM (ESP32, STM32 with QSPI RAM)
-- Cortex-M7 with TCM + main RAM
-- Any chip with multiple RAM banks
-
-```toml
-freertos-in-rust = { version = "0.1", features = ["heap-5"] }
-```
+Safe task-only operations require `&TaskContext`. Constructing the capability
+is the explicit assertion that execution is in a task, or in exclusive startup
+before interrupts and the scheduler can race it:
 
 ```rust
-use freertos_in_rust::memory::{vPortDefineHeapRegions, HeapRegion, FreeRtosAllocator};
+use freertos_in_rust::sync::{Queue, TaskContext};
 
-// Define your memory regions (must be in ascending address order)
-static mut SRAM: [u8; 32768] = [0; 32768];
-static mut PSRAM: [u8; 65536] = [0; 65536];
+// SAFETY: single-threaded startup; kernel interrupts are still masked.
+let context = unsafe { TaskContext::assume() };
+let queue = Queue::<u32>::new(&context, 8).expect("queue allocation failed");
+assert!(queue.send(&context, &42));
 
-#[global_allocator]
-static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
-
-fn main() {
-    // Initialize heap BEFORE any allocations
-    unsafe {
-        vPortDefineHeapRegions(&[
-            HeapRegion::new(SRAM.as_mut_ptr(), SRAM.len()),
-            HeapRegion::new(PSRAM.as_mut_ptr(), PSRAM.len()),
-        ]);
-    }
-}
+freertos_in_rust::start_scheduler(context)
 ```
 
-### Option 3: `alloc` — Rust-Native Allocator
+Create a fresh `TaskContext` at each task entry. It is neither `Send` nor
+`Sync`. ISR APIs remain a separate, mostly `unsafe` boundary because Rust types
+cannot prove interrupt priority, wake flags, or platform dispatch contracts.
 
-If you prefer a simpler Rust-native solution, use the `alloc` feature with an external allocator like [`embedded-alloc`](https://crates.io/crates/embedded-alloc). This is a well-maintained linked-list allocator from the embedded Rust ecosystem:
+## Allocation policy
 
-```toml
-freertos-in-rust = { version = "0.1", features = ["alloc"] }
+Select at most one allocator feature:
 
-[dependencies]
-embedded-alloc = "0.6"
-```
+| Selection | Behavior | Application responsibility |
+|---|---|---|
+| none | Static-only kernel objects | Use the `*Static` APIs and initialized `Static*_t::new()` storage. Dynamic allocation support is disabled. |
+| `heap-4` | Ported first-fit/coalescing allocator over one fixed region | Size is currently `configTOTAL_HEAP_SIZE`; install `memory::FreeRtosAllocator` as the Rust global allocator if Rust allocations should use it too. |
+| `heap-5` | Ported allocator over multiple non-contiguous regions | Call `vPortDefineHeapRegions` before any allocation; regions must remain valid and correctly ordered. |
+| `alloc` | `pvPortMalloc`/`vPortFree` wrap Rust's allocator | The application must install and initialize a suitable `#[global_allocator]`. |
+
+For `heap-4` or `heap-5`, the provided adapter can back Rust allocation:
 
 ```rust
-use embedded_alloc::LlffHeap as Heap;
-
 #[global_allocator]
-static HEAP: Heap = Heap::empty();
-
-fn main() {
-    // Initialize heap (required for embedded-alloc)
-    static mut HEAP_MEM: [MaybeUninit<u8>; 16384] = [MaybeUninit::uninit(); 16384];
-    unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, 16384) }
-}
+static ALLOCATOR: freertos_in_rust::memory::FreeRtosAllocator =
+    freertos_in_rust::memory::FreeRtosAllocator;
 ```
 
-### Static-only (No heap)
+Static veneer constructors borrow their stack, data, and control storage for
+the complete object lifetime. Do not form references to uninitialized control
+blocks; initialize them with their `const fn new()` constructors.
 
-For fully static allocation, don't enable any heap feature:
-- Use only `*Static` API variants (e.g., `xTaskCreateStatic`, `xQueueCreateStatic`)
-- `pvPortMalloc` will panic if called
+## Port qualification
 
-## TODOs
+“Build” and “QEMU” below are deliberately separate. A target check proves that
+a configuration cross-compiles; a bounded QEMU guest additionally exercises
+the stated runtime behavior. Neither is a substitute for qualification on a
+particular board, clock tree, interrupt controller, and compiler profile.
 
-### Crate Structure
+| Port / Rust target | Qualification in the 0.3 repair | Runtime evidence actually run | Important limits |
+|---|---|---|---|
+| `port-dummy` / host | **Build-only** | None; scheduler startup intentionally fails | Development and documentation scaffold only. |
+| Cortex-M0/M0+ / `thumbv6m-none-eabi` | Target `cargo check` and Clippy with `heap-4` plus all kernel capabilities; **QEMU- and hardware-tested** | `microbit`: smoke 3/3, kernel-core 5/5, ISR 4/4, allocator 4/4, stream/event/timer 6/6, port/context 7/7, tickless 3/3; LP-MSPM0G5187 dynamic task/queue/event-group regression | QEMU does not qualify a particular board clock tree or peripheral setup. The linked hardware regression records the exact board and flash flow. |
+| Cortex-M3 / `thumbv7m-none-eabi` | Target check and Clippy with `heap-4` plus all capabilities; **QEMU-tested** | `mps2-an385`: smoke 3/3, kernel-core 5/5, ISR 4/4, allocator 4/4, stream/event/timer 6/6, port/context 7/7, tickless 3/3 | Runtime evidence is for QEMU's MPS2 model, not a specific production MCU. |
+| Cortex-M4F / `thumbv7em-none-eabihf` | Target check and Clippy with `heap-4` plus all capabilities; **QEMU-tested** | `mps2-an386`: smoke 3/3, kernel-core 5/5, ISR 4/4, allocator 4/4, stream/event/timer 6/6, safe API 10/10, port/FPU context 8/8, tickless 3/3; static-only 8/8 | The static-only test uses a separate no-allocator firmware. Runtime evidence is for QEMU's MPS2 model. |
+| Cortex-M7 / `thumbv7em-none-eabihf` | Target check and Clippy with `heap-4` plus all capabilities; **QEMU-tested** | `mps2-an500`: smoke 3/3, kernel-core 5/5, ISR 4/4, allocator 4/4, stream/event/timer 6/6, port/FPU context 8/8, tickless 3/3 | ARM erratum 837070 handling for affected early M7 revisions is not implemented. |
+| RV32IMAC / `riscv32imac-unknown-none-elf` | Minimal and maximal target checks; **QEMU-tested** | `sifive_e` composite smoke: 10/10, covering traps/ISR yield, PLIC dispatch, MTIME rollover/fractional cadence, and tickless accounting | Single-hart, machine mode, and SiFive E only. The application callback must claim and complete external interrupt-controller sources. |
+| Cortex-A9 / `armv7a-none-eabi` | Focused target check with tickless/stats; **QEMU-tested** | `vexpress-a9` smoke: 7/7, including a non-tick early wake, repeated suppressed sleeps, periodic reload restoration, and WFI runtime accounting | The port assumes the vexpress-style MPCore private-peripheral/GIC mapping and SP804 integration. Validate addresses and clocks on real hardware. |
+| Cortex-A53 / `aarch64-unknown-none` | Focused target check with tickless/stats; **QEMU-tested** | `virt`: smoke 3/3, port/context 10/10, tickless 4/4, event/timer 3/3 | Runtime stats read `CNTPCT_EL0`; platform firmware or a higher exception level must permit EL1 access. |
 
-This is currently a monolithic single-crate repository. Future work includes:
+The recovered LP-MSPM0G5187 application is preserved under
+[`hardware-tests/mspm0g5187`](hardware-tests/mspm0g5187/README.md) and is
+cross-compiled in CI. The 0.3 repair was programmed, byte-for-byte verified,
+and run through the board's onboard XDS110 with TI UniFlash 9.4. Its four-task
+RGB pattern exercised dynamic allocation, queue blocking, timed delays, and an
+event-group rendezvous on the MSPM0G5187.
 
-- Split into workspace with separate crates:
-  - `freertos-kernel` - Core kernel
-  - `freertos-port-cortex-m` - Cortex-M ports
-  - `freertos-port-riscv` - RISC-V ports (future)
-- Publish to crates.io
-- Add `#![no_std]` examples for various boards
+Current QEMU qualification covers tickless idle on every registered
+single-core port. Each Cortex-M tickless guest suppresses 200 ticks, wakes at
+tick 180, and observes two SysTick interrupts across the test.
 
-### Missing Features
+## Test driver
 
-- Additional ports:
-  - RISC-V 64-bit
-  - x86/x64
-- Debug printing: A holistic solution for debug output in demos is not yet solidified. Using `core::fmt::Write` adds significant code size (~40KB), so demos currently use simple direct print functions. This needs further investigation into what Rust offers for lightweight `no_std` formatting.
+Use the repository test driver instead of assembling ad-hoc QEMU command lines:
 
-### Testing
+```bash
+# Deterministic host tests in debug and release modes.
+cargo run --manifest-path xtask/Cargo.toml -- test host
 
-- Add unit tests (requires test harness)
-- Add integration tests running on QEMU
-- CI/CD pipeline
+# Required feature/allocator/port matrix, docs, and expected-failure checks.
+cargo run --manifest-path xtask/Cargo.toml -- check-features
+
+# One bounded guest.
+cargo run --manifest-path xtask/Cargo.toml -- \
+  qemu-test --arch cortex-a53 --suite tickless
+
+# The registered suites for one architecture.
+cargo run --manifest-path xtask/Cargo.toml -- \
+  qemu-test --arch cortex-a53 --suite all
+
+# The smoke suite on every registered single-core architecture.
+cargo run --manifest-path xtask/Cargo.toml -- \
+  qemu-test --arch all --suite smoke
+```
+
+Each firmware run has a 25-second default timeout and writes a diagnostic log
+under `target/xtask/qemu-logs/`. Override the bound with
+`FREERUSTOS_QEMU_TIMEOUT_SECS` when necessary.
+
+Install the Rust targets used by the ports before running the complete matrix:
+
+```bash
+rustup target add \
+  thumbv6m-none-eabi \
+  thumbv7m-none-eabi \
+  thumbv7em-none-eabihf \
+  riscv32imac-unknown-none-elf \
+  armv7a-none-eabi \
+  aarch64-unknown-none
+```
+
+The QEMU matrix requires `qemu-system-arm`, `qemu-system-aarch64`, and
+`qemu-system-riscv32`. The `demo/` applications remain useful for manual
+inspection, but passing a demo build is not counted as runtime qualification in
+the table above.
+
+## Repository layout
+
+```text
+src/
+├── kernel/     # C-shaped translations of tasks, queues, lists, timers, etc.
+├── sync/       # Checked Rust veneer and ownership/context types
+├── port/       # Cortex-M, Cortex-A, RV32, test, and dummy ports
+├── memory/     # Static stubs, heap_4, heap_5, and global-allocator bridge
+├── config.rs   # FreeRTOSConfig.h equivalent
+├── types.rs    # Port-selected FreeRTOS scalar and handle types
+└── lib.rs
+tests/qemu/     # Bounded bare-metal QEMU firmware suites
+xtask/          # Host, feature-matrix, and QEMU test driver
+```
 
 ## License
 
-MIT License - same as FreeRTOS.
-
-This is a clean-room port; no FreeRTOS C source code is included in the compiled output. The `FreeRTOS-Kernel/` directory (if present) is for reference only and is excluded from version control.
+MIT, matching the upstream FreeRTOS kernel. See [LICENSE](LICENSE).

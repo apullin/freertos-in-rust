@@ -1,32 +1,27 @@
-//! FreeRusTOS Demo Application - Cortex-M0
+//! FreeRTOS-in-Rust Demo Application - Cortex-M0
 //!
-//! This demo demonstrates the FreeRTOS kernel running on Cortex-M0:
-//! - Task creation and scheduling
-//! - Mutex with priority inheritance
-//! - Binary semaphore (no inheritance)
-//! - Software timers
+//! This demo demonstrates the FreeRTOS kernel running on Cortex-M0
+//! using the safe Rust wrappers with idiomatic Rust patterns:
+//! - Static initialization with contained unsafe blocks
+//! - .expect() for error handling on creation
+//! - RAII guards for mutex access
 //!
 //! Note: Cortex-M0 doesn't have atomic instructions, so this demo
-//! uses static mut with mutex protection instead of AtomicU32.
+//! uses Mutex<T> for all shared data protection.
 //!
 //! Output is via semihosting - requires a debugger connection.
 
 #![no_std]
 #![no_main]
 #![allow(non_snake_case)]
-#![allow(static_mut_refs)]
+#![allow(static_mut_refs)] // Task stacks/TCBs must be static mut for FreeRTOS
 
 extern crate panic_semihosting;
 
 use core::ffi::c_void;
-use core::ptr;
 
 use cortex_m_rt::entry;
 use cortex_m_semihosting::hprintln;
-
-// The port provides SVCall, PendSV, and SysTick handlers with the proper
-// export names for cortex-m-rt to find them in the vector table.
-// No need for explicit linking - cortex-m-rt finds them by name.
 
 // Allocator selection via Cargo features
 #[cfg(feature = "use-heap-4")]
@@ -41,56 +36,90 @@ use embedded_alloc::LlffHeap as Heap;
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-// Import FreeRTOS types and functions
-use freertos_in_rust::kernel::queue::{
-    xQueueCreateMutex, xQueueGenericCreate, xQueueGenericSend, xQueueSemaphoreTake,
-    queueQUEUE_TYPE_MUTEX, queueQUEUE_TYPE_BINARY_SEMAPHORE, queueSEND_TO_BACK, QueueHandle_t,
-};
+// Import safe wrappers
+use freertos_in_rust::kernel::event_groups::EventBits_t;
 use freertos_in_rust::kernel::tasks::{
-    xTaskCreateStatic, vTaskStartScheduler, vTaskDelay, StaticTask_t,
-    ulTaskGetRunTimeCounter, ulTaskGetRunTimePercent,
-    ulTaskGetIdleRunTimeCounter, ulTaskGetIdleRunTimePercent,
-    ulTaskGetTotalRunTime,
+    ulTaskGetIdleRunTimeCounter, ulTaskGetIdleRunTimePercent, ulTaskGetRunTimeCounter,
+    ulTaskGetRunTimePercent, ulTaskGetTotalRunTime, StaticTask_t,
 };
-use freertos_in_rust::kernel::timers::*;
-use freertos_in_rust::kernel::stream_buffer::{
-    xStreamBufferCreate, xStreamBufferSend, xStreamBufferReceive,
-    xStreamBufferSpacesAvailable, xStreamBufferBytesAvailable,
-    StreamBufferHandle_t,
-};
-use freertos_in_rust::kernel::event_groups::{
-    xEventGroupCreate, xEventGroupSetBits, xEventGroupWaitBits,
-    EventBits_t,
+use freertos_in_rust::start_scheduler;
+use freertos_in_rust::sync::{
+    BinarySemaphore, EventGroup, Mutex, StreamBuffer, StreamBufferReceiver, StreamBufferSender,
+    TaskContext, TaskHandle, Timer,
 };
 use freertos_in_rust::types::*;
 
 // =============================================================================
 // Shared Resources
+//
+// These are initialized once before the scheduler starts, then accessed
+// read-only by tasks. The unsafe block for initialization is contained to
+// the init functions; subsequent access through the wrappers is safe.
 // =============================================================================
 
-/// Mutex handle - protects shared_counter
-static mut MUTEX_HANDLE: QueueHandle_t = ptr::null_mut();
+/// Mutex protecting the shared counter - demonstrates priority inheritance
+static mut COUNTER_MUTEX: Option<Mutex<u32>> = None;
 
-/// Semaphore handle - for signaling between tasks
-static mut SEMAPHORE_HANDLE: QueueHandle_t = ptr::null_mut();
+/// Binary semaphore for signaling between tasks
+static mut SEMAPHORE: Option<BinarySemaphore> = None;
 
-/// Timer handle - periodic timer
-static mut TIMER_HANDLE: TimerHandle_t = ptr::null_mut();
+/// Periodic software timer
+static mut TIMER: Option<Timer> = None;
 
-/// Stream buffer handle - for producer/consumer demo
-static mut STREAM_BUFFER_HANDLE: StreamBufferHandle_t = ptr::null_mut();
+/// Stream buffer for producer/consumer demo
+static mut STREAM_BUFFER: Option<StreamBuffer> = None;
 
-/// Event group handle - for task synchronization demo
-static mut EVENT_GROUP_HANDLE: EventGroupHandle_t = ptr::null_mut();
+/// Sole producer endpoint borrowed from `STREAM_BUFFER` after initialization.
+static mut STREAM_SENDER: Option<StreamBufferSender<'static>> = None;
 
-/// Shared counter protected by mutex
-/// Note: On CM0 we use static mut because there are no atomic instructions.
-/// The mutex provides synchronization for this counter.
-static mut SHARED_COUNTER: u32 = 0;
+/// Sole consumer endpoint borrowed from `STREAM_BUFFER` after initialization.
+static mut STREAM_RECEIVER: Option<StreamBufferReceiver<'static>> = None;
 
-/// Timer tick counter
-/// Note: Only accessed from timer callback context, so static mut is safe.
+/// Event group for task synchronization
+static mut EVENT_GROUP: Option<EventGroup> = None;
+
+/// Timer tick counter (no atomics on CM0, so just use raw counter in callback)
 static mut TIMER_TICKS: u32 = 0;
+
+// Helper macros for safe access to initialized resources
+// These panic if called before initialization (programming error)
+macro_rules! get_mutex {
+    () => {
+        unsafe { COUNTER_MUTEX.as_ref().expect("Mutex not initialized") }
+    };
+}
+
+macro_rules! get_semaphore {
+    () => {
+        unsafe { SEMAPHORE.as_ref().expect("Semaphore not initialized") }
+    };
+}
+
+macro_rules! get_stream_sender {
+    () => {
+        unsafe {
+            STREAM_SENDER
+                .as_mut()
+                .expect("Stream sender not initialized")
+        }
+    };
+}
+
+macro_rules! get_stream_receiver {
+    () => {
+        unsafe {
+            STREAM_RECEIVER
+                .as_mut()
+                .expect("Stream receiver not initialized")
+        }
+    };
+}
+
+macro_rules! get_event_group {
+    () => {
+        unsafe { EVENT_GROUP.as_ref().expect("EventGroup not initialized") }
+    };
+}
 
 // =============================================================================
 // Task Priorities
@@ -140,6 +169,10 @@ static mut RUNTIME_STATS_TCB: StaticTask_t = StaticTask_t::new();
 
 #[entry]
 fn main() -> ! {
+    // Safety: startup is single-threaded and no interrupt invokes kernel APIs
+    // before the scheduler is started.
+    let context = unsafe { TaskContext::assume() };
+
     // Initialize allocator (only needed for embedded-alloc)
     #[cfg(feature = "use-embedded-alloc")]
     {
@@ -150,265 +183,210 @@ fn main() -> ! {
     }
 
     hprintln!("========================================");
-    hprintln!("   FreeRusTOS Demo - Cortex-M0");
+    hprintln!("   FreeRTOS-in-Rust Demo - Cortex-M0");
     hprintln!("========================================");
     hprintln!("");
 
-    // Create synchronization primitives
-    create_sync_primitives();
-
-    // Create stream buffer for producer/consumer demo
-    create_stream_buffer();
-
-    // Create event group for synchronization demo
-    create_event_group();
-
-    // Create tasks
-    create_tasks();
-
-    // Create software timer
-    create_timer();
+    // Create all resources - uses .expect() for clean error handling
+    create_sync_primitives(&context);
+    create_stream_buffer(&context);
+    create_event_group(&context);
+    create_tasks(&context);
+    create_timer(&context);
 
     hprintln!("[Main] Starting scheduler...");
     hprintln!("");
 
-    // Start the scheduler - this never returns
-    vTaskStartScheduler();
-
-    // Should never reach here
-    hprintln!("[Main] ERROR: Scheduler returned!");
-    loop {}
+    start_scheduler(context)
 }
 
 // =============================================================================
 // Initialization Functions
 // =============================================================================
 
-fn create_sync_primitives() {
+fn create_sync_primitives(context: &TaskContext) {
     hprintln!("[Init] Creating mutex...");
-
-    // Create a mutex (priority inheritance enabled)
+    let mutex = Mutex::new(context, 0).expect("Failed to create mutex");
     unsafe {
-        MUTEX_HANDLE = xSemaphoreCreateMutex();
-        if MUTEX_HANDLE.is_null() {
-            hprintln!("[Init] ERROR: Failed to create mutex!");
-        } else {
-            hprintln!("[Init] Mutex created successfully");
-        }
+        COUNTER_MUTEX = Some(mutex);
     }
+    hprintln!("[Init] Mutex created successfully");
 
     hprintln!("[Init] Creating binary semaphore...");
-
-    // Create a binary semaphore (no priority inheritance)
+    let sem = BinarySemaphore::new(context).expect("Failed to create semaphore");
     unsafe {
-        SEMAPHORE_HANDLE = xSemaphoreCreateBinary();
-        if SEMAPHORE_HANDLE.is_null() {
-            hprintln!("[Init] ERROR: Failed to create semaphore!");
-        } else {
-            hprintln!("[Init] Semaphore created successfully");
-        }
+        SEMAPHORE = Some(sem);
     }
+    hprintln!("[Init] Semaphore created successfully");
 }
 
-fn create_stream_buffer() {
+fn create_stream_buffer(context: &TaskContext) {
     hprintln!("[Init] Creating stream buffer (128 bytes, trigger=1)...");
-
+    let stream = StreamBuffer::new(context, 128, 1).expect("Failed to create stream buffer");
+    // Safety: startup has exclusive access. The owner remains permanently in
+    // `STREAM_BUFFER`; each endpoint is installed once and used by one task.
     unsafe {
-        // Create a stream buffer: 128 bytes capacity, trigger level 1
-        // Trigger level 1 means receiver unblocks as soon as any data arrives
-        STREAM_BUFFER_HANDLE = xStreamBufferCreate(128, 1);
-        if STREAM_BUFFER_HANDLE.is_null() {
-            hprintln!("[Init] ERROR: Failed to create stream buffer!");
-        } else {
-            hprintln!("[Init] Stream buffer created successfully");
-        }
+        STREAM_BUFFER = Some(stream);
+        let stream = STREAM_BUFFER.as_mut().expect("stream owner disappeared");
+        let (sender, receiver) = stream.split();
+        STREAM_SENDER = Some(sender);
+        STREAM_RECEIVER = Some(receiver);
     }
+    hprintln!("[Init] Stream buffer created successfully");
 }
 
-fn create_event_group() {
+fn create_event_group(context: &TaskContext) {
     hprintln!("[Init] Creating event group...");
-
+    let events = EventGroup::new(context).expect("Failed to create event group");
     unsafe {
-        EVENT_GROUP_HANDLE = xEventGroupCreate();
-        if EVENT_GROUP_HANDLE.is_null() {
-            hprintln!("[Init] ERROR: Failed to create event group!");
-        } else {
-            hprintln!("[Init] Event group created successfully");
-        }
+        EVENT_GROUP = Some(events);
     }
+    hprintln!("[Init] Event group created successfully");
 }
 
-fn create_tasks() {
+fn create_tasks(context: &TaskContext) {
     hprintln!("[Init] Creating tasks...");
 
+    // Note: Task stacks/TCBs are static mut (required by FreeRTOS)
+    // Access is contained to this initialization function
     unsafe {
-        // Low priority task - takes mutex, does work, signals semaphore
-        let result = xTaskCreateStatic(
+        TaskHandle::spawn_static(
+            context,
+            b"LowTask\0",
+            &mut LOW_TASK_STACK,
+            &mut LOW_TASK_TCB,
+            PRIORITY_LOW,
             task_low_priority,
-            b"LowTask\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
-            PRIORITY_LOW,
-            LOW_TASK_STACK.as_mut_ptr(),
-            &mut LOW_TASK_TCB as *mut StaticTask_t,
+        )
+        .expect("Failed to create low priority task");
+        hprintln!(
+            "[Init] Low priority task created (priority {})",
+            PRIORITY_LOW
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create low priority task!");
-        } else {
-            hprintln!("[Init] Low priority task created (priority {})", PRIORITY_LOW);
-        }
 
-        // Medium priority task - tries to run during mutex contention
-        let result = xTaskCreateStatic(
+        TaskHandle::spawn_static(
+            context,
+            b"MedTask\0",
+            &mut MEDIUM_TASK_STACK,
+            &mut MEDIUM_TASK_TCB,
+            PRIORITY_MEDIUM,
             task_medium_priority,
-            b"MedTask\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
-            PRIORITY_MEDIUM,
-            MEDIUM_TASK_STACK.as_mut_ptr(),
-            &mut MEDIUM_TASK_TCB as *mut StaticTask_t,
+        )
+        .expect("Failed to create medium priority task");
+        hprintln!(
+            "[Init] Medium priority task created (priority {})",
+            PRIORITY_MEDIUM
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create medium priority task!");
-        } else {
-            hprintln!("[Init] Medium priority task created (priority {})", PRIORITY_MEDIUM);
-        }
 
-        // High priority task - takes mutex (causes priority inheritance)
-        let result = xTaskCreateStatic(
-            task_high_priority,
-            b"HighTask\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
+        TaskHandle::spawn_static(
+            context,
+            b"HighTask\0",
+            &mut HIGH_TASK_STACK,
+            &mut HIGH_TASK_TCB,
             PRIORITY_HIGH,
-            HIGH_TASK_STACK.as_mut_ptr(),
-            &mut HIGH_TASK_TCB as *mut StaticTask_t,
+            task_high_priority,
+        )
+        .expect("Failed to create high priority task");
+        hprintln!(
+            "[Init] High priority task created (priority {})",
+            PRIORITY_HIGH
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create high priority task!");
-        } else {
-            hprintln!("[Init] High priority task created (priority {})", PRIORITY_HIGH);
-        }
 
-        // Semaphore waiter task - waits on binary semaphore
-        let result = xTaskCreateStatic(
+        TaskHandle::spawn_static(
+            context,
+            b"SemWait\0",
+            &mut SEM_WAITER_STACK,
+            &mut SEM_WAITER_TCB,
+            PRIORITY_MEDIUM,
             task_semaphore_waiter,
-            b"SemWait\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
-            PRIORITY_MEDIUM,
-            SEM_WAITER_STACK.as_mut_ptr(),
-            &mut SEM_WAITER_TCB as *mut StaticTask_t,
+        )
+        .expect("Failed to create semaphore waiter task");
+        hprintln!(
+            "[Init] Semaphore waiter task created (priority {})",
+            PRIORITY_MEDIUM
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create semaphore waiter task!");
-        } else {
-            hprintln!("[Init] Semaphore waiter task created (priority {})", PRIORITY_MEDIUM);
-        }
 
-        // Stream buffer producer task - sends data to stream buffer
-        let result = xTaskCreateStatic(
+        TaskHandle::spawn_static(
+            context,
+            b"Producer\0",
+            &mut PRODUCER_TASK_STACK,
+            &mut PRODUCER_TASK_TCB,
+            PRIORITY_LOW,
             task_stream_producer,
-            b"Producer\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
-            PRIORITY_LOW,
-            PRODUCER_TASK_STACK.as_mut_ptr(),
-            &mut PRODUCER_TASK_TCB as *mut StaticTask_t,
+        )
+        .expect("Failed to create producer task");
+        hprintln!(
+            "[Init] Stream producer task created (priority {})",
+            PRIORITY_LOW
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create producer task!");
-        } else {
-            hprintln!("[Init] Stream producer task created (priority {})", PRIORITY_LOW);
-        }
 
-        // Stream buffer consumer task - receives data from stream buffer
-        let result = xTaskCreateStatic(
+        TaskHandle::spawn_static(
+            context,
+            b"Consumer\0",
+            &mut CONSUMER_TASK_STACK,
+            &mut CONSUMER_TASK_TCB,
+            PRIORITY_MEDIUM,
             task_stream_consumer,
-            b"Consumer\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
-            PRIORITY_MEDIUM,
-            CONSUMER_TASK_STACK.as_mut_ptr(),
-            &mut CONSUMER_TASK_TCB as *mut StaticTask_t,
+        )
+        .expect("Failed to create consumer task");
+        hprintln!(
+            "[Init] Stream consumer task created (priority {})",
+            PRIORITY_MEDIUM
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create consumer task!");
-        } else {
-            hprintln!("[Init] Stream consumer task created (priority {})", PRIORITY_MEDIUM);
-        }
 
-        // Event group sender task - sets event bits
-        let result = xTaskCreateStatic(
+        TaskHandle::spawn_static(
+            context,
+            b"EvtSend\0",
+            &mut EVENT_SENDER_STACK,
+            &mut EVENT_SENDER_TCB,
+            PRIORITY_LOW,
             task_event_sender,
-            b"EvtSend\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
-            PRIORITY_LOW,
-            EVENT_SENDER_STACK.as_mut_ptr(),
-            &mut EVENT_SENDER_TCB as *mut StaticTask_t,
+        )
+        .expect("Failed to create event sender task");
+        hprintln!(
+            "[Init] Event sender task created (priority {})",
+            PRIORITY_LOW
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create event sender task!");
-        } else {
-            hprintln!("[Init] Event sender task created (priority {})", PRIORITY_LOW);
-        }
 
-        // Event group waiter task - waits for event bits
-        let result = xTaskCreateStatic(
-            task_event_waiter,
-            b"EvtWait\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
+        TaskHandle::spawn_static(
+            context,
+            b"EvtWait\0",
+            &mut EVENT_WAITER_STACK,
+            &mut EVENT_WAITER_TCB,
             PRIORITY_MEDIUM,
-            EVENT_WAITER_STACK.as_mut_ptr(),
-            &mut EVENT_WAITER_TCB as *mut StaticTask_t,
+            task_event_waiter,
+        )
+        .expect("Failed to create event waiter task");
+        hprintln!(
+            "[Init] Event waiter task created (priority {})",
+            PRIORITY_MEDIUM
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create event waiter task!");
-        } else {
-            hprintln!("[Init] Event waiter task created (priority {})", PRIORITY_MEDIUM);
-        }
 
-        // Runtime statistics task - periodically prints CPU usage
-        let result = xTaskCreateStatic(
-            task_runtime_stats,
-            b"RunStats\0".as_ptr(),
-            STACK_SIZE,
-            ptr::null_mut(),
+        TaskHandle::spawn_static(
+            context,
+            b"RunStats\0",
+            &mut RUNTIME_STATS_STACK,
+            &mut RUNTIME_STATS_TCB,
             PRIORITY_LOW,
-            RUNTIME_STATS_STACK.as_mut_ptr(),
-            &mut RUNTIME_STATS_TCB as *mut StaticTask_t,
+            task_runtime_stats,
+        )
+        .expect("Failed to create runtime stats task");
+        hprintln!(
+            "[Init] Runtime stats task created (priority {})",
+            PRIORITY_LOW
         );
-        if result.is_null() {
-            hprintln!("[Init] ERROR: Failed to create runtime stats task!");
-        } else {
-            hprintln!("[Init] Runtime stats task created (priority {})", PRIORITY_LOW);
-        }
     }
 }
 
-fn create_timer() {
+fn create_timer(context: &TaskContext) {
     hprintln!("[Init] Creating software timer...");
-
+    let timer = Timer::new_periodic(context, c"Timer1", pdMS_TO_TICKS(1000), timer_callback)
+        .expect("Failed to create timer");
+    assert!(timer.start(context), "Failed to start timer");
     unsafe {
-        // Create a 1-second periodic timer
-        TIMER_HANDLE = xTimerCreate(
-            b"Timer1\0".as_ptr(),
-            pdMS_TO_TICKS(1000), // 1 second period
-            pdTRUE,              // Auto-reload
-            ptr::null_mut(),     // Timer ID
-            timer_callback,
-        );
-
-        if TIMER_HANDLE.is_null() {
-            hprintln!("[Init] ERROR: Failed to create timer!");
-        } else {
-            hprintln!("[Init] Timer created successfully");
-            // Start the timer
-            xTimerStart(TIMER_HANDLE, 0);
-        }
+        TIMER = Some(timer);
     }
+    hprintln!("[Init] Timer created successfully");
 }
 
 // =============================================================================
@@ -426,158 +404,125 @@ extern "C" fn timer_callback(_xTimer: TimerHandle_t) {
 // Task Functions
 // =============================================================================
 
-/// Low priority task
-///
-/// This task:
-/// 1. Takes the mutex
-/// 2. Does some "work" while holding it
-/// 3. Signals the semaphore
-/// 4. Releases the mutex
-///
-/// When the high priority task also tries to take the mutex,
-/// this task's priority should be boosted (priority inheritance).
+/// Low priority task - demonstrates Mutex with RAII guard and priority inheritance
 extern "C" fn task_low_priority(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut iteration: u32 = 0;
+    let mutex = get_mutex!();
+    let semaphore = get_semaphore!();
 
     loop {
         iteration += 1;
         hprintln!("");
         hprintln!("[Low #{}] Attempting to take mutex...", iteration);
 
-        unsafe {
-            // Take the mutex (block indefinitely)
-            if xSemaphoreTake(MUTEX_HANDLE, portMAX_DELAY) == pdTRUE {
-                hprintln!("[Low #{}] Mutex acquired! Doing work...", iteration);
+        {
+            let mut guard = mutex.lock(&context).expect("mutex acquisition failed");
+            hprintln!("[Low #{}] Mutex acquired! Doing work...", iteration);
 
-                // Simulate work while holding the mutex
-                // During this time, if high priority task tries to take mutex,
-                // we should see priority inheritance
-                for _ in 0..3 {
-                    SHARED_COUNTER += 1;
-                    let count = SHARED_COUNTER;
-                    hprintln!("[Low #{}] Working... counter = {}", iteration, count);
-
-                    // Small delay to give other tasks a chance to try for mutex
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                }
-
-                // Signal the semaphore (wakes up semaphore waiter)
-                hprintln!("[Low #{}] Signaling semaphore...", iteration);
-                xSemaphoreGive(SEMAPHORE_HANDLE);
-
-                // Release the mutex
-                hprintln!("[Low #{}] Releasing mutex", iteration);
-                xSemaphoreGive(MUTEX_HANDLE);
+            for _ in 0..3 {
+                *guard += 1;
+                let count = *guard;
+                hprintln!("[Low #{}] Working... counter = {}", iteration, count);
+                freertos_in_rust::delay(&context, pdMS_TO_TICKS(100));
             }
-        }
 
-        // Wait before next iteration
-        vTaskDelay(pdMS_TO_TICKS(500));
+            hprintln!("[Low #{}] Signaling semaphore...", iteration);
+            assert!(semaphore.give(&context), "semaphore give failed");
+
+            let final_count = *guard;
+            hprintln!(
+                "[Low #{}] Releasing mutex (counter={})",
+                iteration,
+                final_count
+            );
+        } // guard dropped here, mutex released
+
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(500));
     }
 }
 
-/// Medium priority task
-///
-/// This task runs at medium priority and just does periodic work.
-/// When the low priority task has its priority boosted due to
-/// mutex contention with the high priority task, this medium task
-/// should NOT be able to preempt it (demonstrating priority inheritance).
+/// Medium priority task - periodic work
 extern "C" fn task_medium_priority(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut iteration: u32 = 0;
-
-    // Initial delay to let low priority task start
-    vTaskDelay(pdMS_TO_TICKS(50));
+    freertos_in_rust::delay(&context, pdMS_TO_TICKS(50));
 
     loop {
         iteration += 1;
         hprintln!("[Med #{}] Running", iteration);
-
-        // Just delay - we're checking that this task doesn't
-        // preempt the boosted low priority task
-        vTaskDelay(pdMS_TO_TICKS(200));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(200));
     }
 }
 
-/// High priority task
-///
-/// This task:
-/// 1. Waits a bit to let low priority task take mutex first
-/// 2. Tries to take the mutex
-/// 3. This should trigger priority inheritance in low priority task
-/// 4. Eventually gets the mutex when low releases it
+/// High priority task - demonstrates priority inheritance when blocked on mutex
 extern "C" fn task_high_priority(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut iteration: u32 = 0;
+    let mutex = get_mutex!();
 
     loop {
         iteration += 1;
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(150));
 
-        // Wait to let low priority task take mutex first
-        vTaskDelay(pdMS_TO_TICKS(150));
+        hprintln!(
+            "[High #{}] Attempting to take mutex (should trigger priority inheritance)...",
+            iteration
+        );
 
-        hprintln!("[High #{}] Attempting to take mutex (should trigger priority inheritance)...", iteration);
+        {
+            let mut guard = mutex.lock(&context).expect("mutex acquisition failed");
+            hprintln!("[High #{}] Mutex acquired!", iteration);
 
-        unsafe {
-            // Try to take mutex - low priority task currently holds it
-            // This should cause low priority task's priority to be boosted
-            if xSemaphoreTake(MUTEX_HANDLE, portMAX_DELAY) == pdTRUE {
-                hprintln!("[High #{}] Mutex acquired!", iteration);
+            *guard += 10;
+            let count = *guard;
+            hprintln!("[High #{}] Counter now = {}", iteration, count);
 
-                // Increment counter
-                SHARED_COUNTER += 10;
-                let count = SHARED_COUNTER;
-                hprintln!("[High #{}] Counter now = {}", iteration, count);
+            hprintln!("[High #{}] Releasing mutex", iteration);
+        } // guard dropped, mutex released
 
-                // Release mutex
-                hprintln!("[High #{}] Releasing mutex", iteration);
-                xSemaphoreGive(MUTEX_HANDLE);
-            }
-        }
-
-        // Wait before next iteration
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(1000));
     }
 }
 
-/// Semaphore waiter task
-///
-/// This task waits on a binary semaphore (no priority inheritance).
-/// When signaled by the low priority task, it wakes up and runs.
+/// Semaphore waiter task - waits on binary semaphore
 extern "C" fn task_semaphore_waiter(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut wakeups: u32 = 0;
+    let semaphore = get_semaphore!();
+    let mutex = get_mutex!();
 
     loop {
         hprintln!("[SemWait] Waiting for semaphore...");
+        assert!(semaphore.take(&context), "semaphore take failed");
+        wakeups += 1;
+        hprintln!("[SemWait] Semaphore received! Wakeup #{}", wakeups);
 
-        unsafe {
-            // Wait on semaphore (block indefinitely)
-            // Note: Semaphores do NOT have priority inheritance
-            if xSemaphoreTake(SEMAPHORE_HANDLE, portMAX_DELAY) == pdTRUE {
-                wakeups += 1;
-                hprintln!("[SemWait] Semaphore received! Wakeup #{}", wakeups);
-
-                // Read the shared counter
-                let count = SHARED_COUNTER;
-                hprintln!("[SemWait] Current counter value: {}", count);
-            }
+        {
+            let guard = mutex.lock(&context).expect("mutex acquisition failed");
+            let count = *guard;
+            hprintln!("[SemWait] Current counter value: {}", count);
         }
     }
 }
 
 /// Stream buffer producer task
-///
-/// Sends incrementing byte patterns to the stream buffer every 750ms.
-/// Demonstrates stream buffer send functionality.
 extern "C" fn task_stream_producer(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut sequence: u8 = 0;
     let mut iteration: u32 = 0;
+    let stream = get_stream_sender!();
 
-    // Initial delay to let other tasks start
-    vTaskDelay(pdMS_TO_TICKS(200));
+    freertos_in_rust::delay(&context, pdMS_TO_TICKS(200));
 
     loop {
         iteration += 1;
 
-        // Create a small message to send (8 bytes)
         let message: [u8; 8] = [
             sequence,
             sequence.wrapping_add(1),
@@ -589,74 +534,79 @@ extern "C" fn task_stream_producer(_pvParameters: *mut c_void) {
             sequence.wrapping_add(7),
         ];
 
-        unsafe {
-            let space = xStreamBufferSpacesAvailable(STREAM_BUFFER_HANDLE);
-            hprintln!("[Producer #{}] Sending 8 bytes (seq={}), space={}", iteration, sequence, space);
+        let space = stream.spaces(&context);
+        hprintln!(
+            "[Producer #{}] Sending 8 bytes (seq={}), space={}",
+            iteration,
+            sequence,
+            space
+        );
 
-            let sent = xStreamBufferSend(
-                STREAM_BUFFER_HANDLE,
-                message.as_ptr() as *const c_void,
-                message.len(),
-                pdMS_TO_TICKS(100), // Short timeout
+        let sent = stream.send_timeout(&context, &message, pdMS_TO_TICKS(100));
+
+        if sent == message.len() {
+            hprintln!("[Producer #{}] Sent {} bytes successfully", iteration, sent);
+        } else {
+            hprintln!(
+                "[Producer #{}] Only sent {} of {} bytes (buffer full?)",
+                iteration,
+                sent,
+                message.len()
             );
-
-            if sent == message.len() {
-                hprintln!("[Producer #{}] Sent {} bytes successfully", iteration, sent);
-            } else {
-                hprintln!("[Producer #{}] Only sent {} of {} bytes (buffer full?)", iteration, sent, message.len());
-            }
         }
 
         sequence = sequence.wrapping_add(8);
-
-        // Wait before sending next message
-        vTaskDelay(pdMS_TO_TICKS(750));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(750));
     }
 }
 
 /// Stream buffer consumer task
-///
-/// Receives data from the stream buffer and validates the byte pattern.
-/// Demonstrates stream buffer receive functionality.
 extern "C" fn task_stream_consumer(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut total_received: u32 = 0;
     let mut iteration: u32 = 0;
     let mut buffer: [u8; 32] = [0u8; 32];
+    let stream = get_stream_receiver!();
 
-    // Initial delay
-    vTaskDelay(pdMS_TO_TICKS(500));
+    freertos_in_rust::delay(&context, pdMS_TO_TICKS(500));
 
     loop {
         iteration += 1;
 
-        unsafe {
-            let available = xStreamBufferBytesAvailable(STREAM_BUFFER_HANDLE);
-            hprintln!("[Consumer #{}] Waiting for data, available={}", iteration, available);
+        let available = stream.available(&context);
+        hprintln!(
+            "[Consumer #{}] Waiting for data, available={}",
+            iteration,
+            available
+        );
 
-            // Receive with timeout
-            let received = xStreamBufferReceive(
-                STREAM_BUFFER_HANDLE,
-                buffer.as_mut_ptr() as *mut c_void,
-                buffer.len(),
-                pdMS_TO_TICKS(2000), // Wait up to 2 seconds
+        let received = stream.receive_timeout(&context, &mut buffer, pdMS_TO_TICKS(2000));
+
+        if received > 0 {
+            total_received += received as u32;
+            hprintln!(
+                "[Consumer #{}] Received {} bytes, total={}",
+                iteration,
+                received,
+                total_received
             );
 
-            if received > 0 {
-                total_received += received as u32;
-                hprintln!("[Consumer #{}] Received {} bytes, total={}", iteration, received, total_received);
-
-                // Print first few bytes received
-                if received >= 4 {
-                    hprintln!("[Consumer #{}] Data: [{}, {}, {}, {}, ...]",
-                        iteration, buffer[0], buffer[1], buffer[2], buffer[3]);
-                }
-            } else {
-                hprintln!("[Consumer #{}] Timeout - no data received", iteration);
+            if received >= 4 {
+                hprintln!(
+                    "[Consumer #{}] Data: [{}, {}, {}, {}, ...]",
+                    iteration,
+                    buffer[0],
+                    buffer[1],
+                    buffer[2],
+                    buffer[3]
+                );
             }
+        } else {
+            hprintln!("[Consumer #{}] Timeout - no data received", iteration);
         }
 
-        // Small delay before next receive
-        vTaskDelay(pdMS_TO_TICKS(100));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(100));
     }
 }
 
@@ -664,91 +614,72 @@ extern "C" fn task_stream_consumer(_pvParameters: *mut c_void) {
 // Event Group Constants
 // =============================================================================
 
-/// Event bit 0: Data is ready
 const EVENT_BIT_DATA_READY: EventBits_t = 1 << 0;
-/// Event bit 1: Processing complete / acknowledgment
 const EVENT_BIT_ACK: EventBits_t = 1 << 1;
 
 /// Event group sender task
-///
-/// Periodically sets event bits to signal the waiter task.
-/// Demonstrates xEventGroupSetBits functionality.
 extern "C" fn task_event_sender(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut iteration: u32 = 0;
+    let events = get_event_group!();
 
-    // Initial delay to let waiter task start first
-    vTaskDelay(pdMS_TO_TICKS(300));
+    freertos_in_rust::delay(&context, pdMS_TO_TICKS(300));
 
     loop {
         iteration += 1;
 
-        unsafe {
-            // Set the "data ready" bit
-            hprintln!("[EvtSend #{}] Setting DATA_READY bit", iteration);
-            let bits_before = xEventGroupSetBits(EVENT_GROUP_HANDLE, EVENT_BIT_DATA_READY);
-            hprintln!("[EvtSend #{}] Bits after set: 0x{:02X}", iteration, bits_before);
+        hprintln!("[EvtSend #{}] Setting DATA_READY bit", iteration);
+        let bits_after = events.set(&context, EVENT_BIT_DATA_READY);
+        hprintln!(
+            "[EvtSend #{}] Bits after set: 0x{:02X}",
+            iteration,
+            bits_after
+        );
 
-            // Wait for acknowledgment (waiter will set ACK bit)
-            hprintln!("[EvtSend #{}] Waiting for ACK bit...", iteration);
-            let bits = xEventGroupWaitBits(
-                EVENT_GROUP_HANDLE,
-                EVENT_BIT_ACK,
-                pdTRUE,  // Clear ACK bit on exit
-                pdFALSE, // Wait for ANY bit (OR)
-                pdMS_TO_TICKS(2000),
-            );
-
-            if (bits & EVENT_BIT_ACK) != 0 {
-                hprintln!("[EvtSend #{}] ACK received! bits=0x{:02X}", iteration, bits);
-            } else {
-                hprintln!("[EvtSend #{}] Timeout waiting for ACK", iteration);
-            }
+        hprintln!("[EvtSend #{}] Waiting for ACK bit...", iteration);
+        if let Some(bits) =
+            events.wait_any_clear_timeout(&context, EVENT_BIT_ACK, pdMS_TO_TICKS(2000))
+        {
+            hprintln!("[EvtSend #{}] ACK received! bits=0x{:02X}", iteration, bits);
+        } else {
+            hprintln!("[EvtSend #{}] Timeout waiting for ACK", iteration);
         }
 
-        // Wait before next cycle
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(1500));
     }
 }
 
 /// Event group waiter task
-///
-/// Waits for event bits and responds with acknowledgment.
-/// Demonstrates xEventGroupWaitBits with clear-on-exit.
 extern "C" fn task_event_waiter(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut iteration: u32 = 0;
+    let events = get_event_group!();
 
     loop {
         iteration += 1;
+        hprintln!("[EvtWait #{}] Waiting for DATA_READY bit...", iteration);
 
-        unsafe {
-            hprintln!("[EvtWait #{}] Waiting for DATA_READY bit...", iteration);
-
-            // Wait for data ready bit (clear it on exit)
-            let bits = xEventGroupWaitBits(
-                EVENT_GROUP_HANDLE,
-                EVENT_BIT_DATA_READY,
-                pdTRUE,  // Clear DATA_READY on exit
-                pdFALSE, // Wait for ANY bit (OR)
-                pdMS_TO_TICKS(3000),
+        if let Some(bits) =
+            events.wait_any_clear_timeout(&context, EVENT_BIT_DATA_READY, pdMS_TO_TICKS(3000))
+        {
+            hprintln!(
+                "[EvtWait #{}] DATA_READY received! bits=0x{:02X}",
+                iteration,
+                bits
             );
 
-            if (bits & EVENT_BIT_DATA_READY) != 0 {
-                hprintln!("[EvtWait #{}] DATA_READY received! bits=0x{:02X}", iteration, bits);
+            hprintln!("[EvtWait #{}] Processing...", iteration);
+            freertos_in_rust::delay(&context, pdMS_TO_TICKS(100));
 
-                // Simulate processing
-                hprintln!("[EvtWait #{}] Processing...", iteration);
-                vTaskDelay(pdMS_TO_TICKS(100));
-
-                // Send acknowledgment
-                hprintln!("[EvtWait #{}] Sending ACK", iteration);
-                let _ = xEventGroupSetBits(EVENT_GROUP_HANDLE, EVENT_BIT_ACK);
-            } else {
-                hprintln!("[EvtWait #{}] Timeout - no data ready", iteration);
-            }
+            hprintln!("[EvtWait #{}] Sending ACK", iteration);
+            events.set(&context, EVENT_BIT_ACK);
+        } else {
+            hprintln!("[EvtWait #{}] Timeout - no data ready", iteration);
         }
 
-        // Small delay
-        vTaskDelay(pdMS_TO_TICKS(50));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(50));
     }
 }
 
@@ -756,15 +687,13 @@ extern "C" fn task_event_waiter(_pvParameters: *mut c_void) {
 // Runtime Statistics Task
 // =============================================================================
 
-/// Runtime statistics task
-///
-/// Periodically prints CPU usage statistics for all tasks.
-/// Demonstrates the generate-run-time-stats feature.
 extern "C" fn task_runtime_stats(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
+    use core::ptr;
     let mut iteration: u32 = 0;
 
-    // Let system run for a bit before collecting stats
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    freertos_in_rust::delay(&context, pdMS_TO_TICKS(1500));
 
     loop {
         iteration += 1;
@@ -772,52 +701,25 @@ extern "C" fn task_runtime_stats(_pvParameters: *mut c_void) {
         hprintln!("");
         hprintln!("========== Run-Time Statistics (#{}) ==========", iteration);
 
-        // Get total run time
         let total_time = ulTaskGetTotalRunTime();
         hprintln!("Total Run Time: {} ticks", total_time);
 
-        // Get idle task stats
         let idle_counter = ulTaskGetIdleRunTimeCounter();
         let idle_percent = ulTaskGetIdleRunTimePercent();
         hprintln!("Idle Task:      {} ticks ({}%)", idle_counter, idle_percent);
 
-        // Calculate non-idle CPU usage
         let cpu_usage = 100 - idle_percent;
         hprintln!("CPU Usage:      {}%", cpu_usage);
 
-        // Get current task's runtime (this task)
-        let my_counter = ulTaskGetRunTimeCounter(ptr::null_mut());
-        let my_percent = ulTaskGetRunTimePercent(ptr::null_mut());
+        // SAFETY: null explicitly selects this live current task, and this
+        // function executes in task context.
+        let my_counter = unsafe { ulTaskGetRunTimeCounter(ptr::null_mut()) };
+        let my_percent = unsafe { ulTaskGetRunTimePercent(ptr::null_mut()) };
         hprintln!("This Task:      {} ticks ({}%)", my_counter, my_percent);
 
         hprintln!("================================================");
         hprintln!("");
 
-        // Wait 5 seconds before next stats report
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(5000));
     }
-}
-
-// =============================================================================
-// Semaphore Helper Functions
-// =============================================================================
-
-/// Create a mutex (calls xQueueCreateMutex)
-unsafe fn xSemaphoreCreateMutex() -> QueueHandle_t {
-    xQueueCreateMutex(queueQUEUE_TYPE_MUTEX)
-}
-
-/// Create a binary semaphore
-unsafe fn xSemaphoreCreateBinary() -> QueueHandle_t {
-    xQueueGenericCreate(1, 0, queueQUEUE_TYPE_BINARY_SEMAPHORE)
-}
-
-/// Take a semaphore/mutex
-unsafe fn xSemaphoreTake(xSemaphore: QueueHandle_t, xBlockTime: TickType_t) -> BaseType_t {
-    xQueueSemaphoreTake(xSemaphore, xBlockTime)
-}
-
-/// Give a semaphore/mutex
-unsafe fn xSemaphoreGive(xSemaphore: QueueHandle_t) -> BaseType_t {
-    xQueueGenericSend(xSemaphore, ptr::null(), 0, queueSEND_TO_BACK)
 }

@@ -1,0 +1,45 @@
+[package]
+name = "freertos-qemu-cortex-a53"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+tickless = []
+
+[[bin]]
+name = "smoke"
+path = "src/bin/smoke.rs"
+
+[[bin]]
+name = "port"
+path = "src/bin/port.rs"
+
+[[bin]]
+name = "tickless"
+path = "src/bin/tickless.rs"
+
+[[bin]]
+name = "event-timer"
+path = "src/bin/event-timer.rs"
+
+[dependencies]
+freertos-in-rust = { path = "../../..", default-features = false, features = [
+    "port-cortex-a53",
+    "heap-4",
+    "timers",
+    "pend-function-call",
+    "tickless-idle",
+    "generate-run-time-stats",
+] }
+freertos-qemu-test-common = { path = "../common" }
+
+[profile.dev]
+opt-level = "s"
+debug = true
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

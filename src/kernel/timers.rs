@@ -41,20 +41,20 @@ use crate::config::*;
 use crate::kernel::list::*;
 use crate::kernel::queue::*;
 use crate::kernel::tasks::*;
-use crate::memory::*;
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::memory::{pvPortMalloc, vPortFree};
 use crate::types::*;
 
 // Import trace macros (exported at crate root via #[macro_export])
 use crate::{
     traceENTER_pcTimerGetName, traceENTER_pvTimerGetTimerID, traceENTER_uxTimerGetReloadMode,
-    traceENTER_vTimerSetReloadMode, traceENTER_vTimerSetTimerID, traceENTER_xTimerCreate,
-    traceENTER_xTimerCreateStatic, traceENTER_xTimerCreateTimerTask,
-    traceENTER_xTimerGenericCommandFromISR, traceENTER_xTimerGenericCommandFromTask,
-    traceENTER_xTimerGetExpiryTime, traceENTER_xTimerGetPeriod, traceENTER_xTimerGetReloadMode,
-    traceENTER_xTimerGetStaticBuffer, traceENTER_xTimerGetTimerDaemonTaskHandle,
-    traceENTER_xTimerIsTimerActive, traceRETURN_pcTimerGetName, traceRETURN_pvTimerGetTimerID,
-    traceRETURN_uxTimerGetReloadMode, traceRETURN_vTimerSetReloadMode,
-    traceRETURN_vTimerSetTimerID, traceRETURN_xTimerCreate, traceRETURN_xTimerCreateStatic,
+    traceENTER_vTimerSetReloadMode, traceENTER_vTimerSetTimerID, traceENTER_xTimerCreateStatic,
+    traceENTER_xTimerCreateTimerTask, traceENTER_xTimerGenericCommandFromISR,
+    traceENTER_xTimerGenericCommandFromTask, traceENTER_xTimerGetExpiryTime,
+    traceENTER_xTimerGetPeriod, traceENTER_xTimerGetReloadMode, traceENTER_xTimerGetStaticBuffer,
+    traceENTER_xTimerGetTimerDaemonTaskHandle, traceENTER_xTimerIsTimerActive,
+    traceRETURN_pcTimerGetName, traceRETURN_pvTimerGetTimerID, traceRETURN_uxTimerGetReloadMode,
+    traceRETURN_vTimerSetReloadMode, traceRETURN_vTimerSetTimerID, traceRETURN_xTimerCreateStatic,
     traceRETURN_xTimerCreateTimerTask, traceRETURN_xTimerGenericCommandFromISR,
     traceRETURN_xTimerGenericCommandFromTask, traceRETURN_xTimerGetExpiryTime,
     traceRETURN_xTimerGetPeriod, traceRETURN_xTimerGetReloadMode,
@@ -62,6 +62,9 @@ use crate::{
     traceRETURN_xTimerIsTimerActive, traceTIMER_COMMAND_RECEIVED, traceTIMER_COMMAND_SEND,
     traceTIMER_CREATE, traceTIMER_EXPIRED,
 };
+
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+use crate::{traceENTER_xTimerCreate, traceRETURN_xTimerCreate};
 
 #[cfg(feature = "trace-facility")]
 use crate::{
@@ -149,13 +152,31 @@ pub const tmrCOMMAND_CHANGE_PERIOD_FROM_ISR: BaseType_t = 9;
 // Callback Function Types
 // =============================================================================
 
-/// Timer callback function prototype
-/// Called when a timer expires
-pub type TimerCallbackFunction_t = extern "C" fn(TimerHandle_t);
+/// Timer callback function prototype.
+///
+/// The daemon supplies a valid, live handle for the duration of the callback.
+/// The callback is unsafe to invoke directly because arbitrary callers cannot
+/// establish that invariant.
+pub type TimerCallbackFunction_t = unsafe extern "C" fn(TimerHandle_t);
 
 /// Pended function callback prototype
 /// For xTimerPendFunctionCall
-pub type PendedFunction_t = extern "C" fn(*mut c_void, u32);
+///
+// [AMENDMENT] Upstream stores the second parameter as `uint32_t`, which
+// truncates 64-bit event-group masks. Widen it with the tick configuration so
+// all advertised event bits survive a deferred FromISR call.
+#[cfg(feature = "tick-64bit")]
+pub type PendedFunctionParameter_t = u64;
+#[cfg(not(feature = "tick-64bit"))]
+pub type PendedFunctionParameter_t = u32;
+/// The callback may carry safety preconditions for its opaque pointer. The
+/// timer daemon therefore invokes it through an unsafe function pointer rather
+/// than pretending that arbitrary deferred data is always valid.
+pub type PendedFunction_t = unsafe extern "C" fn(*mut c_void, PendedFunctionParameter_t);
+
+const _: () = assert!(
+    core::mem::size_of::<PendedFunctionParameter_t>() >= core::mem::size_of::<TickType_t>()
+);
 
 // =============================================================================
 // Timer Structure
@@ -216,7 +237,7 @@ pub struct CallbackParameters_t {
     /// First parameter
     pub pvParameter1: *mut c_void,
     /// Second parameter
-    pub ulParameter2: u32,
+    pub ulParameter2: PendedFunctionParameter_t,
 }
 
 /// Union for timer message payload
@@ -226,6 +247,7 @@ pub union DaemonTaskMessageUnion {
     /// Timer command parameters
     pub xTimerParameters: TimerParameter_t,
     /// Callback parameters (for pended functions)
+    #[cfg(feature = "pend-function-call")]
     pub xCallbackParameters: CallbackParameters_t,
 }
 
@@ -242,27 +264,24 @@ pub struct DaemonTaskMessage_t {
 // Static Timer Buffer (for xTimerCreateStatic)
 // =============================================================================
 
-/// Static buffer for timer allocation
-///
-/// Must be the same size as Timer_t for static allocation to work.
-#[repr(C)]
+/// Opaque static buffer for timer allocation.
+#[repr(transparent)]
 pub struct StaticTimer_t {
-    /// Placeholder to match Timer_t size - name
-    pub pvDummy1: *mut c_void,
-    /// Placeholder - list item
-    pub xDummy2: StaticListItem_t,
-    /// Placeholder - period
-    pub xDummy3: TickType_t,
-    /// Placeholder - timer ID
-    pub pvDummy4: *mut c_void,
-    /// Placeholder - callback
-    pub pvDummy5: *mut c_void,
-    /// Placeholder - trace number (conditional)
-    #[cfg(feature = "trace-facility")]
-    pub uxDummy6: UBaseType_t,
-    /// Placeholder - status
-    pub ucDummy7: u8,
+    // [AMENDMENT] `MaybeUninit<Timer_t>` preserves both size and alignment
+    // without requiring callers to manufacture a valid internal timer.
+    _storage: core::mem::MaybeUninit<Timer_t>,
 }
+
+impl StaticTimer_t {
+    pub const fn new() -> Self {
+        Self {
+            _storage: core::mem::MaybeUninit::uninit(),
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<StaticTimer_t>() == core::mem::size_of::<Timer_t>());
+const _: () = assert!(core::mem::align_of::<StaticTimer_t>() == core::mem::align_of::<Timer_t>());
 
 // =============================================================================
 // Scheduler Globals
@@ -286,21 +305,74 @@ static mut xTimerQueue: QueueHandle_t = ptr::null_mut();
 /// Handle to the timer daemon task
 static mut xTimerTaskHandle: TaskHandle_t = ptr::null_mut();
 
+/// Application-provided storage for a statically allocated timer daemon task.
+static mut pxTimerTaskTCBBuffer: *mut StaticTask_t = ptr::null_mut();
+static mut pxTimerTaskStackBuffer: *mut StackType_t = ptr::null_mut();
+static mut uxTimerTaskStackSize: configSTACK_DEPTH_TYPE = 0;
+
+/// Static timer command queue, matching upstream when static allocation is
+/// supported.
+static mut xStaticTimerQueue: StaticQueue_t = StaticQueue_t::new();
+const TIMER_QUEUE_STORAGE_SIZE: usize =
+    configTIMER_QUEUE_LENGTH as usize * core::mem::size_of::<DaemonTaskMessage_t>();
+static mut ucStaticTimerQueueStorage: [u8; TIMER_QUEUE_STORAGE_SIZE] =
+    [0; TIMER_QUEUE_STORAGE_SIZE];
+
 /// Last sampled time (for overflow detection)
 static mut xLastTime: TickType_t = 0;
+
+/// Register storage used to create the timer daemon without an allocator.
+///
+/// This is the Rust equivalent of supplying
+/// `vApplicationGetTimerTaskMemory()`. It must be called before the scheduler
+/// is started and the storage must remain valid for the scheduler's lifetime.
+///
+/// # Safety
+///
+/// The TCB and stack must be uniquely owned, correctly aligned, and the stack
+/// must contain at least `uxStackSize` words.
+pub unsafe fn vTimerSetTimerTaskMemory(
+    pxTaskTCBBuffer: *mut StaticTask_t,
+    pxTaskStackBuffer: *mut StackType_t,
+    uxStackSize: configSTACK_DEPTH_TYPE,
+) -> BaseType_t {
+    if pxTaskTCBBuffer.is_null() || pxTaskStackBuffer.is_null() || uxStackSize == 0 {
+        return pdFAIL;
+    }
+
+    taskENTER_CRITICAL();
+    let xReturn = if xTimerTaskHandle.is_null() {
+        pxTimerTaskTCBBuffer = pxTaskTCBBuffer;
+        pxTimerTaskStackBuffer = pxTaskStackBuffer;
+        uxTimerTaskStackSize = uxStackSize;
+        pdPASS
+    } else {
+        pdFAIL
+    };
+    taskEXIT_CRITICAL();
+
+    xReturn
+}
 
 // =============================================================================
 // Public API: Timer Creation
 // =============================================================================
 
-/// Create the timer service task
+/// Create the timer service task.
 ///
 /// Called by the scheduler when configUSE_TIMERS == 1.
 /// Creates the timer queue and daemon task.
 ///
 /// # Returns
 /// `pdPASS` if successful, `pdFAIL` otherwise
-pub fn xTimerCreateTimerTask() -> BaseType_t {
+///
+/// # Safety
+///
+/// Call only from the scheduler's exclusive pre-start initialization path,
+/// after any static timer-task memory has been registered. No timer daemon may
+/// already exist and no task, interrupt, scheduler restart, or timer API may
+/// concurrently mutate the task lists or timer module state.
+pub unsafe fn xTimerCreateTimerTask() -> BaseType_t {
     let mut xReturn: BaseType_t = pdFAIL;
 
     traceENTER_xTimerCreateTimerTask!();
@@ -309,40 +381,51 @@ pub fn xTimerCreateTimerTask() -> BaseType_t {
     prvCheckForValidListAndQueue();
 
     unsafe {
-        if xTimerQueue != ptr::null_mut() {
-            // Create the timer task
-            // [AMENDMENT] For static allocation, we would call
-            // vApplicationGetTimerTaskMemory. For now, use dynamic.
-            #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+        if !xTimerQueue.is_null() {
+            if !pxTimerTaskTCBBuffer.is_null()
+                && !pxTimerTaskStackBuffer.is_null()
+                && uxTimerTaskStackSize > 0
             {
-                xReturn = xTaskCreate(
+                xTimerTaskHandle = xTaskCreateStatic(
                     prvTimerTask,
                     configTIMER_SERVICE_TASK_NAME.as_ptr(),
-                    configTIMER_TASK_STACK_DEPTH,
+                    uxTimerTaskStackSize,
                     ptr::null_mut(),
                     configTIMER_TASK_PRIORITY,
-                    &mut xTimerTaskHandle,
+                    pxTimerTaskStackBuffer,
+                    pxTimerTaskTCBBuffer,
                 );
-            }
 
-            #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
-            {
-                // Static allocation requires user to provide memory
-                // via vApplicationGetTimerTaskMemory
-                // TODO: Implement static allocation path
-                xReturn = pdFAIL;
+                if !xTimerTaskHandle.is_null() {
+                    xReturn = pdPASS;
+                }
+            } else {
+                #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+                {
+                    xReturn = xTaskCreate(
+                        prvTimerTask,
+                        configTIMER_SERVICE_TASK_NAME.as_ptr(),
+                        configTIMER_TASK_STACK_DEPTH,
+                        ptr::null_mut(),
+                        configTIMER_TASK_PRIORITY,
+                        &mut xTimerTaskHandle,
+                    );
+                }
+
+                #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
+                {
+                    xReturn = pdFAIL;
+                }
             }
         }
     }
-
-    configASSERT(xReturn != pdFAIL);
 
     traceRETURN_xTimerCreateTimerTask!(xReturn);
 
     xReturn
 }
 
-/// Create a new software timer (dynamic allocation)
+/// Create a new software timer (dynamic allocation).
 ///
 /// # Arguments
 /// * `pcTimerName` - Text name for debugging
@@ -353,8 +436,16 @@ pub fn xTimerCreateTimerTask() -> BaseType_t {
 ///
 /// # Returns
 /// Handle to the timer, or NULL on failure
+///
+/// # Safety
+///
+/// If non-null, `pcTimerName` must identify a NUL-terminated byte string that
+/// remains readable until the timer has been deleted and all queued timer
+/// commands have completed. `pvTimerID` is opaque to the kernel, but any data
+/// the callback derives from it must remain valid for every possible callback.
+/// The callback must obey timer-daemon context restrictions.
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
-pub fn xTimerCreate(
+pub unsafe fn xTimerCreate(
     pcTimerName: *const u8,
     xTimerPeriodInTicks: TickType_t,
     xAutoReload: BaseType_t,
@@ -369,14 +460,15 @@ pub fn xTimerCreate(
         pxCallbackFunction
     );
 
+    if xTimerPeriodInTicks == 0 {
+        traceRETURN_xTimerCreate!(ptr::null_mut::<Timer_t>());
+        return ptr::null_mut();
+    }
+
     let pxNewTimer: *mut Timer_t =
         unsafe { pvPortMalloc(core::mem::size_of::<Timer_t>()) as *mut Timer_t };
 
     if pxNewTimer != ptr::null_mut() {
-        // Status is zero - not static, not active, auto-reload set below
-        unsafe {
-            (*pxNewTimer).ucStatus = 0x00;
-        }
         prvInitialiseNewTimer(
             pcTimerName,
             xTimerPeriodInTicks,
@@ -384,6 +476,7 @@ pub fn xTimerCreate(
             pvTimerID,
             pxCallbackFunction,
             pxNewTimer,
+            0,
         );
     }
 
@@ -392,7 +485,7 @@ pub fn xTimerCreate(
     pxNewTimer as TimerHandle_t
 }
 
-/// Create a new software timer (static allocation)
+/// Create a new software timer (static allocation).
 ///
 /// # Arguments
 /// * `pcTimerName` - Text name for debugging
@@ -404,7 +497,16 @@ pub fn xTimerCreate(
 ///
 /// # Returns
 /// Handle to the timer, or NULL if pxTimerBuffer is NULL
-pub fn xTimerCreateStatic(
+///
+/// # Safety
+///
+/// `pxTimerBuffer` must be non-null, properly aligned, uniquely writable, and
+/// remain at a stable address until deletion has been processed by the timer
+/// daemon and no queued command can refer to it. If non-null, `pcTimerName`
+/// must be a NUL-terminated byte string readable for the same lifetime.
+/// `pvTimerID` is opaque to the kernel, but callback-owned data reached through
+/// it must remain valid for every callback invocation.
+pub unsafe fn xTimerCreateStatic(
     pcTimerName: *const u8,
     xTimerPeriodInTicks: TickType_t,
     xAutoReload: BaseType_t,
@@ -421,6 +523,11 @@ pub fn xTimerCreateStatic(
         pxTimerBuffer
     );
 
+    if pxTimerBuffer.is_null() || xTimerPeriodInTicks == 0 {
+        traceRETURN_xTimerCreateStatic!(ptr::null_mut::<Timer_t>());
+        return ptr::null_mut();
+    }
+
     // Verify StaticTimer_t is same size as Timer_t
     #[cfg(debug_assertions)]
     {
@@ -429,15 +536,9 @@ pub fn xTimerCreateStatic(
         configASSERT(static_size == timer_size);
     }
 
-    configASSERT(pxTimerBuffer != ptr::null_mut());
-
     let pxNewTimer: *mut Timer_t = pxTimerBuffer as *mut Timer_t;
 
     if pxNewTimer != ptr::null_mut() {
-        // Mark as statically allocated
-        unsafe {
-            (*pxNewTimer).ucStatus = tmrSTATUS_IS_STATICALLY_ALLOCATED;
-        }
         prvInitialiseNewTimer(
             pcTimerName,
             xTimerPeriodInTicks,
@@ -445,6 +546,7 @@ pub fn xTimerCreateStatic(
             pvTimerID,
             pxCallbackFunction,
             pxNewTimer,
+            tmrSTATUS_IS_STATICALLY_ALLOCATED,
         );
     }
 
@@ -457,7 +559,7 @@ pub fn xTimerCreateStatic(
 // Public API: Timer Control
 // =============================================================================
 
-/// Send a command to the timer daemon from a task
+/// Send a command to the timer daemon from a task.
 ///
 /// # Arguments
 /// * `xTimer` - Timer handle
@@ -468,7 +570,14 @@ pub fn xTimerCreateStatic(
 ///
 /// # Returns
 /// `pdPASS` if command was sent, `pdFAIL` otherwise
-pub fn xTimerGenericCommandFromTask(
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer until the daemon consumes this command.
+/// On a successful delete command, no caller may subsequently use the handle.
+/// This task-context API must not be called from an interrupt handler. Unknown
+/// command IDs and a zero change-period value are rejected with `pdFAIL`.
+pub unsafe fn xTimerGenericCommandFromTask(
     xTimer: TimerHandle_t,
     xCommandID: BaseType_t,
     xOptionalValue: TickType_t,
@@ -486,15 +595,22 @@ pub fn xTimerGenericCommandFromTask(
     );
 
     unsafe {
-        if xTimerQueue != ptr::null_mut() && xTimer != ptr::null_mut() {
+        let xCommandIsValid = xCommandID == tmrCOMMAND_START_DONT_TRACE
+            || xCommandID == tmrCOMMAND_START
+            || xCommandID == tmrCOMMAND_RESET
+            || xCommandID == tmrCOMMAND_STOP
+            || xCommandID == tmrCOMMAND_CHANGE_PERIOD
+            || xCommandID == tmrCOMMAND_DELETE;
+
+        if xTimerQueue != ptr::null_mut() && xTimer != ptr::null_mut() && xCommandIsValid {
             let mut xMessage: DaemonTaskMessage_t = core::mem::zeroed();
             xMessage.xMessageID = xCommandID;
             xMessage.u.xTimerParameters.xMessageValue = xOptionalValue;
             xMessage.u.xTimerParameters.pxTimer = xTimer as *mut Timer_t;
 
-            configASSERT(xCommandID < tmrFIRST_FROM_ISR_COMMAND);
+            let xPeriodIsValid = xCommandID != tmrCOMMAND_CHANGE_PERIOD || xOptionalValue != 0;
 
-            if xCommandID < tmrFIRST_FROM_ISR_COMMAND {
+            if xPeriodIsValid {
                 let xTicksToWaitActual = if xTaskGetSchedulerState() == taskSCHEDULER_RUNNING {
                     xTicksToWait
                 } else {
@@ -517,7 +633,7 @@ pub fn xTimerGenericCommandFromTask(
     xReturn
 }
 
-/// Send a command to the timer daemon from an ISR
+/// Send a command to the timer daemon from an ISR.
 ///
 /// # Arguments
 /// * `xTimer` - Timer handle
@@ -528,7 +644,14 @@ pub fn xTimerGenericCommandFromTask(
 ///
 /// # Returns
 /// `pdPASS` if command was sent, `pdFAIL` otherwise
-pub fn xTimerGenericCommandFromISR(
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer until the daemon consumes this command.
+/// If non-null, `pxHigherPriorityTaskWoken` must be aligned and writable for
+/// this call. The port's FromISR priority restrictions must be satisfied.
+/// Unknown command IDs and a zero change-period value return `pdFAIL`.
+pub unsafe fn xTimerGenericCommandFromISR(
     xTimer: TimerHandle_t,
     xCommandID: BaseType_t,
     xOptionalValue: TickType_t,
@@ -546,15 +669,21 @@ pub fn xTimerGenericCommandFromISR(
     );
 
     unsafe {
-        if xTimerQueue != ptr::null_mut() && xTimer != ptr::null_mut() {
+        let xCommandIsValid = xCommandID == tmrCOMMAND_START_FROM_ISR
+            || xCommandID == tmrCOMMAND_RESET_FROM_ISR
+            || xCommandID == tmrCOMMAND_STOP_FROM_ISR
+            || xCommandID == tmrCOMMAND_CHANGE_PERIOD_FROM_ISR;
+
+        if xTimerQueue != ptr::null_mut() && xTimer != ptr::null_mut() && xCommandIsValid {
             let mut xMessage: DaemonTaskMessage_t = core::mem::zeroed();
             xMessage.xMessageID = xCommandID;
             xMessage.u.xTimerParameters.xMessageValue = xOptionalValue;
             xMessage.u.xTimerParameters.pxTimer = xTimer as *mut Timer_t;
 
-            configASSERT(xCommandID >= tmrFIRST_FROM_ISR_COMMAND);
+            let xPeriodIsValid =
+                xCommandID != tmrCOMMAND_CHANGE_PERIOD_FROM_ISR || xOptionalValue != 0;
 
-            if xCommandID >= tmrFIRST_FROM_ISR_COMMAND {
+            if xPeriodIsValid {
                 xReturn = xQueueSendToBackFromISR(
                     xTimerQueue,
                     &xMessage as *const _ as *const c_void,
@@ -571,9 +700,17 @@ pub fn xTimerGenericCommandFromISR(
     xReturn
 }
 
-/// Generic timer command (dispatches to FromTask or FromISR based on command ID)
+/// Generic timer command (dispatches by command ID).
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer until the daemon consumes the command.
+/// The caller's task or interrupt context must match the command-ID family. If
+/// non-null and a FromISR command is used,
+/// `pxHigherPriorityTaskWoken` must be aligned and writable for the call.
+/// Unknown command IDs are rejected with `pdFAIL`.
 #[inline(always)]
-pub fn xTimerGenericCommand(
+pub unsafe fn xTimerGenericCommand(
     xTimer: TimerHandle_t,
     xCommandID: BaseType_t,
     xOptionalValue: TickType_t,
@@ -614,8 +751,13 @@ pub fn xTimerGetTimerDaemonTaskHandle() -> TaskHandle_t {
     }
 }
 
-/// Get the timer period in ticks
-pub fn xTimerGetPeriod(xTimer: TimerHandle_t) -> TickType_t {
+/// Get the timer period in ticks.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently.
+pub unsafe fn xTimerGetPeriod(xTimer: TimerHandle_t) -> TickType_t {
     let pxTimer = xTimer as *mut Timer_t;
 
     traceENTER_xTimerGetPeriod!(xTimer);
@@ -629,8 +771,13 @@ pub fn xTimerGetPeriod(xTimer: TimerHandle_t) -> TickType_t {
     xReturn
 }
 
-/// Set timer reload mode
-pub fn vTimerSetReloadMode(xTimer: TimerHandle_t, xAutoReload: BaseType_t) {
+/// Set timer reload mode.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently. This task-context API must not be called from an interrupt.
+pub unsafe fn vTimerSetReloadMode(xTimer: TimerHandle_t, xAutoReload: BaseType_t) {
     let pxTimer = xTimer as *mut Timer_t;
 
     traceENTER_vTimerSetReloadMode!(xTimer, xAutoReload);
@@ -650,8 +797,13 @@ pub fn vTimerSetReloadMode(xTimer: TimerHandle_t, xAutoReload: BaseType_t) {
     traceRETURN_vTimerSetReloadMode!();
 }
 
-/// Get timer reload mode
-pub fn xTimerGetReloadMode(xTimer: TimerHandle_t) -> BaseType_t {
+/// Get timer reload mode.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently. This task-context API must not be called from an interrupt.
+pub unsafe fn xTimerGetReloadMode(xTimer: TimerHandle_t) -> BaseType_t {
     let pxTimer = xTimer as *mut Timer_t;
     let xReturn: BaseType_t;
 
@@ -674,8 +826,13 @@ pub fn xTimerGetReloadMode(xTimer: TimerHandle_t) -> BaseType_t {
     xReturn
 }
 
-/// Get timer reload mode (UBaseType_t return variant)
-pub fn uxTimerGetReloadMode(xTimer: TimerHandle_t) -> UBaseType_t {
+/// Get timer reload mode (`UBaseType_t` return variant).
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently. This task-context API must not be called from an interrupt.
+pub unsafe fn uxTimerGetReloadMode(xTimer: TimerHandle_t) -> UBaseType_t {
     traceENTER_uxTimerGetReloadMode!(xTimer);
 
     let uxReturn = xTimerGetReloadMode(xTimer) as UBaseType_t;
@@ -685,23 +842,34 @@ pub fn uxTimerGetReloadMode(xTimer: TimerHandle_t) -> UBaseType_t {
     uxReturn
 }
 
-/// Get the timer expiry time
-pub fn xTimerGetExpiryTime(xTimer: TimerHandle_t) -> TickType_t {
+/// Get the timer expiry time.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently.
+pub unsafe fn xTimerGetExpiryTime(xTimer: TimerHandle_t) -> TickType_t {
     let pxTimer = xTimer as *mut Timer_t;
 
     traceENTER_xTimerGetExpiryTime!(xTimer);
 
     configASSERT(xTimer != ptr::null_mut());
 
-    let xReturn = unsafe { listGET_LIST_ITEM_VALUE(&(*pxTimer).xTimerListItem) };
+    let xReturn = unsafe { listGET_LIST_ITEM_VALUE(ptr::addr_of!((*pxTimer).xTimerListItem)) };
 
     traceRETURN_xTimerGetExpiryTime!(xReturn);
 
     xReturn
 }
 
-/// Get timer name
-pub fn pcTimerGetName(xTimer: TimerHandle_t) -> *const u8 {
+/// Get the stored timer-name pointer.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call. The returned pointer
+/// is only as valid as the name storage promised to `xTimerCreate` or
+/// `xTimerCreateStatic`; the kernel does not copy or validate the string.
+pub unsafe fn pcTimerGetName(xTimer: TimerHandle_t) -> *const u8 {
     let pxTimer = xTimer as *mut Timer_t;
 
     traceENTER_pcTimerGetName!(xTimer);
@@ -715,8 +883,13 @@ pub fn pcTimerGetName(xTimer: TimerHandle_t) -> *const u8 {
     pcName
 }
 
-/// Check if timer is active
-pub fn xTimerIsTimerActive(xTimer: TimerHandle_t) -> BaseType_t {
+/// Check if a timer is active.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently. This task-context API must not be called from an interrupt.
+pub unsafe fn xTimerIsTimerActive(xTimer: TimerHandle_t) -> BaseType_t {
     let pxTimer = xTimer as *mut Timer_t;
     let xReturn: BaseType_t;
 
@@ -739,8 +912,14 @@ pub fn xTimerIsTimerActive(xTimer: TimerHandle_t) -> BaseType_t {
     xReturn
 }
 
-/// Get timer ID
-pub fn pvTimerGetTimerID(xTimer: TimerHandle_t) -> *mut c_void {
+/// Get the opaque timer ID.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently. The returned pointer is not validated or dereferenced by the
+/// kernel.
+pub unsafe fn pvTimerGetTimerID(xTimer: TimerHandle_t) -> *mut c_void {
     let pxTimer = xTimer as *mut Timer_t;
 
     traceENTER_pvTimerGetTimerID!(xTimer);
@@ -759,8 +938,14 @@ pub fn pvTimerGetTimerID(xTimer: TimerHandle_t) -> *mut c_void {
     pvReturn
 }
 
-/// Set timer ID
-pub fn vTimerSetTimerID(xTimer: TimerHandle_t, pvNewID: *mut c_void) {
+/// Set the opaque timer ID.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently. The kernel stores but does not validate `pvNewID`; any future
+/// callback that dereferences it requires the pointed-to data to remain valid.
+pub unsafe fn vTimerSetTimerID(xTimer: TimerHandle_t, pvNewID: *mut c_void) {
     let pxTimer = xTimer as *mut Timer_t;
 
     traceENTER_vTimerSetTimerID!(xTimer, pvNewID);
@@ -776,8 +961,14 @@ pub fn vTimerSetTimerID(xTimer: TimerHandle_t, pvNewID: *mut c_void) {
     traceRETURN_vTimerSetTimerID!();
 }
 
-/// Get static buffer from a statically allocated timer
-pub fn xTimerGetStaticBuffer(
+/// Get static storage from a statically allocated timer.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call. `ppxTimerBuffer` must
+/// be non-null, aligned, and valid for one pointer write. The returned pointer
+/// must not be used to move, alias mutably, or overwrite the live timer.
+pub unsafe fn xTimerGetStaticBuffer(
     xTimer: TimerHandle_t,
     ppxTimerBuffer: *mut *mut StaticTimer_t,
 ) -> BaseType_t {
@@ -786,6 +977,7 @@ pub fn xTimerGetStaticBuffer(
 
     traceENTER_xTimerGetStaticBuffer!(xTimer, ppxTimerBuffer);
 
+    configASSERT(xTimer != ptr::null_mut());
     configASSERT(ppxTimerBuffer != ptr::null_mut());
 
     unsafe {
@@ -802,8 +994,14 @@ pub fn xTimerGetStaticBuffer(
     xReturn
 }
 
-/// Reset timer module state (for scheduler restart)
-pub fn vTimerResetState() {
+/// Reset timer module state for a scheduler restart.
+///
+/// # Safety
+///
+/// The scheduler and timer daemon must be stopped, no timer API call may be in
+/// progress, and no queued command or pended callback may remain. Existing
+/// timer handles must not subsequently be used with the reset module state.
+pub unsafe fn vTimerResetState() {
     unsafe {
         xTimerQueue = ptr::null_mut();
         xTimerTaskHandle = ptr::null_mut();
@@ -814,9 +1012,14 @@ pub fn vTimerResetState() {
 // Trace Facility Functions
 // =============================================================================
 
-/// Get timer number (for trace facility)
+/// Get timer number (for trace facility).
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and must not be deleted
+/// concurrently.
 #[cfg(feature = "trace-facility")]
-pub fn uxTimerGetTimerNumber(xTimer: TimerHandle_t) -> UBaseType_t {
+pub unsafe fn uxTimerGetTimerNumber(xTimer: TimerHandle_t) -> UBaseType_t {
     traceENTER_uxTimerGetTimerNumber!(xTimer);
 
     let uxReturn = unsafe { (*(xTimer as *mut Timer_t)).uxTimerNumber };
@@ -826,9 +1029,14 @@ pub fn uxTimerGetTimerNumber(xTimer: TimerHandle_t) -> UBaseType_t {
     uxReturn
 }
 
-/// Set timer number (for trace facility)
+/// Set timer number (for trace facility).
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer through the call and the caller must
+/// serialize this write with other trace-number accesses.
 #[cfg(feature = "trace-facility")]
-pub fn vTimerSetTimerNumber(xTimer: TimerHandle_t, uxTimerNumber: UBaseType_t) {
+pub unsafe fn vTimerSetTimerNumber(xTimer: TimerHandle_t, uxTimerNumber: UBaseType_t) {
     traceENTER_vTimerSetTimerNumber!(xTimer, uxTimerNumber);
 
     unsafe {
@@ -842,14 +1050,22 @@ pub fn vTimerSetTimerNumber(xTimer: TimerHandle_t, uxTimerNumber: UBaseType_t) {
 // Pended Function Calls
 // =============================================================================
 
-/// Pend a function call from an ISR
+/// Pend a function call from an ISR.
 ///
 /// Allows ISR to defer processing to the timer daemon task.
+///
+/// # Safety
+///
+/// The caller must uphold `xFunctionToPend`'s safety requirements when the
+/// timer daemon eventually invokes it. In particular, data reachable through
+/// `pvParameter1` must remain valid until then. If non-null,
+/// `pxHigherPriorityTaskWoken` must be aligned and writable for this call. The
+/// port's FromISR priority restrictions must be satisfied.
 #[cfg(feature = "pend-function-call")]
-pub fn xTimerPendFunctionCallFromISR(
+pub unsafe fn xTimerPendFunctionCallFromISR(
     xFunctionToPend: PendedFunction_t,
     pvParameter1: *mut c_void,
-    ulParameter2: u32,
+    ulParameter2: PendedFunctionParameter_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) -> BaseType_t {
     traceENTER_xTimerPendFunctionCallFromISR!(
@@ -858,6 +1074,11 @@ pub fn xTimerPendFunctionCallFromISR(
         ulParameter2,
         pxHigherPriorityTaskWoken
     );
+
+    if unsafe { xTimerQueue.is_null() } {
+        traceRETURN_xTimerPendFunctionCallFromISR!(pdFAIL);
+        return pdFAIL;
+    }
 
     let mut xMessage: DaemonTaskMessage_t = unsafe { core::mem::zeroed() };
     xMessage.xMessageID = tmrCOMMAND_EXECUTE_CALLBACK_FROM_ISR;
@@ -879,18 +1100,29 @@ pub fn xTimerPendFunctionCallFromISR(
     xReturn
 }
 
-/// Pend a function call from a task
+/// Pend a function call from a task.
+///
+/// # Safety
+///
+/// The caller must uphold `xFunctionToPend`'s safety requirements when the
+/// timer daemon eventually invokes it. In particular, data reachable through
+/// `pvParameter1` must remain valid until then. This task-context API must not
+/// be called from an interrupt handler.
 #[cfg(feature = "pend-function-call")]
-pub fn xTimerPendFunctionCall(
+pub unsafe fn xTimerPendFunctionCall(
     xFunctionToPend: PendedFunction_t,
     pvParameter1: *mut c_void,
-    ulParameter2: u32,
+    ulParameter2: PendedFunctionParameter_t,
     xTicksToWait: TickType_t,
 ) -> BaseType_t {
     traceENTER_xTimerPendFunctionCall!(xFunctionToPend, pvParameter1, ulParameter2, xTicksToWait);
 
     unsafe {
         configASSERT(xTimerQueue != ptr::null_mut());
+        if xTimerQueue.is_null() {
+            traceRETURN_xTimerPendFunctionCall!(pdFAIL);
+            return pdFAIL;
+        }
     }
 
     let mut xMessage: DaemonTaskMessage_t = unsafe { core::mem::zeroed() };
@@ -925,6 +1157,7 @@ fn prvInitialiseNewTimer(
     pvTimerID: *mut c_void,
     pxCallbackFunction: TimerCallbackFunction_t,
     pxNewTimer: *mut Timer_t,
+    mut ucStatus: u8,
 ) {
     // Period must be > 0
     configASSERT(xTimerPeriodInTicks > 0);
@@ -932,17 +1165,28 @@ fn prvInitialiseNewTimer(
     // Ensure infrastructure is initialized
     prvCheckForValidListAndQueue();
 
-    // Initialize timer fields
-    unsafe {
-        (*pxNewTimer).pcTimerName = pcTimerName;
-        (*pxNewTimer).xTimerPeriodInTicks = xTimerPeriodInTicks;
-        (*pxNewTimer).pvTimerID = pvTimerID;
-        (*pxNewTimer).pxCallbackFunction = pxCallbackFunction;
-        vListInitialiseItem(&mut (*pxNewTimer).xTimerListItem);
+    if xAutoReload != pdFALSE {
+        ucStatus |= tmrSTATUS_IS_AUTORELOAD;
+    }
 
-        if xAutoReload != pdFALSE {
-            (*pxNewTimer).ucStatus |= tmrSTATUS_IS_AUTORELOAD;
-        }
+    /* [AMENDMENT] Construct the complete Rust value in one write. Allocator
+     * and `MaybeUninit` storage do not initially contain a valid `Timer_t`, so
+     * taking references to individual uninitialised fields would be invalid. */
+    unsafe {
+        ptr::write(
+            pxNewTimer,
+            Timer_t {
+                pcTimerName,
+                xTimerListItem: ListItem_t::new(),
+                xTimerPeriodInTicks,
+                pvTimerID,
+                pxCallbackFunction,
+                #[cfg(feature = "trace-facility")]
+                uxTimerNumber: 0,
+                ucStatus,
+            },
+        );
+        vListInitialiseItem(ptr::addr_of_mut!((*pxNewTimer).xTimerListItem));
     }
 
     traceTIMER_CREATE!(pxNewTimer);
@@ -954,19 +1198,30 @@ fn prvCheckForValidListAndQueue() {
 
     unsafe {
         if xTimerQueue == ptr::null_mut() {
-            vListInitialise(&mut xActiveTimerList1);
-            vListInitialise(&mut xActiveTimerList2);
-            pxCurrentTimerList = &mut xActiveTimerList1;
-            pxOverflowTimerList = &mut xActiveTimerList2;
+            vListInitialise(ptr::addr_of_mut!(xActiveTimerList1));
+            vListInitialise(ptr::addr_of_mut!(xActiveTimerList2));
+            /* [AMENDMENT] These lists are now self-referential. Retain their
+             * addresses directly as raw pointers instead of creating fresh
+             * exclusive references to the complete list values. */
+            pxCurrentTimerList = ptr::addr_of_mut!(xActiveTimerList1);
+            pxOverflowTimerList = ptr::addr_of_mut!(xActiveTimerList2);
 
-            // Create timer queue
-            // [AMENDMENT] Using static queue if available
-            xTimerQueue = xQueueCreate(
+            /* The timer queue is static whenever static allocation is
+             * supported, matching upstream and allowing allocator-free timer
+             * configurations to compile and start. */
+            xTimerQueue = xQueueCreateStatic(
                 configTIMER_QUEUE_LENGTH,
                 core::mem::size_of::<DaemonTaskMessage_t>() as UBaseType_t,
+                ucStaticTimerQueueStorage.as_mut_ptr(),
+                &mut xStaticTimerQueue,
             );
 
-            // TODO: Queue registry support
+            #[cfg(feature = "queue-registry")]
+            if !xTimerQueue.is_null() {
+                /* SAFETY: xTimerQueue names the just-created live static
+                 * queue, and this static C string has program lifetime. */
+                vQueueAddToRegistry(xTimerQueue, b"TmrQ\0".as_ptr());
+            }
         }
     }
 
@@ -1060,7 +1315,9 @@ fn prvSwitchTimerLists() {
 fn prvProcessTimerOrBlockTask(xNextExpireTime: TickType_t, xListWasEmpty: BaseType_t) {
     let mut xTimerListsWereSwitched: BaseType_t = pdFALSE;
 
-    vTaskSuspendAll();
+    // Safety: this function runs only in the live timer daemon task and every
+    // control-flow branch below resumes the same suspension before returning.
+    unsafe { vTaskSuspendAll() };
 
     unsafe {
         // Sample current time
@@ -1069,6 +1326,8 @@ fn prvProcessTimerOrBlockTask(xNextExpireTime: TickType_t, xListWasEmpty: BaseTy
         if xTimerListsWereSwitched == pdFALSE {
             // Has the timer expired?
             if (xListWasEmpty == pdFALSE) && (xNextExpireTime <= xTimeNow) {
+                /* SAFETY: this consumes the timer daemon's suspension
+                 * acquired at function entry. */
                 xTaskResumeAll();
                 prvProcessExpiredTimer(xNextExpireTime, xTimeNow);
             } else {
@@ -1079,18 +1338,28 @@ fn prvProcessTimerOrBlockTask(xNextExpireTime: TickType_t, xListWasEmpty: BaseTy
                     xListWasEmptyNow = listLIST_IS_EMPTY(pxOverflowTimerList);
                 }
 
-                vQueueWaitForMessageRestricted(
-                    xTimerQueue,
-                    xNextExpireTime.wrapping_sub(xTimeNow),
-                    xListWasEmptyNow,
-                );
+                /* When both timer lists are empty the daemon waits
+                 * indefinitely for a command. Upstream performs this
+                 * conversion in vTaskPlaceOnEventListRestricted; pass the
+                 * effective value explicitly as a defensive boundary here. */
+                let xTicksToWait = if xListWasEmptyNow != pdFALSE {
+                    portMAX_DELAY
+                } else {
+                    xNextExpireTime.wrapping_sub(xTimeNow)
+                };
 
+                vQueueWaitForMessageRestricted(xTimerQueue, xTicksToWait, xListWasEmptyNow);
+
+                /* SAFETY: this consumes the timer daemon's suspension after
+                 * atomically arranging its queue wait. */
                 if xTaskResumeAll() == pdFALSE {
                     // Yield to allow higher priority task to run
                     portYIELD_WITHIN_API();
                 }
             }
         } else {
+            /* SAFETY: this consumes the timer daemon's suspension acquired at
+             * function entry after the tick-overflow list switch. */
             xTaskResumeAll();
         }
     }
@@ -1106,8 +1375,14 @@ fn prvInsertTimerInActiveList(
     let mut xProcessTimerNow: BaseType_t = pdFALSE;
 
     unsafe {
-        listSET_LIST_ITEM_VALUE(&mut (*pxTimer).xTimerListItem, xNextExpiryTime);
-        listSET_LIST_ITEM_OWNER(&mut (*pxTimer).xTimerListItem, pxTimer as *mut c_void);
+        listSET_LIST_ITEM_VALUE(
+            ptr::addr_of_mut!((*pxTimer).xTimerListItem),
+            xNextExpiryTime,
+        );
+        listSET_LIST_ITEM_OWNER(
+            ptr::addr_of_mut!((*pxTimer).xTimerListItem),
+            pxTimer as *mut c_void,
+        );
 
         if xNextExpiryTime <= xTimeNow {
             // Has the expiry time already passed?
@@ -1116,7 +1391,10 @@ fn prvInsertTimerInActiveList(
                 xProcessTimerNow = pdTRUE;
             } else {
                 // Goes in overflow list
-                vListInsert(pxOverflowTimerList, &mut (*pxTimer).xTimerListItem);
+                vListInsert(
+                    pxOverflowTimerList,
+                    ptr::addr_of_mut!((*pxTimer).xTimerListItem),
+                );
             }
         } else {
             if (xTimeNow < xCommandTime) && (xNextExpiryTime >= xCommandTime) {
@@ -1124,7 +1402,10 @@ fn prvInsertTimerInActiveList(
                 xProcessTimerNow = pdTRUE;
             } else {
                 // Goes in current list
-                vListInsert(pxCurrentTimerList, &mut (*pxTimer).xTimerListItem);
+                vListInsert(
+                    pxCurrentTimerList,
+                    ptr::addr_of_mut!((*pxTimer).xTimerListItem),
+                );
             }
         }
     }
@@ -1160,7 +1441,7 @@ fn prvProcessExpiredTimer(xNextExpireTime: TickType_t, xTimeNow: TickType_t) {
         let pxTimer = listGET_OWNER_OF_HEAD_ENTRY(pxCurrentTimerList) as *mut Timer_t;
 
         // Remove from active list
-        uxListRemove(&mut (*pxTimer).xTimerListItem);
+        uxListRemove(ptr::addr_of_mut!((*pxTimer).xTimerListItem));
 
         // Handle auto-reload or one-shot
         if ((*pxTimer).ucStatus & tmrSTATUS_IS_AUTORELOAD) != 0 {
@@ -1207,10 +1488,12 @@ fn prvProcessReceivedCommands() {
 
                 if pxTimer != ptr::null_mut() {
                     // Remove timer from any list it might be in
-                    if listIS_CONTAINED_WITHIN(ptr::null_mut(), &mut (*pxTimer).xTimerListItem)
-                        == pdFALSE
+                    if listIS_CONTAINED_WITHIN(
+                        ptr::null_mut(),
+                        ptr::addr_of!((*pxTimer).xTimerListItem),
+                    ) == pdFALSE
                     {
-                        uxListRemove(&mut (*pxTimer).xTimerListItem);
+                        uxListRemove(ptr::addr_of_mut!((*pxTimer).xTimerListItem));
                     }
 
                     traceTIMER_COMMAND_RECEIVED!(
@@ -1314,9 +1597,14 @@ fn prvProcessReceivedCommands() {
 // Convenience Macros (inline functions)
 // =============================================================================
 
-/// Start a timer
+/// Start a timer.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer until the timer daemon consumes the
+/// command. This task-context API must not be called from an interrupt.
 #[inline(always)]
-pub fn xTimerStart(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
+pub unsafe fn xTimerStart(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
     xTimerGenericCommand(
         xTimer,
         tmrCOMMAND_START,
@@ -1326,15 +1614,25 @@ pub fn xTimerStart(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_
     )
 }
 
-/// Stop a timer
+/// Stop a timer.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer until the timer daemon consumes the
+/// command. This task-context API must not be called from an interrupt.
 #[inline(always)]
-pub fn xTimerStop(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
+pub unsafe fn xTimerStop(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
     xTimerGenericCommand(xTimer, tmrCOMMAND_STOP, 0, ptr::null_mut(), xTicksToWait)
 }
 
-/// Change timer period
+/// Change timer period.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer until the timer daemon consumes the
+/// command. This task-context API must not be called from an interrupt.
 #[inline(always)]
-pub fn xTimerChangePeriod(
+pub unsafe fn xTimerChangePeriod(
     xTimer: TimerHandle_t,
     xNewPeriod: TickType_t,
     xTicksToWait: TickType_t,
@@ -1348,15 +1646,28 @@ pub fn xTimerChangePeriod(
     )
 }
 
-/// Delete a timer
+/// Queue deletion of a timer.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer until the daemon consumes the delete
+/// command. If the command is queued successfully, every handle copy must be
+/// retired immediately: the daemon may free a dynamically allocated timer at
+/// any later scheduling point. Static storage must not be reused until command
+/// processing is known to have completed.
 #[inline(always)]
-pub fn xTimerDelete(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
+pub unsafe fn xTimerDelete(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
     xTimerGenericCommand(xTimer, tmrCOMMAND_DELETE, 0, ptr::null_mut(), xTicksToWait)
 }
 
-/// Reset a timer
+/// Reset a timer.
+///
+/// # Safety
+///
+/// `xTimer` must identify a live timer until the timer daemon consumes the
+/// command. This task-context API must not be called from an interrupt.
 #[inline(always)]
-pub fn xTimerReset(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
+pub unsafe fn xTimerReset(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_t {
     xTimerGenericCommand(
         xTimer,
         tmrCOMMAND_RESET,
@@ -1366,9 +1677,15 @@ pub fn xTimerReset(xTimer: TimerHandle_t, xTicksToWait: TickType_t) -> BaseType_
     )
 }
 
-/// Start a timer from ISR
+/// Start a timer from an ISR.
+///
+/// # Safety
+///
+/// `xTimer` must remain live until the daemon consumes the command. If
+/// non-null, `pxHigherPriorityTaskWoken` must be aligned and writable for the
+/// call. The port's FromISR priority restrictions must be satisfied.
 #[inline(always)]
-pub fn xTimerStartFromISR(
+pub unsafe fn xTimerStartFromISR(
     xTimer: TimerHandle_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) -> BaseType_t {
@@ -1381,9 +1698,15 @@ pub fn xTimerStartFromISR(
     )
 }
 
-/// Stop a timer from ISR
+/// Stop a timer from an ISR.
+///
+/// # Safety
+///
+/// `xTimer` must remain live until the daemon consumes the command. If
+/// non-null, `pxHigherPriorityTaskWoken` must be aligned and writable for the
+/// call. The port's FromISR priority restrictions must be satisfied.
 #[inline(always)]
-pub fn xTimerStopFromISR(
+pub unsafe fn xTimerStopFromISR(
     xTimer: TimerHandle_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) -> BaseType_t {
@@ -1396,9 +1719,15 @@ pub fn xTimerStopFromISR(
     )
 }
 
-/// Change timer period from ISR
+/// Change a timer period from an ISR.
+///
+/// # Safety
+///
+/// `xTimer` must remain live until the daemon consumes the command. If
+/// non-null, `pxHigherPriorityTaskWoken` must be aligned and writable for the
+/// call. The port's FromISR priority restrictions must be satisfied.
 #[inline(always)]
-pub fn xTimerChangePeriodFromISR(
+pub unsafe fn xTimerChangePeriodFromISR(
     xTimer: TimerHandle_t,
     xNewPeriod: TickType_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
@@ -1412,9 +1741,15 @@ pub fn xTimerChangePeriodFromISR(
     )
 }
 
-/// Reset a timer from ISR
+/// Reset a timer from an ISR.
+///
+/// # Safety
+///
+/// `xTimer` must remain live until the daemon consumes the command. If
+/// non-null, `pxHigherPriorityTaskWoken` must be aligned and writable for the
+/// call. The port's FromISR priority restrictions must be satisfied.
 #[inline(always)]
-pub fn xTimerResetFromISR(
+pub unsafe fn xTimerResetFromISR(
     xTimer: TimerHandle_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) -> BaseType_t {
@@ -1425,4 +1760,221 @@ pub fn xTimerResetFromISR(
         pxHigherPriorityTaskWoken,
         0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" fn callback(_xTimer: TimerHandle_t) {}
+
+    #[cfg(feature = "pend-function-call")]
+    extern "C" fn pended_callback(
+        _pvParameter1: *mut c_void,
+        _ulParameter2: PendedFunctionParameter_t,
+    ) {
+    }
+
+    #[test]
+    fn static_timer_storage_matches_internal_layout() {
+        assert_eq!(
+            core::mem::size_of::<StaticTimer_t>(),
+            core::mem::size_of::<Timer_t>()
+        );
+        assert_eq!(
+            core::mem::align_of::<StaticTimer_t>(),
+            core::mem::align_of::<Timer_t>()
+        );
+    }
+
+    #[test]
+    fn zero_period_static_timer_is_rejected_before_initialisation() {
+        let mut storage = StaticTimer_t::new();
+        // SAFETY: the name and uniquely borrowed storage outlive this test;
+        // the zero period rejects creation before the storage is initialized.
+        let timer = unsafe {
+            xTimerCreateStatic(
+                b"zero\0".as_ptr(),
+                0,
+                pdTRUE,
+                ptr::null_mut(),
+                callback,
+                &mut storage,
+            )
+        };
+        assert!(timer.is_null());
+    }
+
+    #[cfg(feature = "pend-function-call")]
+    #[test]
+    fn pended_call_fails_cleanly_before_timer_queue_initialisation() {
+        // SAFETY: no daemon or queued callback exists in this isolated test.
+        unsafe {
+            vTimerResetState();
+            assert_eq!(
+                xTimerPendFunctionCallFromISR(
+                    pended_callback,
+                    ptr::null_mut(),
+                    PendedFunctionParameter_t::MAX,
+                    ptr::null_mut(),
+                ),
+                pdFAIL,
+            );
+        }
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn zero_period_change_is_rejected_without_mutating_timer() {
+        crate::port::test_port_reset();
+        // SAFETY: no daemon or queued callback exists in this isolated test.
+        unsafe { vTimerResetState() };
+
+        let mut storage = StaticTimer_t::new();
+        // SAFETY: the static name and uniquely borrowed timer storage remain
+        // live for all operations below.
+        let timer = unsafe {
+            xTimerCreateStatic(
+                b"period\0".as_ptr(),
+                10,
+                pdFALSE,
+                ptr::null_mut(),
+                callback,
+                &mut storage,
+            )
+        };
+        assert!(!timer.is_null());
+        // SAFETY: `timer` still names the live static timer above.
+        unsafe {
+            assert_eq!(xTimerChangePeriod(timer, 0, 0), pdFAIL);
+            assert_eq!(xTimerGetPeriod(timer), 10);
+        }
+
+        // SAFETY: the failed command queued nothing and no daemon is running.
+        unsafe { vTimerResetState() };
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn generic_commands_reject_unknown_ids_before_queueing() {
+        crate::port::test_port_reset();
+        // SAFETY: no daemon or queued callback exists in this isolated test.
+        unsafe { vTimerResetState() };
+
+        let mut storage = StaticTimer_t::new();
+        // SAFETY: the static name and unique storage remain live throughout
+        // the test, and the callback has no external data requirements.
+        let timer = unsafe {
+            xTimerCreateStatic(
+                b"command\0".as_ptr(),
+                10,
+                pdFALSE,
+                ptr::null_mut(),
+                callback,
+                &mut storage,
+            )
+        };
+        assert!(!timer.is_null());
+
+        // SAFETY: `timer` is live and this is task context. Invalid command
+        // values are an explicitly checked input, not a safety precondition.
+        assert_eq!(
+            unsafe { xTimerGenericCommandFromTask(timer, BaseType_t::MIN, 0, ptr::null_mut(), 0) },
+            pdFAIL,
+        );
+
+        crate::port::test_port_set_inside_interrupt(true);
+        // SAFETY: the test port now reports ISR context, `timer` remains live,
+        // and the null wake pointer is accepted. The invalid ID is checked.
+        let isr_result =
+            unsafe { xTimerGenericCommandFromISR(timer, BaseType_t::MAX, 0, ptr::null_mut(), 0) };
+        crate::port::test_port_set_inside_interrupt(false);
+        assert_eq!(isr_result, pdFAIL);
+
+        // SAFETY: neither rejected command entered the queue and no daemon is
+        // running, so module state is quiescent.
+        unsafe { vTimerResetState() };
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn obsolete_start_dont_trace_command_is_ignored_by_daemon() {
+        crate::port::test_port_reset();
+        // SAFETY: no daemon or queued callback exists in this isolated test.
+        unsafe { vTimerResetState() };
+
+        let mut storage = StaticTimer_t::new();
+        // SAFETY: the static name and unique storage remain live until after
+        // the queued command is processed synchronously below.
+        let timer = unsafe {
+            xTimerCreateStatic(
+                b"obsolete\0".as_ptr(),
+                10,
+                pdFALSE,
+                ptr::null_mut(),
+                callback,
+                &mut storage,
+            )
+        };
+        assert!(!timer.is_null());
+
+        // The pinned header still defines command zero, and the generic macro
+        // can enqueue it, but the pinned daemon intentionally has no matching
+        // switch case. Preserve that observable no-op behavior.
+        assert_eq!(
+            unsafe {
+                xTimerGenericCommandFromTask(
+                    timer,
+                    tmrCOMMAND_START_DONT_TRACE,
+                    0,
+                    ptr::null_mut(),
+                    0,
+                )
+            },
+            pdPASS,
+        );
+        prvProcessReceivedCommands();
+        // SAFETY: the command was consumed and the static timer remains live.
+        assert_eq!(unsafe { xTimerIsTimerActive(timer) }, pdFALSE);
+
+        // SAFETY: the queue is empty, the timer is inactive, and no daemon is
+        // running in this isolated test.
+        unsafe { vTimerResetState() };
+    }
+
+    #[cfg(all(feature = "port-test", feature = "queue-registry"))]
+    #[test]
+    fn timer_queue_uses_the_pinned_registry_name() {
+        crate::port::test_port_reset();
+        // SAFETY: no daemon or queued callback exists in this isolated test.
+        unsafe { vTimerResetState() };
+
+        let mut storage = StaticTimer_t::new();
+        // SAFETY: the static name and unique storage remain live throughout
+        // this test; creation initializes the timer queue.
+        let timer = unsafe {
+            xTimerCreateStatic(
+                b"registry\0".as_ptr(),
+                10,
+                pdFALSE,
+                ptr::null_mut(),
+                callback,
+                &mut storage,
+            )
+        };
+        assert!(!timer.is_null());
+
+        // SAFETY: the timer queue is the live static queue initialized above.
+        let name = unsafe { pcQueueGetName(xTimerQueue) };
+        assert!(!name.is_null());
+        // SAFETY: the registered name is the program-lifetime `TmrQ` literal.
+        assert_eq!(unsafe { core::slice::from_raw_parts(name, 4) }, b"TmrQ");
+
+        // Keep the global registry clean for other serial kernel tests.
+        // SAFETY: xTimerQueue is still the live static queue above.
+        unsafe {
+            vQueueUnregisterQueue(xTimerQueue);
+            vTimerResetState();
+        }
+    }
 }

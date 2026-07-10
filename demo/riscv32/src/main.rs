@@ -27,10 +27,10 @@ use freertos_in_rust::memory::FreeRtosAllocator;
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 
 // Import safe wrappers
-use freertos_in_rust::sync::{BinarySemaphore, Mutex, TaskContext, TaskHandle, Timer};
 use freertos_in_rust::kernel::tasks::StaticTask_t;
-use freertos_in_rust::types::*;
 use freertos_in_rust::start_scheduler;
+use freertos_in_rust::sync::{BinarySemaphore, Mutex, TaskContext, TaskHandle, Timer};
+use freertos_in_rust::types::*;
 
 // =============================================================================
 // Panic Handler
@@ -39,7 +39,9 @@ use freertos_in_rust::start_scheduler;
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {
-        unsafe { core::arch::asm!("wfi"); }
+        unsafe {
+            core::arch::asm!("wfi");
+        }
     }
 }
 
@@ -59,7 +61,9 @@ fn uart_putc(c: u8) {
 }
 
 fn uart_print(s: &str) {
-    for c in s.bytes() { uart_putc(c); }
+    for c in s.bytes() {
+        uart_putc(c);
+    }
 }
 
 fn println(s: &str) {
@@ -147,12 +151,16 @@ fn main() -> ! {
 fn create_sync_primitives(context: &TaskContext) {
     println("[Init] Creating mutex...");
     let mutex = Mutex::new(context, 0).expect("Failed to create mutex");
-    unsafe { COUNTER_MUTEX = Some(mutex); }
+    unsafe {
+        COUNTER_MUTEX = Some(mutex);
+    }
     println("[Init] Mutex created successfully");
 
     println("[Init] Creating binary semaphore...");
     let sem = BinarySemaphore::new(context).expect("Failed to create semaphore");
-    unsafe { SEMAPHORE = Some(sem); }
+    unsafe {
+        SEMAPHORE = Some(sem);
+    }
     println("[Init] Semaphore created successfully");
 }
 
@@ -167,7 +175,8 @@ fn create_tasks(context: &TaskContext) {
             &mut LOW_TASK_TCB,
             PRIORITY_LOW,
             task_low_priority,
-        ).expect("Failed to create low priority task");
+        )
+        .expect("Failed to create low priority task");
         println("[Init] Low priority task created");
 
         TaskHandle::spawn_static(
@@ -177,7 +186,8 @@ fn create_tasks(context: &TaskContext) {
             &mut MEDIUM_TASK_TCB,
             PRIORITY_MEDIUM,
             task_medium_priority,
-        ).expect("Failed to create medium priority task");
+        )
+        .expect("Failed to create medium priority task");
         println("[Init] Medium priority task created");
 
         TaskHandle::spawn_static(
@@ -187,21 +197,20 @@ fn create_tasks(context: &TaskContext) {
             &mut HIGH_TASK_TCB,
             PRIORITY_HIGH,
             task_high_priority,
-        ).expect("Failed to create high priority task");
+        )
+        .expect("Failed to create high priority task");
         println("[Init] High priority task created");
     }
 }
 
 fn create_timer(context: &TaskContext) {
     println("[Init] Creating software timer...");
-    let timer = Timer::new_periodic(
-        context,
-        c"Timer1",
-        pdMS_TO_TICKS(1000),
-        timer_callback,
-    ).expect("Failed to create timer");
+    let timer = Timer::new_periodic(context, c"Timer1", pdMS_TO_TICKS(1000), timer_callback)
+        .expect("Failed to create timer");
     assert!(timer.start(context), "Failed to start timer");
-    unsafe { TIMER = Some(timer); }
+    unsafe {
+        TIMER = Some(timer);
+    }
     println("[Init] Timer created successfully");
 }
 
@@ -210,7 +219,9 @@ fn create_timer(context: &TaskContext) {
 // =============================================================================
 
 extern "C" fn timer_callback(_xTimer: TimerHandle_t) {
-    unsafe { TIMER_TICKS += 1; }
+    unsafe {
+        TIMER_TICKS += 1;
+    }
     println("[Timer] Tick!");
 }
 

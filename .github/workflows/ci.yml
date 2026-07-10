@@ -47,6 +47,54 @@ jobs:
       - name: Run canonical host matrix
         run: cargo run --manifest-path xtask/Cargo.toml -- test host
 
+  miri:
+    name: Miri (serial host suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust and Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      - name: Run host pointer and safe-API tests under Miri
+        env:
+          MIRIFLAGS: -Zmiri-ignore-leaks
+        run: >-
+          cargo +nightly miri test
+          --no-default-features
+          --features std,port-test,alloc,all-kernel-features
+          -- --test-threads=1
+
+  address-sanitizer:
+    name: AddressSanitizer (host allocator matrix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Run host pointer and safe-API tests under AddressSanitizer
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          RUSTFLAGS: -Zsanitizer=address
+        run: |
+          set -euo pipefail
+          for allocator in alloc heap-4 heap-5; do
+            cargo +nightly test \
+              --target x86_64-unknown-linux-gnu \
+              --no-default-features \
+              --features "std,port-test,${allocator},all-kernel-features" \
+              --lib --tests -- --test-threads=1
+          done
+
   feature-matrix:
     name: Features and documentation
     runs-on: ubuntu-latest

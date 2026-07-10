@@ -1,7 +1,7 @@
 # FreeRTOS source-parity checklist
 
 Audit baseline: FreeRTOS-Kernel commit
-`3ace38969bd05558918f815ae75528cb656c64b0`, as pinned by `UPSTREAM.md`.
+`3ace38969bd05558918f815ae75528cb656c64b0`, as recorded in the README.
 The local `FreeRTOS-Kernel/` checkout was verified at that exact commit on
 2026-07-09.
 

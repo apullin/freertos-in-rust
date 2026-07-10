@@ -22,15 +22,12 @@ use core::ptr;
 global_asm!(
     ".section .text.boot",
     ".global _start",
-
     "_start:",
     "msr daifset, #0xF",
-
     // Park secondary cores
     "mrs x0, mpidr_el1",
     "and x0, x0, #0xFF",
     "cbnz x0, park_core",
-
     // Check EL
     "mrs x0, CurrentEL",
     "lsr x0, x0, #2",
@@ -40,11 +37,9 @@ global_asm!(
     "cmp x0, #2",
     "b.eq 2f",
     "b 1f",
-
     "park_core:",
     "wfi",
     "b park_core",
-
     "3:",
     "mov x0, #(1 << 10) | (1 << 0)",
     "msr scr_el3, x0",
@@ -53,7 +48,6 @@ global_asm!(
     "adr x0, 1f",
     "msr elr_el3, x0",
     "eret",
-
     "2:",
     "mov x0, #(1 << 31)",
     "msr hcr_el2, x0",
@@ -62,7 +56,6 @@ global_asm!(
     "adr x0, 1f",
     "msr elr_el2, x0",
     "eret",
-
     "1:",
     "ldr x0, =__stack_end",
     "mov sp, x0",
@@ -71,7 +64,6 @@ global_asm!(
     "orr x0, x0, #(1 << 2)",
     "msr sctlr_el1, x0",
     "isb",
-
     "ldr x1, =__bss_start",
     "ldr x2, =__bss_end",
     "4:",
@@ -80,11 +72,9 @@ global_asm!(
     "str xzr, [x1], #8",
     "b 4b",
     "5:",
-
     "mov x0, #(3 << 20)",
     "msr cpacr_el1, x0",
     "isb",
-
     "bl main",
     "6:",
     "wfi",
@@ -99,10 +89,10 @@ use freertos_in_rust::memory::FreeRtosAllocator;
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 
 // Import safe wrappers
-use freertos_in_rust::sync::{TaskContext, TaskHandle};
 use freertos_in_rust::kernel::tasks::StaticTask_t;
-use freertos_in_rust::types::*;
 use freertos_in_rust::start_scheduler;
+use freertos_in_rust::sync::{TaskContext, TaskHandle};
+use freertos_in_rust::types::*;
 
 // Hardware
 const UART0_BASE: usize = 0x0900_0000;
@@ -129,7 +119,11 @@ fn panic(info: &PanicInfo) -> ! {
     } else {
         println("unknown");
     }
-    loop { unsafe { core::arch::asm!("wfi"); } }
+    loop {
+        unsafe {
+            core::arch::asm!("wfi");
+        }
+    }
 }
 
 // =============================================================================
@@ -144,7 +138,9 @@ fn uart_putc(c: u8) {
 }
 
 fn print(s: &str) {
-    for c in s.bytes() { uart_putc(c); }
+    for c in s.bytes() {
+        uart_putc(c);
+    }
 }
 
 fn println(s: &str) {
@@ -154,11 +150,21 @@ fn println(s: &str) {
 }
 
 fn print_dec(mut n: u64) {
-    if n == 0 { uart_putc(b'0'); return; }
+    if n == 0 {
+        uart_putc(b'0');
+        return;
+    }
     let mut buf = [0u8; 20];
     let mut i = 0;
-    while n > 0 { buf[i] = (n % 10) as u8 + b'0'; n /= 10; i += 1; }
-    while i > 0 { i -= 1; uart_putc(buf[i]); }
+    while n > 0 {
+        buf[i] = (n % 10) as u8 + b'0';
+        n /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        uart_putc(buf[i]);
+    }
 }
 
 fn gic_init() {
@@ -182,23 +188,31 @@ fn gic_enable_irq(irq: u32) {
 
 fn timer_get_frequency() -> u64 {
     let freq: u64;
-    unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq); }
+    unsafe {
+        core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq);
+    }
     freq
 }
 
 fn timer_get_count() -> u64 {
     let count: u64;
-    unsafe { core::arch::asm!("mrs {}, cntpct_el0", out(reg) count); }
+    unsafe {
+        core::arch::asm!("mrs {}, cntpct_el0", out(reg) count);
+    }
     count
 }
 
 fn timer_set_compare(val: u64) {
-    unsafe { core::arch::asm!("msr cntp_cval_el0, {}", in(reg) val); }
+    unsafe {
+        core::arch::asm!("msr cntp_cval_el0, {}", in(reg) val);
+    }
 }
 
 fn timer_set_ctrl(enable: bool, imask: bool) {
     let val: u64 = (enable as u64) | ((imask as u64) << 1);
-    unsafe { core::arch::asm!("msr cntp_ctl_el0, {}", in(reg) val); }
+    unsafe {
+        core::arch::asm!("msr cntp_ctl_el0, {}", in(reg) val);
+    }
 }
 
 fn timer_init() {
@@ -248,11 +262,7 @@ pub extern "C" fn main() -> ! {
     gic_init();
 
     println("[Init] Port GIC...");
-    freertos_in_rust::port::vPortConfigureGIC(
-        GIC_DIST_BASE as u64,
-        GIC_CPU_BASE as u64,
-        18,
-    );
+    freertos_in_rust::port::vPortConfigureGIC(GIC_DIST_BASE as u64, GIC_CPU_BASE as u64, 18);
 
     println("[Init] Timer...");
     timer_init();
@@ -272,12 +282,15 @@ pub extern "C" fn main() -> ! {
             &mut TASK_TCB,
             1,
             simple_task,
-        ).expect("Failed to create task");
+        )
+        .expect("Failed to create task");
     }
     println("[Init] Task created successfully");
 
     println("[Init] Starting scheduler...");
-    unsafe { core::arch::asm!("msr daifclr, #2"); }
+    unsafe {
+        core::arch::asm!("msr daifclr, #2");
+    }
     start_scheduler(context)
 }
 

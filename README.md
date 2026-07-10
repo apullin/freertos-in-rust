@@ -2,11 +2,16 @@
 
 [![CI](https://github.com/apullin/freertos-in-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/apullin/freertos-in-rust/actions/workflows/ci.yml)
 
-FreeRTOS-in-Rust is a monolithic, `no_std`, pure-Rust translation of the FreeRTOS
-kernel. It links no FreeRTOS C code; only the small amount of architecture
-assembly needed for context switching remains non-Rust.
+FreeRTOS-in-Rust is a monolithic, `no_std`, pure-Rust translation of the
+FreeRTOS kernel. It links no FreeRTOS C code; only the small amount of
+architecture assembly needed for context switching remains non-Rust.
 
-The 0.3 line combines two interfaces in one crate:
+The goal of this project is to provide a "simple", but fully functional, RTOS
+in Rust for embedded systems. Embedded developers should be able to follow
+standard FreeRTOS design patterns with 100% of the supported feature surface
+available, while also gaining Rust syntax sugar.
+
+The 0.3.x line combines two interfaces in one crate:
 
 - `freertos_in_rust::kernel` is the close, C-shaped translation. It preserves
   FreeRTOS names, handles, storage rules, and control flow, and marks contracts
@@ -15,8 +20,9 @@ The 0.3 line combines two interfaces in one crate:
   typed queues, stable static-storage borrows, checked parameters, and an
   explicit task-context capability without redesigning the kernel.
 
-See [RUST_WRAPPER.md](RUST_WRAPPER.md) for the veneer API and its safety model.
-The crate remains under active development, so 0.3 APIs may still evolve.
+See [RUST_WRAPPER.md](RUST_WRAPPER.md) for details on the veneer API and its
+safety model.
+The crate remains under active development, so 0.3.x APIs _may_ still evolve.
 
 ## Translation baseline
 
@@ -24,12 +30,87 @@ This is a source translation and derivative of the MIT-licensed FreeRTOS
 kernel, not a wrapper or a clean-room reimplementation. The translation target
 is pinned to upstream commit
 `3ace38969bd05558918f815ae75528cb656c64b0` (`git describe`:
-`V10.4.3-744-g3ace38969`) rather than following FreeRTOS `main`. Upstream
-notices and amendment comments are retained in the Rust sources. The reference
-`FreeRTOS-Kernel/` tree is excluded from crate packages and is not compiled.
+`V10.4.3-744-g3ace38969`). Upstream notices and amendment comments are retained
+in the Rust sources. The reference `FreeRTOS-Kernel/` tree is excluded from
+crate packages and is not compiled.
 
-Version 0.3 is single-core. Separate SMP work remains experimental and
-unmerged; it is not part of the 0.3 crate API or the qualification below.
+Version 0.3.x is single-core. Separate SMP work remains experimental on the
+`smp` branch. Its early boot scaffolding has run in QEMU, but it has not passed
+the two-core scheduler gate and is not part of the 0.3.0 crate API or the
+qualification below.
+
+## Feature support
+
+The supported single-core FreeRTOS feature surface is implemented. The concise
+table below is backed by the symbol-by-symbol source audit in
+[PARITY.md](PARITY.md); the later qualification table distinguishes compilation
+coverage from code actually exercised in QEMU or on hardware.
+
+| Feature | Status | Notes |
+|---|---:|---|
+| **Task management** | | |
+| `xTaskCreate` (dynamic) | ✅ | Requires `alloc`, `heap-4`, or `heap-5` |
+| `xTaskCreateStatic` | ✅ | No allocator required |
+| `vTaskDelete` | ✅ | Requires `task-delete` |
+| `vTaskDelay` / `xTaskDelayUntil` | ✅ | |
+| `vTaskSuspend` / `vTaskResume` | ✅ | Requires `task-suspend` |
+| `vTaskPrioritySet` / priority queries | ✅ | Mutation requires `task-priority-set` |
+| `xTaskAbortDelay` | ✅ | Requires `abort-delay` |
+| `eTaskGetState` | ✅ | |
+| Indexed task notifications | ✅ | Task and FromISR variants |
+| Thread-local storage | ✅ | Requires `thread-local-storage` |
+| Application task tags | ✅ | Requires `application-task-tag` |
+| Stack high-water marks | ✅ | Requires `stack-high-water-mark` |
+| Stack-overflow checking | ✅ | Requires `stack-overflow-check` and an application hook |
+| `vTaskGetInfo` / `uxTaskGetSystemState` | ✅ | Requires `trace-facility` |
+| Task-list and run-time formatting | ✅ | Requires `stats-formatting` |
+| **Queues and semaphores** | | |
+| Dynamic and static queues | ✅ | Typed safe queues are also available |
+| Send / receive / peek | ✅ | Front, back, overwrite, blocking, and FromISR variants |
+| Binary and counting semaphores | ✅ | Dynamic and static creation |
+| Mutexes and recursive mutexes | ✅ | Requires `use-mutexes` |
+| Priority inheritance and disinheritance | ✅ | Including timeout paths |
+| Queue sets | ✅ | Requires `queue-sets` |
+| Queue registry | ✅ | Requires `queue-registry` |
+| Queue trace metadata | ✅ | Requires `trace-facility` |
+| **Software timers** | | |
+| Timer daemon task | ✅ | Requires `timers` |
+| Dynamic and static timers | ✅ | One-shot and auto-reload |
+| Start / stop / reset / period changes | ✅ | Task and FromISR command variants |
+| Pended function calls | ✅ | Requires `pend-function-call` |
+| **Event groups** | | |
+| Create / wait / set / clear / sync | ✅ | Dynamic and static creation |
+| Deferred FromISR set and clear | ✅ | Uses the timer-daemon command queue |
+| **Stream and message buffers** | | |
+| Stream buffers | ✅ | Requires `stream-buffers` |
+| Message buffers | ✅ | Message-boundary semantics preserved |
+| Static and dynamic construction | ✅ | Includes callback variants |
+| **Memory management** | | |
+| Static-only operation | ✅ | No allocator feature required |
+| Rust global-allocator bridge | ✅ | `alloc` feature |
+| `heap_4` | ✅ | First-fit allocator with coalescing |
+| `heap_5` | ✅ | Multiple non-contiguous regions |
+| `heap_1`, `heap_2`, `heap_3` | ➖ | Intentionally omitted; use static allocation, `heap-4`/`heap-5`, or a Rust allocator |
+| **Diagnostics and scheduling options** | | |
+| Tickless idle | ✅ | QEMU-tested on every registered single-core port |
+| Run-time statistics | ✅ | Requires `generate-run-time-stats` |
+| Idle yielding | ✅ | Requires `idle-yield` |
+| List integrity check bytes | ✅ | Requires `list-data-integrity-check` |
+| User-replaceable trace macros | ⚠️ | Trace metadata exists; macro hooks currently use their default no-op behavior |
+| **Ports** | | |
+| Cortex-M0/M0+ | ✅ | QEMU-tested and run on LP-MSPM0G5187 hardware |
+| Cortex-M3 | ✅ | QEMU `mps2-an385` |
+| Cortex-M4F | ✅ | QEMU `mps2-an386`, including FPU context |
+| Cortex-M7 | ✅ | QEMU `mps2-an500`, including FPU context |
+| RISC-V RV32IMAC | ✅ | QEMU `sifive_e` |
+| Cortex-A9 | ✅ | QEMU `vexpress-a9` |
+| Cortex-A53 / AArch64 | ✅ | QEMU `virt` |
+| **Deliberate scope boundaries** | | |
+| SMP / multi-core scheduler | ⚠️ | Experimental `smp` branch; two-core scheduler gate does not yet pass |
+| MPU ports | ➖ | Out of scope for the current translation |
+| Co-routines | ➖ | Deprecated upstream and intentionally omitted |
+
+**Legend:** ✅ implemented · ⚠️ partial/experimental · ➖ deliberately out of scope
 
 ## Configure a target
 

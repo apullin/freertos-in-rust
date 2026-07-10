@@ -7,7 +7,7 @@
 
 [package]
 name = "freertos-in-rust"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["FreeRTOS-in-Rust Contributors"]
 description = "Pure-Rust no_std FreeRTOS kernel translation with safe Rust APIs"

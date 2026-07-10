@@ -26,10 +26,10 @@ use freertos_in_rust::memory::FreeRtosAllocator;
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 
 // Import safe wrappers
-use freertos_in_rust::sync::{BinarySemaphore, Mutex, TaskContext, TaskHandle, Timer};
 use freertos_in_rust::kernel::tasks::StaticTask_t;
-use freertos_in_rust::types::*;
 use freertos_in_rust::start_scheduler;
+use freertos_in_rust::sync::{BinarySemaphore, Mutex, TaskContext, TaskHandle, Timer};
+use freertos_in_rust::types::*;
 
 // =============================================================================
 // Hardware Addresses for vexpress-a9
@@ -81,7 +81,9 @@ fn panic(info: &PanicInfo) -> ! {
         println(location.file());
     }
     loop {
-        unsafe { core::arch::asm!("wfi"); }
+        unsafe {
+            core::arch::asm!("wfi");
+        }
     }
 }
 
@@ -97,7 +99,9 @@ fn uart_putc(c: u8) {
 }
 
 fn print(s: &str) {
-    for c in s.bytes() { uart_putc(c); }
+    for c in s.bytes() {
+        uart_putc(c);
+    }
 }
 
 fn println(s: &str) {
@@ -108,11 +112,21 @@ fn println(s: &str) {
 
 #[allow(dead_code)]
 fn print_num(mut n: u32) {
-    if n == 0 { uart_putc(b'0'); return; }
+    if n == 0 {
+        uart_putc(b'0');
+        return;
+    }
     let mut digits = [0u8; 10];
     let mut i = 0;
-    while n > 0 { digits[i] = (n % 10) as u8 + b'0'; n /= 10; i += 1; }
-    while i > 0 { i -= 1; uart_putc(digits[i]); }
+    while n > 0 {
+        digits[i] = (n % 10) as u8 + b'0';
+        n /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        uart_putc(digits[i]);
+    }
 }
 
 // =============================================================================
@@ -156,7 +170,9 @@ fn timer_init() {
 }
 
 fn timer_clear_interrupt() {
-    unsafe { ptr::write_volatile(TIMER_INTCLR as *mut u32, 1); }
+    unsafe {
+        ptr::write_volatile(TIMER_INTCLR as *mut u32, 1);
+    }
 }
 
 // =============================================================================
@@ -237,11 +253,7 @@ pub extern "C" fn main() -> ! {
     timer_init();
 
     println("[Init] Configuring tickless idle...");
-    freertos_in_rust::port::vPortConfigureTimerForTickless(
-        TIMER0_BASE,
-        1000,
-        0xFFFFFFFF,
-    );
+    freertos_in_rust::port::vPortConfigureTimerForTickless(TIMER0_BASE, 1000, 0xFFFFFFFF);
 
     create_sync_primitives(&context);
     create_tasks(&context);
@@ -250,7 +262,9 @@ pub extern "C" fn main() -> ! {
     println("[Main] Starting scheduler...");
     println("");
 
-    unsafe { core::arch::asm!("cpsie i"); }
+    unsafe {
+        core::arch::asm!("cpsie i");
+    }
 
     start_scheduler(context)
 }
@@ -262,12 +276,16 @@ pub extern "C" fn main() -> ! {
 fn create_sync_primitives(context: &TaskContext) {
     println("[Init] Creating mutex...");
     let mutex = Mutex::new(context, 0).expect("Failed to create mutex");
-    unsafe { COUNTER_MUTEX = Some(mutex); }
+    unsafe {
+        COUNTER_MUTEX = Some(mutex);
+    }
     println("[Init] Mutex created successfully");
 
     println("[Init] Creating binary semaphore...");
     let sem = BinarySemaphore::new(context).expect("Failed to create semaphore");
-    unsafe { SEMAPHORE = Some(sem); }
+    unsafe {
+        SEMAPHORE = Some(sem);
+    }
     println("[Init] Semaphore created successfully");
 }
 
@@ -282,7 +300,8 @@ fn create_tasks(context: &TaskContext) {
             &mut LOW_TASK_TCB,
             PRIORITY_LOW,
             task_low_priority,
-        ).expect("Failed to create low priority task");
+        )
+        .expect("Failed to create low priority task");
         println("[Init] Low priority task created");
 
         TaskHandle::spawn_static(
@@ -292,7 +311,8 @@ fn create_tasks(context: &TaskContext) {
             &mut MEDIUM_TASK_TCB,
             PRIORITY_MEDIUM,
             task_medium_priority,
-        ).expect("Failed to create medium priority task");
+        )
+        .expect("Failed to create medium priority task");
         println("[Init] Medium priority task created");
 
         TaskHandle::spawn_static(
@@ -302,21 +322,20 @@ fn create_tasks(context: &TaskContext) {
             &mut HIGH_TASK_TCB,
             PRIORITY_HIGH,
             task_high_priority,
-        ).expect("Failed to create high priority task");
+        )
+        .expect("Failed to create high priority task");
         println("[Init] High priority task created");
     }
 }
 
 fn create_timer(context: &TaskContext) {
     println("[Init] Creating software timer...");
-    let timer = Timer::new_periodic(
-        context,
-        c"Timer1",
-        pdMS_TO_TICKS(1000),
-        timer_callback,
-    ).expect("Failed to create timer");
+    let timer = Timer::new_periodic(context, c"Timer1", pdMS_TO_TICKS(1000), timer_callback)
+        .expect("Failed to create timer");
     assert!(timer.start(context), "Failed to start timer");
-    unsafe { TIMER = Some(timer); }
+    unsafe {
+        TIMER = Some(timer);
+    }
     println("[Init] Timer created successfully");
 }
 
@@ -325,7 +344,9 @@ fn create_timer(context: &TaskContext) {
 // =============================================================================
 
 extern "C" fn timer_callback(_xTimer: TimerHandle_t) {
-    unsafe { TIMER_TICKS += 1; }
+    unsafe {
+        TIMER_TICKS += 1;
+    }
     println("[Timer] Tick!");
 }
 

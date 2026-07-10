@@ -37,19 +37,17 @@ use embedded_alloc::LlffHeap as Heap;
 static HEAP: Heap = Heap::empty();
 
 // Import safe wrappers
-use freertos_in_rust::sync::{
-    BinarySemaphore, EventGroup, Mutex, StreamBuffer, StreamBufferReceiver,
-    StreamBufferSender, TaskContext, TaskHandle, Timer,
-};
-use freertos_in_rust::kernel::tasks::{
-    StaticTask_t,
-    ulTaskGetRunTimeCounter, ulTaskGetRunTimePercent,
-    ulTaskGetIdleRunTimeCounter, ulTaskGetIdleRunTimePercent,
-    ulTaskGetTotalRunTime,
-};
 use freertos_in_rust::kernel::event_groups::EventBits_t;
-use freertos_in_rust::types::*;
+use freertos_in_rust::kernel::tasks::{
+    ulTaskGetIdleRunTimeCounter, ulTaskGetIdleRunTimePercent, ulTaskGetRunTimeCounter,
+    ulTaskGetRunTimePercent, ulTaskGetTotalRunTime, StaticTask_t,
+};
 use freertos_in_rust::start_scheduler;
+use freertos_in_rust::sync::{
+    BinarySemaphore, EventGroup, Mutex, StreamBuffer, StreamBufferReceiver, StreamBufferSender,
+    TaskContext, TaskHandle, Timer,
+};
+use freertos_in_rust::types::*;
 
 // =============================================================================
 // Shared Resources
@@ -99,13 +97,21 @@ macro_rules! get_semaphore {
 
 macro_rules! get_stream_sender {
     () => {
-        unsafe { STREAM_SENDER.as_mut().expect("Stream sender not initialized") }
+        unsafe {
+            STREAM_SENDER
+                .as_mut()
+                .expect("Stream sender not initialized")
+        }
     };
 }
 
 macro_rules! get_stream_receiver {
     () => {
-        unsafe { STREAM_RECEIVER.as_mut().expect("Stream receiver not initialized") }
+        unsafe {
+            STREAM_RECEIVER
+                .as_mut()
+                .expect("Stream receiver not initialized")
+        }
     };
 }
 
@@ -201,12 +207,16 @@ fn main() -> ! {
 fn create_sync_primitives(context: &TaskContext) {
     hprintln!("[Init] Creating mutex...");
     let mutex = Mutex::new(context, 0).expect("Failed to create mutex");
-    unsafe { COUNTER_MUTEX = Some(mutex); }
+    unsafe {
+        COUNTER_MUTEX = Some(mutex);
+    }
     hprintln!("[Init] Mutex created successfully");
 
     hprintln!("[Init] Creating binary semaphore...");
     let sem = BinarySemaphore::new(context).expect("Failed to create semaphore");
-    unsafe { SEMAPHORE = Some(sem); }
+    unsafe {
+        SEMAPHORE = Some(sem);
+    }
     hprintln!("[Init] Semaphore created successfully");
 }
 
@@ -228,7 +238,9 @@ fn create_stream_buffer(context: &TaskContext) {
 fn create_event_group(context: &TaskContext) {
     hprintln!("[Init] Creating event group...");
     let events = EventGroup::new(context).expect("Failed to create event group");
-    unsafe { EVENT_GROUP = Some(events); }
+    unsafe {
+        EVENT_GROUP = Some(events);
+    }
     hprintln!("[Init] Event group created successfully");
 }
 
@@ -245,8 +257,12 @@ fn create_tasks(context: &TaskContext) {
             &mut LOW_TASK_TCB,
             PRIORITY_LOW,
             task_low_priority,
-        ).expect("Failed to create low priority task");
-        hprintln!("[Init] Low priority task created (priority {})", PRIORITY_LOW);
+        )
+        .expect("Failed to create low priority task");
+        hprintln!(
+            "[Init] Low priority task created (priority {})",
+            PRIORITY_LOW
+        );
 
         TaskHandle::spawn_static(
             context,
@@ -255,8 +271,12 @@ fn create_tasks(context: &TaskContext) {
             &mut MEDIUM_TASK_TCB,
             PRIORITY_MEDIUM,
             task_medium_priority,
-        ).expect("Failed to create medium priority task");
-        hprintln!("[Init] Medium priority task created (priority {})", PRIORITY_MEDIUM);
+        )
+        .expect("Failed to create medium priority task");
+        hprintln!(
+            "[Init] Medium priority task created (priority {})",
+            PRIORITY_MEDIUM
+        );
 
         TaskHandle::spawn_static(
             context,
@@ -265,8 +285,12 @@ fn create_tasks(context: &TaskContext) {
             &mut HIGH_TASK_TCB,
             PRIORITY_HIGH,
             task_high_priority,
-        ).expect("Failed to create high priority task");
-        hprintln!("[Init] High priority task created (priority {})", PRIORITY_HIGH);
+        )
+        .expect("Failed to create high priority task");
+        hprintln!(
+            "[Init] High priority task created (priority {})",
+            PRIORITY_HIGH
+        );
 
         TaskHandle::spawn_static(
             context,
@@ -275,8 +299,12 @@ fn create_tasks(context: &TaskContext) {
             &mut SEM_WAITER_TCB,
             PRIORITY_MEDIUM,
             task_semaphore_waiter,
-        ).expect("Failed to create semaphore waiter task");
-        hprintln!("[Init] Semaphore waiter task created (priority {})", PRIORITY_MEDIUM);
+        )
+        .expect("Failed to create semaphore waiter task");
+        hprintln!(
+            "[Init] Semaphore waiter task created (priority {})",
+            PRIORITY_MEDIUM
+        );
 
         TaskHandle::spawn_static(
             context,
@@ -285,8 +313,12 @@ fn create_tasks(context: &TaskContext) {
             &mut PRODUCER_TASK_TCB,
             PRIORITY_LOW,
             task_stream_producer,
-        ).expect("Failed to create producer task");
-        hprintln!("[Init] Stream producer task created (priority {})", PRIORITY_LOW);
+        )
+        .expect("Failed to create producer task");
+        hprintln!(
+            "[Init] Stream producer task created (priority {})",
+            PRIORITY_LOW
+        );
 
         TaskHandle::spawn_static(
             context,
@@ -295,8 +327,12 @@ fn create_tasks(context: &TaskContext) {
             &mut CONSUMER_TASK_TCB,
             PRIORITY_MEDIUM,
             task_stream_consumer,
-        ).expect("Failed to create consumer task");
-        hprintln!("[Init] Stream consumer task created (priority {})", PRIORITY_MEDIUM);
+        )
+        .expect("Failed to create consumer task");
+        hprintln!(
+            "[Init] Stream consumer task created (priority {})",
+            PRIORITY_MEDIUM
+        );
 
         TaskHandle::spawn_static(
             context,
@@ -305,8 +341,12 @@ fn create_tasks(context: &TaskContext) {
             &mut EVENT_SENDER_TCB,
             PRIORITY_LOW,
             task_event_sender,
-        ).expect("Failed to create event sender task");
-        hprintln!("[Init] Event sender task created (priority {})", PRIORITY_LOW);
+        )
+        .expect("Failed to create event sender task");
+        hprintln!(
+            "[Init] Event sender task created (priority {})",
+            PRIORITY_LOW
+        );
 
         TaskHandle::spawn_static(
             context,
@@ -315,8 +355,12 @@ fn create_tasks(context: &TaskContext) {
             &mut EVENT_WAITER_TCB,
             PRIORITY_MEDIUM,
             task_event_waiter,
-        ).expect("Failed to create event waiter task");
-        hprintln!("[Init] Event waiter task created (priority {})", PRIORITY_MEDIUM);
+        )
+        .expect("Failed to create event waiter task");
+        hprintln!(
+            "[Init] Event waiter task created (priority {})",
+            PRIORITY_MEDIUM
+        );
 
         TaskHandle::spawn_static(
             context,
@@ -325,21 +369,23 @@ fn create_tasks(context: &TaskContext) {
             &mut RUNTIME_STATS_TCB,
             PRIORITY_LOW,
             task_runtime_stats,
-        ).expect("Failed to create runtime stats task");
-        hprintln!("[Init] Runtime stats task created (priority {})", PRIORITY_LOW);
+        )
+        .expect("Failed to create runtime stats task");
+        hprintln!(
+            "[Init] Runtime stats task created (priority {})",
+            PRIORITY_LOW
+        );
     }
 }
 
 fn create_timer(context: &TaskContext) {
     hprintln!("[Init] Creating software timer...");
-    let timer = Timer::new_periodic(
-        context,
-        c"Timer1",
-        pdMS_TO_TICKS(1000),
-        timer_callback,
-    ).expect("Failed to create timer");
+    let timer = Timer::new_periodic(context, c"Timer1", pdMS_TO_TICKS(1000), timer_callback)
+        .expect("Failed to create timer");
     assert!(timer.start(context), "Failed to start timer");
-    unsafe { TIMER = Some(timer); }
+    unsafe {
+        TIMER = Some(timer);
+    }
     hprintln!("[Init] Timer created successfully");
 }
 
@@ -386,7 +432,11 @@ extern "C" fn task_low_priority(_pvParameters: *mut c_void) {
             assert!(semaphore.give(&context), "semaphore give failed");
 
             let final_count = *guard;
-            hprintln!("[Low #{}] Releasing mutex (counter={})", iteration, final_count);
+            hprintln!(
+                "[Low #{}] Releasing mutex (counter={})",
+                iteration,
+                final_count
+            );
         } // guard dropped here, mutex released
 
         freertos_in_rust::delay(&context, pdMS_TO_TICKS(500));
@@ -418,7 +468,10 @@ extern "C" fn task_high_priority(_pvParameters: *mut c_void) {
         iteration += 1;
         freertos_in_rust::delay(&context, pdMS_TO_TICKS(150));
 
-        hprintln!("[High #{}] Attempting to take mutex (should trigger priority inheritance)...", iteration);
+        hprintln!(
+            "[High #{}] Attempting to take mutex (should trigger priority inheritance)...",
+            iteration
+        );
 
         {
             let mut guard = mutex.lock(&context).expect("mutex acquisition failed");
@@ -482,14 +535,24 @@ extern "C" fn task_stream_producer(_pvParameters: *mut c_void) {
         ];
 
         let space = stream.spaces(&context);
-        hprintln!("[Producer #{}] Sending 8 bytes (seq={}), space={}", iteration, sequence, space);
+        hprintln!(
+            "[Producer #{}] Sending 8 bytes (seq={}), space={}",
+            iteration,
+            sequence,
+            space
+        );
 
         let sent = stream.send_timeout(&context, &message, pdMS_TO_TICKS(100));
 
         if sent == message.len() {
             hprintln!("[Producer #{}] Sent {} bytes successfully", iteration, sent);
         } else {
-            hprintln!("[Producer #{}] Only sent {} of {} bytes (buffer full?)", iteration, sent, message.len());
+            hprintln!(
+                "[Producer #{}] Only sent {} of {} bytes (buffer full?)",
+                iteration,
+                sent,
+                message.len()
+            );
         }
 
         sequence = sequence.wrapping_add(8);
@@ -512,17 +575,32 @@ extern "C" fn task_stream_consumer(_pvParameters: *mut c_void) {
         iteration += 1;
 
         let available = stream.available(&context);
-        hprintln!("[Consumer #{}] Waiting for data, available={}", iteration, available);
+        hprintln!(
+            "[Consumer #{}] Waiting for data, available={}",
+            iteration,
+            available
+        );
 
         let received = stream.receive_timeout(&context, &mut buffer, pdMS_TO_TICKS(2000));
 
         if received > 0 {
             total_received += received as u32;
-            hprintln!("[Consumer #{}] Received {} bytes, total={}", iteration, received, total_received);
+            hprintln!(
+                "[Consumer #{}] Received {} bytes, total={}",
+                iteration,
+                received,
+                total_received
+            );
 
             if received >= 4 {
-                hprintln!("[Consumer #{}] Data: [{}, {}, {}, {}, ...]",
-                    iteration, buffer[0], buffer[1], buffer[2], buffer[3]);
+                hprintln!(
+                    "[Consumer #{}] Data: [{}, {}, {}, {}, ...]",
+                    iteration,
+                    buffer[0],
+                    buffer[1],
+                    buffer[2],
+                    buffer[3]
+                );
             }
         } else {
             hprintln!("[Consumer #{}] Timeout - no data received", iteration);
@@ -553,7 +631,11 @@ extern "C" fn task_event_sender(_pvParameters: *mut c_void) {
 
         hprintln!("[EvtSend #{}] Setting DATA_READY bit", iteration);
         let bits_after = events.set(&context, EVENT_BIT_DATA_READY);
-        hprintln!("[EvtSend #{}] Bits after set: 0x{:02X}", iteration, bits_after);
+        hprintln!(
+            "[EvtSend #{}] Bits after set: 0x{:02X}",
+            iteration,
+            bits_after
+        );
 
         hprintln!("[EvtSend #{}] Waiting for ACK bit...", iteration);
         if let Some(bits) =
@@ -582,7 +664,11 @@ extern "C" fn task_event_waiter(_pvParameters: *mut c_void) {
         if let Some(bits) =
             events.wait_any_clear_timeout(&context, EVENT_BIT_DATA_READY, pdMS_TO_TICKS(3000))
         {
-            hprintln!("[EvtWait #{}] DATA_READY received! bits=0x{:02X}", iteration, bits);
+            hprintln!(
+                "[EvtWait #{}] DATA_READY received! bits=0x{:02X}",
+                iteration,
+                bits
+            );
 
             hprintln!("[EvtWait #{}] Processing...", iteration);
             freertos_in_rust::delay(&context, pdMS_TO_TICKS(100));

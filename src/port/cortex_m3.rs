@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This is the Cortex-M3 port for FreeRusTOS.
+ * [AMENDMENT] This is the Cortex-M3 port for FreeRTOS-in-Rust.
  * Ported from portable/GCC/ARM_CM3/port.c
  *
  * This port is for ARM Cortex-M3 (no FPU).
@@ -191,7 +191,16 @@ pub fn portEND_SWITCHING_ISR(xSwitchRequired: BaseType_t) {
 /// - LR (task exit error handler)
 /// - R12, R3, R2, R1, R0 (R0 = pvParameters)
 /// - R11, R10, R9, R8, R7, R6, R5, R4
-pub fn pxPortInitialiseStack(
+///
+/// # Safety
+///
+/// `pxTopOfStack` must be non-null, aligned, and lie near the high end of a
+/// uniquely writable stack allocation with enough lower-addressed words for
+/// the complete frame documented above. The allocation must remain live and
+/// stationary for the task's lifetime. `pvParameters` is stored without
+/// validation and must satisfy the task entry function's requirements when it
+/// is eventually invoked.
+pub unsafe fn pxPortInitialiseStack(
     pxTopOfStack: *mut StackType_t,
     pxCode: TaskFunction_t,
     pvParameters: *mut c_void,
@@ -252,6 +261,13 @@ fn prvTaskExitError() -> ! {
 /// It restores the context of the first task from pxCurrentTCB.
 ///
 /// Key difference from CM4F: Uses `orr r14, #0xd` instead of loading r14 from stack
+///
+/// # Safety
+///
+/// Enter only as the scheduler-start SVC exception while in handler mode.
+/// `pxCurrentTCB` must name a live task whose saved stack was built by
+/// [`pxPortInitialiseStack`]; ordinary function entry can corrupt the processor
+/// context.
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn vPortSVCHandler() {
@@ -282,6 +298,12 @@ pub unsafe extern "C" fn vPortSVCHandler() {
 /// It saves the current task's context and restores the next task's context.
 ///
 /// Key difference from CM4F: No FPU context save/restore, no R14 in ldmia/stmia
+///
+/// # Safety
+///
+/// Enter only as the Cortex-M PendSV exception with a valid process stack,
+/// live `pxCurrentTCB`, and initialized scheduler lists. Calling this as an
+/// ordinary function can corrupt both the task context and processor state.
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn xPortPendSVHandler() {
@@ -351,7 +373,9 @@ pub extern "C" fn xPortSysTickHandler() {
 
     crate::trace::traceISR_ENTER();
 
-    if crate::kernel::tasks::xTaskIncrementTick() != pdFALSE {
+    // SAFETY: SysTick runs at the configured kernel interrupt priority and
+    // serializes the scheduler tick update with the port interrupt mask.
+    if unsafe { crate::kernel::tasks::xTaskIncrementTick() } != pdFALSE {
         crate::trace::traceISR_EXIT_TO_SCHEDULER();
         unsafe {
             core::ptr::write_volatile(NVIC_ICSR, NVIC_PENDSVSET_BIT);

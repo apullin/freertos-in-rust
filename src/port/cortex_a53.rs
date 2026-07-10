@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This is the Cortex-A53 (AArch64) port for FreeRusTOS.
+ * [AMENDMENT] This is the Cortex-A53 (AArch64) port for FreeRTOS-in-Rust.
  * Ported from portable/GCC/ARM_AARCH64/port.c and portASM.S
  *
  * This port is for ARM Cortex-A53 and other ARMv8-A processors in AArch64 mode.
@@ -365,7 +365,14 @@ pub fn portEND_SWITCHING_ISR(xSwitchRequired: BaseType_t) {
 /// - SPSR, ELR (return address)
 /// - FPU flag, Critical nesting
 /// - [Optional FPU registers Q0-Q31 if FPU context]
-pub fn pxPortInitialiseStack(
+///
+/// # Safety
+///
+/// `pxTopOfStack` must be non-null and lie near the high end of a uniquely
+/// writable allocation with enough lower-addressed room for the 16-byte-aligned
+/// AArch64 frame. The allocation must remain live and stationary for the task
+/// lifetime. `pvParameters` must satisfy `pxCode` when the task begins.
+pub unsafe fn pxPortInitialiseStack(
     pxTopOfStack: *mut StackType_t,
     pxCode: TaskFunction_t,
     pvParameters: *mut c_void,
@@ -556,7 +563,9 @@ pub extern "C" fn FreeRTOS_Tick_Handler() {
     }
 
     // Increment tick
-    if crate::kernel::tasks::xTaskIncrementTick() != pdFALSE {
+    // Safety: this is the configured generic-timer ISR with scheduler state
+    // live and the port interrupt mask in force.
+    if unsafe { crate::kernel::tasks::xTaskIncrementTick() } != pdFALSE {
         unsafe {
             ullPortYieldRequired = pdTRUE as u64;
         }
@@ -615,28 +624,37 @@ pub fn portMEMORY_BARRIER() {
 // =============================================================================
 
 #[cfg(feature = "generate-run-time-stats")]
-static mut ulRunTimeCounterValue: crate::config::configRUN_TIME_COUNTER_TYPE = 0;
+static mut ullRunTimeCounterStart: u64 = 0;
+
+#[cfg(feature = "generate-run-time-stats")]
+#[inline(always)]
+fn prvReadRunTimeCounter() -> u64 {
+    let counter: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, cntpct_el0", out(reg) counter, options(nomem, nostack));
+    }
+    counter
+}
 
 #[cfg(feature = "generate-run-time-stats")]
 #[inline(always)]
 pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
     unsafe {
-        ulRunTimeCounterValue = 0;
+        ullRunTimeCounterStart = prvReadRunTimeCounter();
     }
 }
 
 #[cfg(feature = "generate-run-time-stats")]
 #[inline(always)]
 pub fn portGET_RUN_TIME_COUNTER_VALUE() -> crate::config::configRUN_TIME_COUNTER_TYPE {
-    unsafe { ulRunTimeCounterValue }
+    prvReadRunTimeCounter().wrapping_sub(unsafe { ullRunTimeCounterStart })
+        as crate::config::configRUN_TIME_COUNTER_TYPE
 }
 
 #[cfg(feature = "generate-run-time-stats")]
 #[inline(always)]
 pub fn portINCREMENT_RUN_TIME_COUNTER() {
-    unsafe {
-        ulRunTimeCounterValue = ulRunTimeCounterValue.wrapping_add(1);
-    }
+    // CNTPCT_EL0 advances independently, including while the core is in WFI.
 }
 
 // =============================================================================
@@ -697,6 +715,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::arch::asm!("isb sy", options(nomem, nostack));
 
         // Check if sleep should be aborted
+        // Safety: the idle task suspended the scheduler and IRQs are masked
+        // for this tickless confirmation point.
         if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
             core::arch::asm!("msr daifclr, #2", options(nostack));
             return;
@@ -768,6 +788,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
         // Step the tick count forward
         if ulCompletedTicks > 0 {
+            // Safety: IRQs remain masked, the scheduler is suspended, and the
+            // elapsed interval is bounded by the programmed wake deadline.
             crate::kernel::tasks::vTaskStepTick(ulCompletedTicks as TickType_t);
         }
 

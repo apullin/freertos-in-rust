@@ -1,4 +1,4 @@
-//! FreeRusTOS Demo Application - RISC-V RV32
+//! FreeRTOS-in-Rust Demo Application - RISC-V RV32
 //!
 //! This demo demonstrates the FreeRTOS kernel running on RISC-V
 //! using the safe Rust wrappers with idiomatic Rust patterns:
@@ -27,8 +27,8 @@ use freertos_in_rust::memory::FreeRtosAllocator;
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 
 // Import safe wrappers
-use freertos_in_rust::sync::{BinarySemaphore, Mutex, TaskHandle, Timer};
-use freertos_in_rust::kernel::tasks::{vTaskDelay, StaticTask_t};
+use freertos_in_rust::sync::{BinarySemaphore, Mutex, TaskContext, TaskHandle, Timer};
+use freertos_in_rust::kernel::tasks::StaticTask_t;
 use freertos_in_rust::types::*;
 use freertos_in_rust::start_scheduler;
 
@@ -123,47 +123,45 @@ static mut HIGH_TASK_TCB: StaticTask_t = StaticTask_t::new();
 
 #[entry]
 fn main() -> ! {
+    // Safety: startup is single-threaded and owns kernel initialization.
+    let context = unsafe { TaskContext::assume() };
     println("========================================");
-    println("   FreeRusTOS Demo - RISC-V RV32");
+    println("   FreeRTOS-in-Rust Demo - RISC-V RV32");
     println("========================================");
     println("");
 
-    create_sync_primitives();
-    create_tasks();
-    create_timer();
+    create_sync_primitives(&context);
+    create_tasks(&context);
+    create_timer(&context);
 
     println("[Main] Starting scheduler...");
     println("");
 
-    start_scheduler();
-
-    println("[Main] ERROR: Scheduler returned!");
-    loop {
-        unsafe { core::arch::asm!("wfi"); }
-    }
+    start_scheduler(context)
 }
 
 // =============================================================================
 // Initialization Functions
 // =============================================================================
 
-fn create_sync_primitives() {
+fn create_sync_primitives(context: &TaskContext) {
     println("[Init] Creating mutex...");
-    let mutex = Mutex::new(0).expect("Failed to create mutex");
+    let mutex = Mutex::new(context, 0).expect("Failed to create mutex");
     unsafe { COUNTER_MUTEX = Some(mutex); }
     println("[Init] Mutex created successfully");
 
     println("[Init] Creating binary semaphore...");
-    let sem = BinarySemaphore::new().expect("Failed to create semaphore");
+    let sem = BinarySemaphore::new(context).expect("Failed to create semaphore");
     unsafe { SEMAPHORE = Some(sem); }
     println("[Init] Semaphore created successfully");
 }
 
-fn create_tasks() {
+fn create_tasks(context: &TaskContext) {
     println("[Init] Creating tasks...");
 
     unsafe {
         TaskHandle::spawn_static(
+            context,
             b"LowTask\0",
             &mut LOW_TASK_STACK,
             &mut LOW_TASK_TCB,
@@ -173,6 +171,7 @@ fn create_tasks() {
         println("[Init] Low priority task created");
 
         TaskHandle::spawn_static(
+            context,
             b"MedTask\0",
             &mut MEDIUM_TASK_STACK,
             &mut MEDIUM_TASK_TCB,
@@ -182,6 +181,7 @@ fn create_tasks() {
         println("[Init] Medium priority task created");
 
         TaskHandle::spawn_static(
+            context,
             b"HighTask\0",
             &mut HIGH_TASK_STACK,
             &mut HIGH_TASK_TCB,
@@ -192,14 +192,15 @@ fn create_tasks() {
     }
 }
 
-fn create_timer() {
+fn create_timer(context: &TaskContext) {
     println("[Init] Creating software timer...");
     let timer = Timer::new_periodic(
-        b"Timer1\0",
+        context,
+        c"Timer1",
         pdMS_TO_TICKS(1000),
         timer_callback,
     ).expect("Failed to create timer");
-    timer.start();
+    assert!(timer.start(context), "Failed to start timer");
     unsafe { TIMER = Some(timer); }
     println("[Init] Timer created successfully");
 }
@@ -218,6 +219,8 @@ extern "C" fn timer_callback(_xTimer: TimerHandle_t) {
 // =============================================================================
 
 extern "C" fn task_low_priority(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mutex = get_mutex!();
     let semaphore = get_semaphore!();
 
@@ -225,42 +228,46 @@ extern "C" fn task_low_priority(_pvParameters: *mut c_void) {
         println("[Low] Taking mutex...");
 
         {
-            let mut guard = mutex.lock();
+            let mut guard = mutex.lock(&context).expect("mutex acquisition failed");
             println("[Low] Mutex acquired!");
 
             *guard += 1;
             println("[Low] Working...");
 
-            vTaskDelay(pdMS_TO_TICKS(200));
+            freertos_in_rust::delay(&context, pdMS_TO_TICKS(200));
 
-            semaphore.give();
+            assert!(semaphore.give(&context), "semaphore give failed");
 
             println("[Low] Releasing mutex");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(500));
     }
 }
 
 extern "C" fn task_medium_priority(_pvParameters: *mut c_void) {
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
+    freertos_in_rust::delay(&context, pdMS_TO_TICKS(50));
 
     loop {
         println("[Med] Running");
-        vTaskDelay(pdMS_TO_TICKS(300));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(300));
     }
 }
 
 extern "C" fn task_high_priority(_pvParameters: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mutex = get_mutex!();
 
     loop {
-        vTaskDelay(pdMS_TO_TICKS(150));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(150));
 
         println("[High] Taking mutex...");
 
         {
-            let mut guard = mutex.lock();
+            let mut guard = mutex.lock(&context).expect("mutex acquisition failed");
             println("[High] Mutex acquired!");
 
             *guard += 10;
@@ -268,6 +275,6 @@ extern "C" fn task_high_priority(_pvParameters: *mut c_void) {
             println("[High] Releasing mutex");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(1000));
     }
 }

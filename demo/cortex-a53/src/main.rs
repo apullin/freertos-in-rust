@@ -1,4 +1,4 @@
-//! Minimal FreeRusTOS Demo - ARM Cortex-A53 (AArch64)
+//! Minimal FreeRTOS-in-Rust Demo - ARM Cortex-A53 (AArch64)
 //!
 //! A simple demo using safe Rust wrappers with idiomatic patterns:
 //! - .expect() for error handling on creation
@@ -99,8 +99,8 @@ use freertos_in_rust::memory::FreeRtosAllocator;
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 
 // Import safe wrappers
-use freertos_in_rust::sync::TaskHandle;
-use freertos_in_rust::kernel::tasks::{vTaskDelay, StaticTask_t};
+use freertos_in_rust::sync::{TaskContext, TaskHandle};
+use freertos_in_rust::kernel::tasks::StaticTask_t;
 use freertos_in_rust::types::*;
 use freertos_in_rust::start_scheduler;
 
@@ -237,8 +237,10 @@ static mut TASK_TCB: StaticTask_t = StaticTask_t::new();
 
 #[no_mangle]
 pub extern "C" fn main() -> ! {
+    // Safety: startup is single-threaded and owns kernel initialization.
+    let context = unsafe { TaskContext::assume() };
     println("========================================");
-    println("   FreeRusTOS Minimal - Cortex-A53");
+    println("   FreeRTOS-in-Rust Minimal - Cortex-A53");
     println("========================================");
     println("");
 
@@ -264,6 +266,7 @@ pub extern "C" fn main() -> ! {
     println("[Init] Creating task...");
     unsafe {
         TaskHandle::spawn_static(
+            &context,
             b"Task\0",
             &mut TASK_STACK.0,
             &mut TASK_TCB,
@@ -275,19 +278,18 @@ pub extern "C" fn main() -> ! {
 
     println("[Init] Starting scheduler...");
     unsafe { core::arch::asm!("msr daifclr, #2"); }
-    start_scheduler();
-
-    println("[Init] ERROR: Scheduler returned!");
-    loop { unsafe { core::arch::asm!("wfi"); } }
+    start_scheduler(context)
 }
 
 extern "C" fn simple_task(_: *mut c_void) {
+    // Safety: FreeRTOS invokes task entry points only in task context.
+    let context = unsafe { TaskContext::assume() };
     let mut count = 0u64;
     loop {
         print("[Task] count=");
         print_dec(count);
         println("");
         count += 1;
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        freertos_in_rust::delay(&context, pdMS_TO_TICKS(1000));
     }
 }

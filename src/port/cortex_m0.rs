@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This is the Cortex-M0/M0+ port for FreeRusTOS.
+ * [AMENDMENT] This is the Cortex-M0/M0+ port for FreeRTOS-in-Rust.
  * Ported from portable/GCC/ARM_CM0/port.c and portasm.c
  *
  * This port is for ARM Cortex-M0/M0+ (ARMv6-M, no FPU).
@@ -197,7 +197,16 @@ pub fn portEND_SWITCHING_ISR(xSwitchRequired: BaseType_t) {
 /// - R12, R3, R2, R1, R0 (R0 = pvParameters)
 /// - R11, R10, R9, R8, R7, R6, R5, R4
 /// - EXC_RETURN (0xFFFFFFFD)
-pub fn pxPortInitialiseStack(
+///
+/// # Safety
+///
+/// `pxTopOfStack` must be non-null, aligned, and lie near the high end of a
+/// uniquely writable stack allocation with enough lower-addressed words for
+/// the complete frame documented above. The allocation must remain live and
+/// stationary for the task's lifetime. `pvParameters` is stored without
+/// validation and must satisfy the task entry function's requirements when it
+/// is eventually invoked.
+pub unsafe fn pxPortInitialiseStack(
     pxTopOfStack: *mut StackType_t,
     pxCode: TaskFunction_t,
     pvParameters: *mut c_void,
@@ -283,6 +292,12 @@ global_asm!(
 );
 
 /// Rust alias for SVCall handler (for API compatibility)
+///
+/// # Safety
+///
+/// Invoke only through the scheduler's SVC start path after `pxCurrentTCB`
+/// names a live task whose saved stack was built by [`pxPortInitialiseStack`].
+/// Calling this as an ordinary function can restore an arbitrary context.
 #[no_mangle]
 pub unsafe extern "C" fn vPortSVCHandler() {
     // This is a stub - the actual implementation is in global_asm above
@@ -293,9 +308,17 @@ pub unsafe extern "C" fn vPortSVCHandler() {
     SVCall();
 }
 
-/// C part of SVC handler - starts the first task
+/// C part of SVC handler - starts the first task.
+///
+/// # Safety
+///
+/// This may only be entered from the port's SVC assembly after the scheduler
+/// has installed a live current TCB with a stack frame produced by
+/// [`pxPortInitialiseStack`]. Calling it as an ordinary function can restore an
+/// arbitrary processor context. The non-MPU port intentionally ignores
+/// `_pulCallerStackAddress`.
 #[no_mangle]
-pub extern "C" fn vPortSVCHandler_C(_pulCallerStackAddress: *mut u32) {
+pub unsafe extern "C" fn vPortSVCHandler_C(_pulCallerStackAddress: *mut u32) {
     // For non-MPU port, we just restore the first task's context
     // SAFETY: This is called from the SVC handler to start the first task.
     // The assembly in vRestoreContextOfFirstTask restores context and returns to thread mode.
@@ -308,6 +331,12 @@ pub extern "C" fn vPortSVCHandler_C(_pulCallerStackAddress: *mut u32) {
 ///
 /// This is called from vPortSVCHandler_C to start the first task.
 /// Thumb-1 compatible assembly.
+///
+/// # Safety
+///
+/// Enter only from the port's SVC handler while in handler mode, with
+/// interrupts and scheduler state in the state established by the scheduler
+/// start path. `pxCurrentTCB` and its saved stack frame must be valid.
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn vRestoreContextOfFirstTask() {
@@ -386,6 +415,12 @@ global_asm!(
 );
 
 /// Rust alias for PendSV handler (for API compatibility)
+///
+/// # Safety
+///
+/// Invoke only as the Cortex-M PendSV exception with a valid process stack,
+/// live `pxCurrentTCB`, and initialized scheduler lists. Calling this as an
+/// ordinary function can corrupt both the task context and processor state.
 #[no_mangle]
 pub unsafe extern "C" fn xPortPendSVHandler() {
     extern "C" {
@@ -417,7 +452,9 @@ extern "C" fn xPortSysTickHandler_impl() {
 
     crate::trace::traceISR_ENTER();
 
-    if crate::kernel::tasks::xTaskIncrementTick() != pdFALSE {
+    // SAFETY: SysTick runs at the configured kernel interrupt priority and
+    // serializes the scheduler tick update with the port interrupt mask.
+    if unsafe { crate::kernel::tasks::xTaskIncrementTick() } != pdFALSE {
         crate::trace::traceISR_EXIT_TO_SCHEDULER();
         unsafe {
             core::ptr::write_volatile(NVIC_ICSR, NVIC_PENDSVSET_BIT);

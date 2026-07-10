@@ -22,7 +22,6 @@
 //! - `arch-64bit` feature: 64-bit types
 //!
 //! ## Tick Width
-//! - `tick-16bit` feature: 16-bit tick counter
 //! - `tick-32bit` feature: 32-bit tick counter
 //! - `tick-64bit` feature: 64-bit tick counter
 //!
@@ -40,15 +39,11 @@ compile_error!("Cannot enable both arch-32bit and arch-64bit");
 compile_error!("Must enable either arch-32bit or arch-64bit");
 
 // Ensure exactly one tick width is selected
-#[cfg(any(
-    all(feature = "tick-16bit", feature = "tick-32bit"),
-    all(feature = "tick-16bit", feature = "tick-64bit"),
-    all(feature = "tick-32bit", feature = "tick-64bit"),
-))]
+#[cfg(all(feature = "tick-32bit", feature = "tick-64bit"))]
 compile_error!("Cannot enable multiple tick width features");
 
-#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
-compile_error!("Must enable one of: tick-16bit, tick-32bit, tick-64bit");
+#[cfg(not(any(feature = "tick-32bit", feature = "tick-64bit")))]
+compile_error!("Must enable one of: tick-32bit, tick-64bit");
 
 // =============================================================================
 // Architecture-dependent types (BaseType_t, UBaseType_t, StackType_t)
@@ -91,72 +86,46 @@ pub type StackType_t = u32;
 // Tick type (configurable width independent of architecture)
 // =============================================================================
 
-/// Tick counter type - 16-bit variant
-/// Suitable for very resource-constrained systems.
-#[cfg(feature = "tick-16bit")]
-pub type TickType_t = u16;
-
-/// Maximum tick value for 16-bit ticks
-#[cfg(feature = "tick-16bit")]
-pub const portMAX_DELAY: TickType_t = 0xFFFF;
-
 /// Tick counter type - 32-bit variant (most common)
-#[cfg(all(feature = "tick-32bit", not(feature = "tick-16bit")))]
+#[cfg(feature = "tick-32bit")]
 pub type TickType_t = u32;
 
 /// Maximum tick value for 32-bit ticks
-#[cfg(all(feature = "tick-32bit", not(feature = "tick-16bit")))]
+#[cfg(feature = "tick-32bit")]
 pub const portMAX_DELAY: TickType_t = 0xFFFF_FFFF;
 
 /// Tick counter type - 64-bit variant
 /// For systems needing very long delays without overflow.
-#[cfg(all(
-    feature = "tick-64bit",
-    not(feature = "tick-16bit"),
-    not(feature = "tick-32bit")
-))]
+#[cfg(all(feature = "tick-64bit", not(feature = "tick-32bit")))]
 pub type TickType_t = u64;
 
 /// Maximum tick value for 64-bit ticks
-#[cfg(all(
-    feature = "tick-64bit",
-    not(feature = "tick-16bit"),
-    not(feature = "tick-32bit")
-))]
+#[cfg(all(feature = "tick-64bit", not(feature = "tick-32bit")))]
 pub const portMAX_DELAY: TickType_t = 0xFFFF_FFFF_FFFF_FFFF;
 
-#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+#[cfg(not(any(feature = "tick-32bit", feature = "tick-64bit")))]
 pub type TickType_t = u32;
 
-#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+#[cfg(not(any(feature = "tick-32bit", feature = "tick-64bit")))]
 pub const portMAX_DELAY: TickType_t = 0xFFFF_FFFF;
 
 // =============================================================================
 // Tick type width constants (for conditional compilation in kernel code)
 // =============================================================================
 
-/// Tick type width indicator - 16-bit
-pub const TICK_TYPE_WIDTH_16_BITS: u8 = 0;
 /// Tick type width indicator - 32-bit
 pub const TICK_TYPE_WIDTH_32_BITS: u8 = 1;
 /// Tick type width indicator - 64-bit
 pub const TICK_TYPE_WIDTH_64_BITS: u8 = 2;
 
 /// Current tick type width (for runtime checks if needed)
-#[cfg(feature = "tick-16bit")]
-pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_16_BITS;
-
-#[cfg(all(feature = "tick-32bit", not(feature = "tick-16bit")))]
+#[cfg(feature = "tick-32bit")]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_32_BITS;
 
-#[cfg(all(
-    feature = "tick-64bit",
-    not(feature = "tick-16bit"),
-    not(feature = "tick-32bit")
-))]
+#[cfg(all(feature = "tick-64bit", not(feature = "tick-32bit")))]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_64_BITS;
 
-#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+#[cfg(not(any(feature = "tick-32bit", feature = "tick-64bit")))]
 pub const configTICK_TYPE_WIDTH_IN_BITS: u8 = TICK_TYPE_WIDTH_32_BITS;
 
 // =============================================================================
@@ -198,23 +167,15 @@ pub const errQUEUE_YIELD: BaseType_t = -5;
 // Integrity check value (from projdefs.h)
 // =============================================================================
 
-/// Integrity check magic value - 16-bit ticks
-#[cfg(feature = "tick-16bit")]
-pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A;
-
 /// Integrity check magic value - 32-bit ticks
-#[cfg(all(feature = "tick-32bit", not(feature = "tick-16bit")))]
+#[cfg(feature = "tick-32bit")]
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A;
 
 /// Integrity check magic value - 64-bit ticks
-#[cfg(all(
-    feature = "tick-64bit",
-    not(feature = "tick-16bit"),
-    not(feature = "tick-32bit")
-))]
+#[cfg(all(feature = "tick-64bit", not(feature = "tick-32bit")))]
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A_5A5A_5A5A;
 
-#[cfg(not(any(feature = "tick-16bit", feature = "tick-32bit", feature = "tick-64bit")))]
+#[cfg(not(any(feature = "tick-32bit", feature = "tick-64bit")))]
 pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A;
 
 // =============================================================================
@@ -224,7 +185,7 @@ pub const pdINTEGRITY_CHECK_VALUE: TickType_t = 0x5A5A_5A5A;
 /// Task function prototype
 /// `void vTaskFunction(void *pvParameters)`
 ///
-/// [AMENDMENT] In Rust, we use a function pointer type. The `extern "C"` ensures
+/// \[AMENDMENT\] In Rust, we use a function pointer type. The `extern "C"` ensures
 /// C-compatible calling convention for potential interop.
 pub type TaskFunction_t = extern "C" fn(*mut core::ffi::c_void);
 
@@ -238,14 +199,33 @@ pub type TaskFunction_t = extern "C" fn(*mut core::ffi::c_void);
 pub const fn pdMS_TO_TICKS(xTimeInMs: TickType_t) -> TickType_t {
     // [AMENDMENT] Using const fn for compile-time evaluation where possible
     // Original: ( ( TickType_t ) ( ( ( uint64_t ) ( xTimeInMs ) * ( uint64_t ) configTICK_RATE_HZ ) / ( uint64_t ) 1000U ) )
-    ((xTimeInMs as u64 * crate::config::configTICK_RATE_HZ as u64) / 1000u64) as TickType_t
+    let ticks = (xTimeInMs as u64).wrapping_mul(crate::config::configTICK_RATE_HZ as u64) / 1000u64;
+    ticks as TickType_t
+}
+
+/// Convert a wide millisecond duration to ticks without narrowing first.
+///
+/// Returns `None` when the duration cannot be represented by the configured
+/// tick type. This is the checked conversion used by safe convenience APIs;
+/// the FreeRTOS-compatible [`pdMS_TO_TICKS`] helper retains its saturating
+/// `TickType_t` interface.
+#[inline(always)]
+pub const fn milliseconds_to_ticks_checked(xTimeInMs: u64) -> Option<TickType_t> {
+    let ticks = (xTimeInMs as u128 * crate::config::configTICK_RATE_HZ as u128) / 1000u128;
+    if ticks > portMAX_DELAY as u128 {
+        None
+    } else {
+        Some(ticks as TickType_t)
+    }
 }
 
 /// Convert ticks to milliseconds
 /// Equivalent to pdTICKS_TO_MS macro
 #[inline(always)]
 pub const fn pdTICKS_TO_MS(xTimeInTicks: TickType_t) -> TickType_t {
-    ((xTimeInTicks as u64 * 1000u64) / crate::config::configTICK_RATE_HZ as u64) as TickType_t
+    let milliseconds =
+        (xTimeInTicks as u64).wrapping_mul(1000u64) / crate::config::configTICK_RATE_HZ as u64;
+    milliseconds as TickType_t
 }
 
 // =============================================================================
@@ -352,5 +332,27 @@ impl TaskStatus_t {
             pxStackBase: core::ptr::null_mut(),
             usStackHighWaterMark: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    #[test]
+    fn wide_millisecond_conversion_does_not_narrow_before_scaling() {
+        assert_eq!(milliseconds_to_ticks_checked(1_000), Some(1_000));
+        assert_eq!(
+            milliseconds_to_ticks_checked(portMAX_DELAY as u64),
+            Some(portMAX_DELAY)
+        );
+    }
+
+    #[test]
+    fn checked_conversion_rejects_unrepresentable_durations() {
+        #[cfg(not(feature = "tick-64bit"))]
+        assert_eq!(milliseconds_to_ticks_checked(u64::MAX), None);
+
+        assert_eq!(pdMS_TO_TICKS(portMAX_DELAY), portMAX_DELAY);
     }
 }

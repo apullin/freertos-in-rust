@@ -60,7 +60,7 @@ pub const configTICK_RATE_HZ: TickType_t = 1000;
 // =============================================================================
 
 /// CPU clock frequency in Hz
-/// [AMENDMENT] Default: 80 MHz - almost certainly WRONG for your hardware!
+/// \[AMENDMENT\] Default: 80 MHz - almost certainly WRONG for your hardware!
 /// Enable `user-config` feature and provide FREERTOS_CONFIG_CPU_CLOCK_HZ.
 #[cfg(not(feature = "user-config"))]
 pub const configCPU_CLOCK_HZ: u32 = 80_000_000;
@@ -75,7 +75,7 @@ extern "Rust" {
 }
 
 /// RISC-V MTIME timer frequency in Hz
-/// [AMENDMENT] For RISC-V ports, the CLINT timer (MTIME) may run at a
+/// \[AMENDMENT\] For RISC-V ports, the CLINT timer (MTIME) may run at a
 /// different frequency than the CPU clock. Default is 32768 Hz (QEMU sifive_e).
 /// Enable `user-config` feature and provide FREERTOS_CONFIG_MTIME_HZ for your hardware.
 #[cfg(all(feature = "port-riscv32", not(feature = "user-config")))]
@@ -103,7 +103,7 @@ pub const configMAX_TASK_NAME_LEN: usize = 16;
 // =============================================================================
 
 /// Number of cores (1 = single core, >1 = SMP)
-/// [AMENDMENT] Currently only single-core is supported. TODO: SMP support.
+/// \[AMENDMENT\] Currently only single-core is supported. TODO: SMP support.
 pub const configNUMBER_OF_CORES: BaseType_t = 1;
 
 // =============================================================================
@@ -140,15 +140,24 @@ pub const configTOTAL_HEAP_SIZE: usize = 6144; // 6KB - fits in 16KB RAM devices
 // =============================================================================
 
 /// Use mutexes
+#[cfg(feature = "use-mutexes")]
 pub const configUSE_MUTEXES: BaseType_t = 1;
+#[cfg(not(feature = "use-mutexes"))]
+pub const configUSE_MUTEXES: BaseType_t = 0;
 
 /// Use recursive mutexes
+#[cfg(feature = "use-mutexes")]
 pub const configUSE_RECURSIVE_MUTEXES: BaseType_t = 1;
+#[cfg(not(feature = "use-mutexes"))]
+pub const configUSE_RECURSIVE_MUTEXES: BaseType_t = 0;
 
 /// Use counting semaphores
 pub const configUSE_COUNTING_SEMAPHORES: BaseType_t = 1;
 
 /// Use queue sets
+#[cfg(feature = "queue-sets")]
+pub const configUSE_QUEUE_SETS: BaseType_t = 1;
+#[cfg(not(feature = "queue-sets"))]
 pub const configUSE_QUEUE_SETS: BaseType_t = 0;
 
 /// Queue registry size (for kernel-aware debugging)
@@ -183,11 +192,11 @@ pub const configTIMER_TASK_STACK_DEPTH: usize = configMINIMAL_STACK_SIZE;
 // =============================================================================
 
 /// Use mini list items for memory optimization
-/// [AMENDMENT] TODO: MiniListItem support. Currently always uses full ListItem_t.
+/// \[AMENDMENT\] TODO: MiniListItem support. Currently always uses full ListItem_t.
 pub const configUSE_MINI_LIST_ITEM: BaseType_t = 0;
 
 /// Enable list data integrity checks
-/// [AMENDMENT] Controlled by Cargo feature `list-data-integrity-check`
+/// \[AMENDMENT\] Controlled by Cargo feature `list-data-integrity-check`
 #[cfg(feature = "list-data-integrity-check")]
 pub const configUSE_LIST_DATA_INTEGRITY_CHECK_BYTES: BaseType_t = 1;
 #[cfg(not(feature = "list-data-integrity-check"))]
@@ -198,12 +207,13 @@ pub const configUSE_LIST_DATA_INTEGRITY_CHECK_BYTES: BaseType_t = 0;
 // =============================================================================
 
 /// configASSERT macro equivalent
-/// [AMENDMENT] Assertions remain active in release builds because FreeRTOS
+/// \[AMENDMENT\] Assertions remain active in release builds because FreeRTOS
 /// relies on them to enforce API and kernel invariants.
 pub const configASSERT_DEFINED: BaseType_t = 1;
 
 /// Macro-like function for configASSERT
 #[inline(always)]
+#[track_caller]
 pub fn configASSERT(condition: bool) {
     if configASSERT_DEFINED != 0 {
         assert!(condition, "FreeRTOS assertion failed");
@@ -212,7 +222,7 @@ pub fn configASSERT(condition: bool) {
 
 #[cfg(test)]
 mod config_assert_tests {
-    use super::configASSERT;
+    use super::*;
 
     #[test]
     fn config_assert_accepts_true() {
@@ -224,6 +234,43 @@ mod config_assert_tests {
     fn config_assert_rejects_false_in_release_too() {
         configASSERT(false);
     }
+
+    #[test]
+    fn cargo_capabilities_match_exported_configuration_constants() {
+        assert_eq!(configUSE_MUTEXES != 0, cfg!(feature = "use-mutexes"));
+        assert_eq!(configUSE_QUEUE_SETS != 0, cfg!(feature = "queue-sets"));
+        assert_eq!(
+            INCLUDE_vTaskPrioritySet != 0,
+            cfg!(feature = "task-priority-set")
+        );
+        assert_eq!(
+            INCLUDE_uxTaskPriorityGet != 0,
+            cfg!(feature = "task-priority-set")
+        );
+        assert_eq!(INCLUDE_vTaskDelete != 0, cfg!(feature = "task-delete"));
+        assert_eq!(INCLUDE_vTaskSuspend != 0, cfg!(feature = "task-suspend"));
+        assert_eq!(
+            INCLUDE_xTaskResumeFromISR != 0,
+            cfg!(feature = "task-suspend")
+        );
+        assert_eq!(
+            INCLUDE_xQueueGetMutexHolder != 0,
+            cfg!(feature = "use-mutexes")
+        );
+        assert_eq!(
+            configGENERATE_RUN_TIME_STATS != 0,
+            cfg!(feature = "generate-run-time-stats")
+        );
+        assert_eq!(
+            configCHECK_FOR_STACK_OVERFLOW != 0,
+            cfg!(feature = "stack-overflow-check")
+        );
+
+        /* Unsupported context-switch modes are not advertised as Cargo
+         * capabilities. */
+        assert_eq!(configUSE_POSIX_ERRNO, 0);
+        assert_eq!(portCRITICAL_NESTING_IN_TCB, 0);
+    }
 }
 
 // =============================================================================
@@ -231,16 +278,28 @@ mod config_assert_tests {
 // =============================================================================
 
 /// Include vTaskPrioritySet
+#[cfg(feature = "task-priority-set")]
 pub const INCLUDE_vTaskPrioritySet: BaseType_t = 1;
+#[cfg(not(feature = "task-priority-set"))]
+pub const INCLUDE_vTaskPrioritySet: BaseType_t = 0;
 
 /// Include uxTaskPriorityGet
+#[cfg(feature = "task-priority-set")]
 pub const INCLUDE_uxTaskPriorityGet: BaseType_t = 1;
+#[cfg(not(feature = "task-priority-set"))]
+pub const INCLUDE_uxTaskPriorityGet: BaseType_t = 0;
 
 /// Include vTaskDelete
+#[cfg(feature = "task-delete")]
 pub const INCLUDE_vTaskDelete: BaseType_t = 1;
+#[cfg(not(feature = "task-delete"))]
+pub const INCLUDE_vTaskDelete: BaseType_t = 0;
 
 /// Include vTaskSuspend
+#[cfg(feature = "task-suspend")]
 pub const INCLUDE_vTaskSuspend: BaseType_t = 1;
+#[cfg(not(feature = "task-suspend"))]
+pub const INCLUDE_vTaskSuspend: BaseType_t = 0;
 
 /// Include xTaskDelayUntil
 pub const INCLUDE_xTaskDelayUntil: BaseType_t = 1;
@@ -252,27 +311,45 @@ pub const INCLUDE_vTaskDelay: BaseType_t = 1;
 pub const INCLUDE_xTaskGetIdleTaskHandle: BaseType_t = 0;
 
 /// Include xTaskAbortDelay
+#[cfg(feature = "abort-delay")]
+pub const INCLUDE_xTaskAbortDelay: BaseType_t = 1;
+#[cfg(not(feature = "abort-delay"))]
 pub const INCLUDE_xTaskAbortDelay: BaseType_t = 0;
 
 /// Include xQueueGetMutexHolder
+#[cfg(feature = "use-mutexes")]
+pub const INCLUDE_xQueueGetMutexHolder: BaseType_t = 1;
+#[cfg(not(feature = "use-mutexes"))]
 pub const INCLUDE_xQueueGetMutexHolder: BaseType_t = 0;
 
 /// Include xTaskGetHandle
 pub const INCLUDE_xTaskGetHandle: BaseType_t = 0;
 
 /// Include uxTaskGetStackHighWaterMark
+#[cfg(feature = "stack-high-water-mark")]
+pub const INCLUDE_uxTaskGetStackHighWaterMark: BaseType_t = 1;
+#[cfg(not(feature = "stack-high-water-mark"))]
 pub const INCLUDE_uxTaskGetStackHighWaterMark: BaseType_t = 0;
 
 /// Include uxTaskGetStackHighWaterMark2
+#[cfg(feature = "stack-high-water-mark")]
+pub const INCLUDE_uxTaskGetStackHighWaterMark2: BaseType_t = 1;
+#[cfg(not(feature = "stack-high-water-mark"))]
 pub const INCLUDE_uxTaskGetStackHighWaterMark2: BaseType_t = 0;
 
 /// Include eTaskGetState
 pub const INCLUDE_eTaskGetState: BaseType_t = 1;
 
 /// Include xTaskResumeFromISR
+#[cfg(feature = "task-suspend")]
 pub const INCLUDE_xTaskResumeFromISR: BaseType_t = 1;
+#[cfg(not(feature = "task-suspend"))]
+pub const INCLUDE_xTaskResumeFromISR: BaseType_t = 0;
 
 /// Include xTimerPendFunctionCall
+#[cfg(feature = "pend-function-call")]
+pub const INCLUDE_xTimerPendFunctionCall: BaseType_t = 1;
+#[cfg(not(feature = "pend-function-call"))]
 pub const INCLUDE_xTimerPendFunctionCall: BaseType_t = 0;
 
 /// Include xTaskGetSchedulerState
@@ -286,12 +363,21 @@ pub const INCLUDE_xTaskGetCurrentTaskHandle: BaseType_t = 1;
 // =============================================================================
 
 /// Enable trace facility for debugging
+#[cfg(feature = "trace-facility")]
+pub const configUSE_TRACE_FACILITY: BaseType_t = 1;
+#[cfg(not(feature = "trace-facility"))]
 pub const configUSE_TRACE_FACILITY: BaseType_t = 0;
 
 /// Enable run-time stats
+#[cfg(feature = "generate-run-time-stats")]
+pub const configGENERATE_RUN_TIME_STATS: BaseType_t = 1;
+#[cfg(not(feature = "generate-run-time-stats"))]
 pub const configGENERATE_RUN_TIME_STATS: BaseType_t = 0;
 
 /// Enable application task tag
+#[cfg(feature = "application-task-tag")]
+pub const configUSE_APPLICATION_TASK_TAG: BaseType_t = 1;
+#[cfg(not(feature = "application-task-tag"))]
 pub const configUSE_APPLICATION_TASK_TAG: BaseType_t = 0;
 
 /// Number of thread local storage pointers
@@ -300,7 +386,10 @@ pub const configNUM_THREAD_LOCAL_STORAGE_POINTERS: usize = 5;
 #[cfg(not(feature = "thread-local-storage"))]
 pub const configNUM_THREAD_LOCAL_STORAGE_POINTERS: usize = 0;
 
-/// Enable POSIX errno support
+/// Enable POSIX errno context switching.
+///
+/// \[AMENDMENT\] No supported port saves/restores a process errno value, so this
+/// configuration is not exposed as a Cargo capability.
 pub const configUSE_POSIX_ERRNO: BaseType_t = 0;
 
 /// Use port-optimised task selection (bit manipulation)
@@ -314,6 +403,9 @@ pub const configUSE_CORE_AFFINITY: BaseType_t = 0;
 pub const configUSE_TASK_PREEMPTION_DISABLE: BaseType_t = 0;
 
 /// Enable tickless idle mode
+#[cfg(feature = "tickless-idle")]
+pub const configUSE_TICKLESS_IDLE: BaseType_t = 1;
+#[cfg(not(feature = "tickless-idle"))]
 pub const configUSE_TICKLESS_IDLE: BaseType_t = 0;
 
 /// Minimum expected idle time before entering tickless sleep (in ticks).
@@ -328,9 +420,15 @@ pub const configINITIAL_TICK_COUNT: super::types::TickType_t = 0;
 pub const tskIDLE_PRIORITY: super::types::UBaseType_t = 0;
 
 /// Stack overflow checking level (0=disabled, 1=simple, 2=full)
+#[cfg(feature = "stack-overflow-check")]
+pub const configCHECK_FOR_STACK_OVERFLOW: BaseType_t = 2;
+#[cfg(not(feature = "stack-overflow-check"))]
 pub const configCHECK_FOR_STACK_OVERFLOW: BaseType_t = 0;
 
 /// Record the high address of the stack
+#[cfg(feature = "record-stack-high-address")]
+pub const configRECORD_STACK_HIGH_ADDRESS: BaseType_t = 1;
+#[cfg(not(feature = "record-stack-high-address"))]
 pub const configRECORD_STACK_HIGH_ADDRESS: BaseType_t = 0;
 
 /// Kernel will provide static memory for idle/timer tasks
@@ -343,7 +441,11 @@ pub const configKERNEL_PROVIDED_STATIC_MEMORY: BaseType_t = 0;
 // NOTE: portSTACK_GROWTH is defined in the port layer, not here.
 // Each port defines its own stack growth direction.
 
-/// Critical nesting stored in TCB (vs port layer)
+/// Critical nesting stored in TCB (vs port layer).
+///
+/// \[AMENDMENT\] Supported ports save their port-global nesting state in the
+/// context frame, so this alternative storage mode is not exposed as a Cargo
+/// capability.
 pub const portCRITICAL_NESTING_IN_TCB: BaseType_t = 0;
 
 /// Using MPU wrappers (memory protection)
@@ -354,7 +456,7 @@ pub const portUSING_MPU_WRAPPERS: BaseType_t = 0;
 // =============================================================================
 
 /// Stack depth type (configSTACK_DEPTH_TYPE)
-/// [AMENDMENT] In Rust, we use usize for stack depths
+/// \[AMENDMENT\] In Rust, we use usize for stack depths
 pub type configSTACK_DEPTH_TYPE = usize;
 
 /// Run-time counter type

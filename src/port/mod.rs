@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This module provides the port layer abstraction for FreeRusTOS.
+ * [AMENDMENT] This module provides the port layer abstraction for FreeRTOS-in-Rust.
  * The port layer contains hardware-specific implementations of:
  * - Critical sections (interrupt enable/disable)
  * - Context switching
@@ -186,7 +186,7 @@ use crate::types::*;
 // NOTE: portBYTE_ALIGNMENT is defined in each port module.
 
 /// Byte alignment mask (computed from portBYTE_ALIGNMENT)
-/// [AMENDMENT] This is computed at the call site since portBYTE_ALIGNMENT
+/// \[AMENDMENT\] This is computed at the call site since portBYTE_ALIGNMENT
 /// comes from the port module.
 #[inline(always)]
 pub const fn portBYTE_ALIGNMENT_MASK() -> usize {
@@ -194,7 +194,7 @@ pub const fn portBYTE_ALIGNMENT_MASK() -> usize {
 }
 
 /// Tick period in milliseconds
-/// [AMENDMENT] Computed from configTICK_RATE_HZ
+/// \[AMENDMENT\] Computed from configTICK_RATE_HZ
 #[inline(always)]
 pub const fn portTICK_PERIOD_MS() -> TickType_t {
     1000 / crate::config::configTICK_RATE_HZ
@@ -205,7 +205,7 @@ pub const fn portTICK_PERIOD_MS() -> TickType_t {
 // =============================================================================
 
 /// Marker for privileged functions (no-op in non-MPU ports)
-/// [AMENDMENT] In Rust, this is a no-op. MPU support would need different handling.
+/// \[AMENDMENT\] In Rust, this is a no-op. MPU support would need different handling.
 #[macro_export]
 macro_rules! PRIVILEGED_FUNCTION {
     () => {};

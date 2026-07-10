@@ -135,7 +135,8 @@ fn heap_4_alignment_realloc_overflow_and_coalescing() {
     use freertos_in_rust::memory::{vPortGetHeapStats, vPortHeapResetState, HeapStats_t};
 
     freertos_in_rust::port::test_port_reset();
-    vPortHeapResetState();
+    // SAFETY: the test owns the heap and has no live allocations at reset.
+    unsafe { vPortHeapResetState() };
 
     unsafe {
         // Force initialization, then establish the completely free baseline.
@@ -166,7 +167,8 @@ fn heap_4_alignment_realloc_overflow_and_coalescing() {
         assert_eq!(stats.xSizeOfLargestFreeBlockInBytes, initial_free);
     }
 
-    vPortHeapResetState();
+    // SAFETY: every allocation made by the test has been returned.
+    unsafe { vPortHeapResetState() };
 }
 
 #[cfg(all(feature = "heap-5", not(feature = "heap-4")))]
@@ -180,7 +182,8 @@ fn heap_5_alignment_realloc_overflow_tiny_regions_and_coalescing() {
     struct AlignedHeap([u8; 8192]);
 
     freertos_in_rust::port::test_port_reset();
-    vPortHeapResetState();
+    // SAFETY: the test owns the heap and has not defined any regions yet.
+    unsafe { vPortHeapResetState() };
 
     let mut storage = AlignedHeap([0; 8192]);
     let base = storage.0.as_mut_ptr();
@@ -192,7 +195,8 @@ fn heap_5_alignment_realloc_overflow_tiny_regions_and_coalescing() {
     }));
     assert!(result.is_err());
     assert_eq!(xPortGetFreeHeapSize(), 0);
-    vPortHeapResetState();
+    // SAFETY: rejected initialization created no live allocations.
+    unsafe { vPortHeapResetState() };
 
     // Ordering is validated before writing either region's block headers.
     let descending = unsafe {
@@ -206,7 +210,8 @@ fn heap_5_alignment_realloc_overflow_tiny_regions_and_coalescing() {
     }));
     assert!(result.is_err());
     assert_eq!(xPortGetFreeHeapSize(), 0);
-    vPortHeapResetState();
+    // SAFETY: rejected initialization created no live allocations.
+    unsafe { vPortHeapResetState() };
 
     unsafe {
         // The tiny leading region is ignored. The two usable regions exercise
@@ -221,6 +226,13 @@ fn heap_5_alignment_realloc_overflow_tiny_regions_and_coalescing() {
         assert!(initial_free > 0);
 
         check_raw_allocator_contract();
+
+        // A split in the first region must retain heap_5's zero-sized link
+        // marker: two usable free blocks plus the inter-region marker.
+        let mut split_stats: HeapStats_t = core::mem::zeroed();
+        vPortGetHeapStats(&mut split_stats);
+        assert_eq!(split_stats.xNumberOfFreeBlocks, 3);
+
         check_global_allocator_contract(&FreeRtosAllocator);
         check_exhaustion_and_reuse(initial_free);
 
@@ -248,9 +260,12 @@ fn heap_5_alignment_realloc_overflow_tiny_regions_and_coalescing() {
         let mut stats: HeapStats_t = core::mem::zeroed();
         vPortGetHeapStats(&mut stats);
         assert_eq!(stats.xAvailableHeapSpaceInBytes, initial_free);
+        // Exhausting a region can legitimately consume its intermediate
+        // zero-sized link marker when the whole block is later reinserted.
         assert_eq!(stats.xNumberOfFreeBlocks, 2);
         assert!(stats.xSizeOfSmallestFreeBlockInBytes > 0);
     }
 
-    vPortHeapResetState();
+    // SAFETY: every allocation made from the test-owned regions was returned.
+    unsafe { vPortHeapResetState() };
 }

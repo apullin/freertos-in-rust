@@ -24,12 +24,12 @@
  * https://www.FreeRTOS.org
  * https://github.com/FreeRTOS
  *
- * [AMENDMENT] This file is part of FreeRusTOS, a Rust port of the FreeRTOS kernel.
+ * [AMENDMENT] This file is part of FreeRTOS-in-Rust, a Rust port of the FreeRTOS kernel.
  * The original C code has been translated to Rust while preserving the original
  * structure, control flow, and comments as much as possible.
  */
 
-//! # FreeRusTOS - FreeRTOS Kernel in Rust
+//! # FreeRTOS-in-Rust - FreeRTOS Kernel in Rust
 //!
 //! This crate provides a pure-Rust implementation of the FreeRTOS kernel,
 //! translated line-by-line from the original C source code.
@@ -39,7 +39,6 @@
 //! - `port-dummy` - Dummy port for compilation (default, panics at runtime)
 //! - `arch-32bit` - 32-bit architecture types (default)
 //! - `arch-64bit` - 64-bit architecture types
-//! - `tick-16bit` - 16-bit tick counter
 //! - `tick-32bit` - 32-bit tick counter (default)
 //! - `tick-64bit` - 64-bit tick counter
 //! - `alloc` - Enable memory allocation via Rust's global allocator
@@ -71,7 +70,7 @@
     feature = "port-test",
     feature = "port-dummy"
 )))]
-compile_error!("select exactly one FreeRusTOS port feature");
+compile_error!("select exactly one FreeRTOS-in-Rust port feature");
 
 #[cfg(any(
     all(
@@ -143,7 +142,7 @@ compile_error!("select exactly one FreeRusTOS port feature");
     ),
     all(feature = "port-test", feature = "port-dummy")
 ))]
-compile_error!("FreeRusTOS port features are mutually exclusive");
+compile_error!("FreeRTOS-in-Rust port features are mutually exclusive");
 
 #[cfg(any(
     all(feature = "heap-4", feature = "heap-5"),
@@ -172,8 +171,8 @@ pub mod memory;
 // Kernel modules
 pub mod kernel;
 
-// Safe synchronization wrappers (requires use-mutexes for Mutex)
-#[cfg(feature = "use-mutexes")]
+// Safe synchronization wrappers. Individual capabilities such as Mutex,
+// streams, and timers retain their own feature gates.
 pub mod sync;
 
 // Re-export commonly used items at crate root (like FreeRTOS.h does)
@@ -186,18 +185,32 @@ pub use types::*;
 
 /// Delays the current task for the specified number of ticks.
 ///
-/// This is a safe wrapper around `vTaskDelay`.
+/// This is a safe wrapper around `vTaskDelay`. The context capability prevents
+/// task-only delay operations from being called through an ISR or timer
+/// callback API.
 #[inline]
-pub fn delay(ticks: TickType_t) {
-    kernel::tasks::vTaskDelay(ticks);
+pub fn delay(context: &sync::TaskContext, ticks: TickType_t) {
+    assert!(context.current().is_some(), "delay requires a running task");
+    sync::assert_can_block("delay", ticks);
+    // Safety: TaskContext and the checks above establish a live current task,
+    // running scheduler, task context, and an unsuspended blocking path.
+    unsafe { kernel::tasks::vTaskDelay(ticks) };
 }
 
 /// Delays the current task for the specified number of milliseconds.
 ///
-/// Converts milliseconds to ticks using the configured tick rate.
+/// Converts milliseconds to ticks using the configured tick rate without
+/// narrowing the millisecond value first.
+///
+/// # Panics
+///
+/// Panics when the requested duration cannot be represented by `TickType_t`.
+/// Use [`milliseconds_to_ticks_checked`] when the duration is not known to fit.
 #[inline]
-pub fn delay_ms(ms: u32) {
-    kernel::tasks::vTaskDelay(pdMS_TO_TICKS(ms as TickType_t));
+pub fn delay_ms(context: &sync::TaskContext, ms: u32) {
+    let ticks = milliseconds_to_ticks_checked(u64::from(ms))
+        .expect("millisecond delay does not fit in TickType_t");
+    delay(context, ticks);
 }
 
 /// Starts the FreeRTOS scheduler.
@@ -205,9 +218,19 @@ pub fn delay_ms(ms: u32) {
 /// This function does not return under normal operation. Tasks must be
 /// created before calling this function.
 #[inline]
-pub fn start_scheduler() -> ! {
-    kernel::tasks::vTaskStartScheduler();
-    // vTaskStartScheduler only returns if there's insufficient memory
-    // for the idle task. In that case, loop forever.
-    loop {}
+pub fn start_scheduler(_context: sync::TaskContext) -> ! {
+    sync::assert_task_context("start_scheduler");
+    assert_eq!(
+        kernel::tasks::xTaskGetSchedulerState(),
+        kernel::tasks::taskSCHEDULER_NOT_STARTED,
+        "start_scheduler requires exclusive pre-scheduler initialization context"
+    );
+    // Safety: consuming the non-sendable startup capability establishes the
+    // crate's exclusive pre-scheduler entry boundary, and the unconditional
+    // state check rejects a TaskContext obtained from a running task. Internal
+    // task creation failures are handled by the raw scheduler path before it
+    // returns.
+    unsafe { kernel::tasks::vTaskStartScheduler() };
+    // vTaskStartScheduler only returns if creating an internal task failed.
+    panic!("FreeRTOS scheduler failed to start")
 }

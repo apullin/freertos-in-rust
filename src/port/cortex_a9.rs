@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This is the Cortex-A9 port for FreeRusTOS.
+ * [AMENDMENT] This is the Cortex-A9 port for FreeRTOS-in-Rust.
  * Ported from portable/GCC/ARM_CA9/port.c and portASM.S
  *
  * This port is for ARM Cortex-A9 (ARMv7-A) application processors.
@@ -359,7 +359,14 @@ pub fn portEND_SWITCHING_ISR(xSwitchRequired: BaseType_t) {
 /// - R0 (pvParameters)
 /// - ulCriticalNesting (0)
 /// - ulPortTaskHasFPUContext (0 or pdTRUE with FPU registers)
-pub fn pxPortInitialiseStack(
+///
+/// # Safety
+///
+/// `pxTopOfStack` must be non-null, correctly aligned, and lie near the high
+/// end of a uniquely writable allocation with enough lower-addressed room for
+/// the complete initial context. The allocation must remain live and
+/// stationary for the task lifetime. `pvParameters` must satisfy `pxCode`.
+pub unsafe fn pxPortInitialiseStack(
     pxTopOfStack: *mut StackType_t,
     pxCode: TaskFunction_t,
     pvParameters: *mut c_void,
@@ -544,7 +551,9 @@ pub extern "C" fn FreeRTOS_Tick_Handler() {
     }
 
     // Increment tick count
-    if crate::kernel::tasks::xTaskIncrementTick() != pdFALSE {
+    // Safety: this is the configured tick ISR with scheduler state live and
+    // the port interrupt mask in force.
+    if unsafe { crate::kernel::tasks::xTaskIncrementTick() } != pdFALSE {
         unsafe {
             ulPortYieldRequired = pdTRUE as u32;
         }
@@ -611,29 +620,60 @@ pub fn portMEMORY_BARRIER() {
 // Run-time Stats Timer Support
 // =============================================================================
 
+/// Cortex-A9 MPCore global timer registers on the supported vexpress-a9
+/// private-peripheral map. Unlike the PMU cycle counter, this timer continues
+/// advancing while the core is in WFI, so tickless idle remains accounted.
 #[cfg(feature = "generate-run-time-stats")]
-static mut ulRunTimeCounterValue: crate::config::configRUN_TIME_COUNTER_TYPE = 0;
+const A9_GLOBAL_TIMER_COUNTER_LOW: usize = configINTERRUPT_CONTROLLER_BASE_ADDRESS + 0x200;
+#[cfg(feature = "generate-run-time-stats")]
+const A9_GLOBAL_TIMER_COUNTER_HIGH: usize = configINTERRUPT_CONTROLLER_BASE_ADDRESS + 0x204;
+#[cfg(feature = "generate-run-time-stats")]
+const A9_GLOBAL_TIMER_CONTROL: usize = configINTERRUPT_CONTROLLER_BASE_ADDRESS + 0x208;
+#[cfg(feature = "generate-run-time-stats")]
+const A9_GLOBAL_TIMER_ENABLE: u32 = 1;
+
+#[cfg(feature = "generate-run-time-stats")]
+static mut ullRunTimeCounterStart: u64 = 0;
+
+#[cfg(feature = "generate-run-time-stats")]
+#[inline(always)]
+fn prvReadRunTimeCounter() -> u64 {
+    loop {
+        let high_before =
+            unsafe { core::ptr::read_volatile(A9_GLOBAL_TIMER_COUNTER_HIGH as *const u32) };
+        let low = unsafe { core::ptr::read_volatile(A9_GLOBAL_TIMER_COUNTER_LOW as *const u32) };
+        let high_after =
+            unsafe { core::ptr::read_volatile(A9_GLOBAL_TIMER_COUNTER_HIGH as *const u32) };
+
+        if high_before == high_after {
+            return ((high_before as u64) << 32) | low as u64;
+        }
+    }
+}
 
 #[cfg(feature = "generate-run-time-stats")]
 #[inline(always)]
 pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
     unsafe {
-        ulRunTimeCounterValue = 0;
+        let control = A9_GLOBAL_TIMER_CONTROL as *mut u32;
+        let current = core::ptr::read_volatile(control);
+        core::ptr::write_volatile(control, current | A9_GLOBAL_TIMER_ENABLE);
+        core::arch::asm!("dsb", "isb", options(nomem, nostack));
+        ullRunTimeCounterStart = prvReadRunTimeCounter();
     }
 }
 
 #[cfg(feature = "generate-run-time-stats")]
 #[inline(always)]
 pub fn portGET_RUN_TIME_COUNTER_VALUE() -> crate::config::configRUN_TIME_COUNTER_TYPE {
-    unsafe { ulRunTimeCounterValue }
+    prvReadRunTimeCounter().wrapping_sub(unsafe { ullRunTimeCounterStart })
+        as crate::config::configRUN_TIME_COUNTER_TYPE
 }
 
 #[cfg(feature = "generate-run-time-stats")]
 #[inline(always)]
 pub fn portINCREMENT_RUN_TIME_COUNTER() {
-    unsafe {
-        ulRunTimeCounterValue = ulRunTimeCounterValue.wrapping_add(1);
-    }
+    // The MPCore global timer is the time base and advances independently.
 }
 
 // =============================================================================
@@ -645,6 +685,8 @@ const SP804_TIMER_LOAD: usize = 0x00;
 const SP804_TIMER_VALUE: usize = 0x04;
 const SP804_TIMER_CONTROL: usize = 0x08;
 const SP804_TIMER_INTCLR: usize = 0x0C;
+const SP804_TIMER_RIS: usize = 0x10;
+const SP804_TIMER_BGLOAD: usize = 0x18;
 
 /// SP804 Timer control bits
 const SP804_CTRL_ENABLE: u32 = 1 << 7;
@@ -681,7 +723,11 @@ pub extern "C" fn vPortConfigureTimerForTickless(
     unsafe {
         ulTimerBaseAddress = timer_base;
         ulTimerCountsForOneTick = counts_per_tick;
-        ulMaximumPossibleSuppressedTicks = (timer_max_count / counts_per_tick) as TickType_t;
+        ulMaximumPossibleSuppressedTicks = if counts_per_tick > 1 {
+            (timer_max_count / counts_per_tick) as TickType_t
+        } else {
+            0
+        };
     }
 }
 
@@ -692,7 +738,11 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
     unsafe {
         // Check if timer is configured
-        if ulTimerBaseAddress == 0 {
+        if ulTimerBaseAddress == 0
+            || ulTimerCountsForOneTick < 2
+            || ulMaximumPossibleSuppressedTicks < 2
+            || xExpectedIdleTime < 2
+        {
             return;
         }
 
@@ -700,6 +750,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         let timer_value = (ulTimerBaseAddress + SP804_TIMER_VALUE) as *const u32;
         let timer_control = (ulTimerBaseAddress + SP804_TIMER_CONTROL) as *mut u32;
         let timer_intclr = (ulTimerBaseAddress + SP804_TIMER_INTCLR) as *mut u32;
+        let timer_ris = (ulTimerBaseAddress + SP804_TIMER_RIS) as *const u32;
+        let timer_bgload = (ulTimerBaseAddress + SP804_TIMER_BGLOAD) as *mut u32;
 
         let mut xExpectedIdleTime = xExpectedIdleTime;
 
@@ -714,6 +766,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::arch::asm!("isb", options(nomem, nostack));
 
         // Check if sleep should be aborted
+        // Safety: the idle task has suspended the scheduler and this port has
+        // masked IRQs for the tickless confirmation protocol.
         if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
             core::arch::asm!("cpsie i", options(nomem, nostack));
             return;
@@ -724,33 +778,52 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::ptr::write_volatile(timer_control, ctrl & !SP804_CTRL_ENABLE);
 
         // Read current timer value (counts remaining until next tick)
-        let mut ulTimerDecrementsLeft = core::ptr::read_volatile(timer_value);
-        if ulTimerDecrementsLeft == 0 {
-            ulTimerDecrementsLeft = ulTimerCountsForOneTick;
-        }
+        /* SP804 counts through zero, so VALUE + 1 is the number of timer
+         * clocks left in the current tick.  Clamp a stale/out-of-range value
+         * defensively to one normal tick. */
+        let ulTimerDecrementsLeft = core::cmp::min(
+            core::ptr::read_volatile(timer_value).saturating_add(1),
+            ulTimerCountsForOneTick,
+        );
 
         // Calculate reload value for expected idle time
         // -1 because we're partway through the current tick
-        let mut ulReloadValue =
-            ulTimerDecrementsLeft + (ulTimerCountsForOneTick * (xExpectedIdleTime as u32 - 1));
+        let mut ullReloadCounts = ulTimerDecrementsLeft as u64
+            + ulTimerCountsForOneTick as u64 * (xExpectedIdleTime as u64 - 1);
 
         // Apply compensation for time spent in this function
-        if ulReloadValue > ulStoppedTimerCompensation {
-            ulReloadValue -= ulStoppedTimerCompensation;
+        if ullReloadCounts > ulStoppedTimerCompensation as u64 {
+            ullReloadCounts -= ulStoppedTimerCompensation as u64;
         }
+        let ulReloadValue = (ullReloadCounts.saturating_sub(1) as u32).max(1);
+        let ulPeriodicReloadValue = ulTimerCountsForOneTick.saturating_sub(1).max(1);
 
-        // Load new value and restart timer
+        /* LOAD changes the current count immediately. Enable before writing
+         * BGLOAD: real SP804 hardware preserves the LOAD current value either
+         * way, but QEMU selects the latest load source when a disabled timer
+         * is enabled. Writing BGLOAD after enable preserves the long first
+         * interval on both while restoring the next periodic reload. */
         core::ptr::write_volatile(timer_load, ulReloadValue);
         core::ptr::write_volatile(timer_intclr, 1); // Clear any pending interrupt
         core::ptr::write_volatile(
             timer_control,
             SP804_CTRL_ENABLE | SP804_CTRL_PERIODIC | SP804_CTRL_INTENABLE | SP804_CTRL_32BIT,
         );
+        core::ptr::write_volatile(timer_bgload, ulPeriodicReloadValue);
 
         // Sleep until interrupt (WFI = Wait For Interrupt)
         core::arch::asm!("dsb", options(nomem, nostack));
         core::arch::asm!("wfi", options(nomem, nostack));
         core::arch::asm!("isb", options(nomem, nostack));
+
+        /* Snapshot and stop the timer before servicing the wake source.  A
+         * periodic SP804 has already reloaded by the time WFI returns on its
+         * interrupt, so VALUE alone cannot distinguish an expiry from an
+         * early external wake. */
+        let xTimerExpired = core::ptr::read_volatile(timer_ris) != 0;
+        let ulTimerValueAtWake = core::ptr::read_volatile(timer_value);
+        let ctrl = core::ptr::read_volatile(timer_control);
+        core::ptr::write_volatile(timer_control, ctrl & !SP804_CTRL_ENABLE);
 
         // Re-enable interrupts briefly to let the wake interrupt execute
         core::arch::asm!("cpsie i", options(nomem, nostack));
@@ -762,36 +835,55 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::arch::asm!("dsb", options(nomem, nostack));
         core::arch::asm!("isb", options(nomem, nostack));
 
-        // Stop timer to read how much time elapsed
-        let ctrl = core::ptr::read_volatile(timer_control);
-        core::ptr::write_volatile(timer_control, ctrl & !SP804_CTRL_ENABLE);
-
-        // Calculate how many complete ticks elapsed
-        let ulTimerValueNow = core::ptr::read_volatile(timer_value);
-        let ulElapsedCounts = if ulReloadValue > ulTimerValueNow {
-            ulReloadValue - ulTimerValueNow
+        // Calculate counter clocks elapsed before the wake interrupt ran.
+        let ullCurrentCounts = ulTimerValueAtWake as u64 + 1;
+        let ullSleepElapsedCounts = if xTimerExpired {
+            let ullPeriodicCountsLeft =
+                core::cmp::min(ullCurrentCounts, ulTimerCountsForOneTick as u64);
+            ullReloadCounts + (ulTimerCountsForOneTick as u64).saturating_sub(ullPeriodicCountsLeft)
+        } else if ullReloadCounts >= ullCurrentCounts {
+            ullReloadCounts - ullCurrentCounts
         } else {
-            ulReloadValue // Timer wrapped or expired
+            0
         };
 
-        let ulCompletedTicks = ulElapsedCounts / ulTimerCountsForOneTick;
+        /* Include the part of the current tick that elapsed before the timer
+         * was stopped. If the timer expired, its ISR has contributed one
+         * pended tick while the scheduler is suspended, so step no more than
+         * expected-1 ticks here. */
+        let ullCountsSinceTickBoundary =
+            (ulTimerCountsForOneTick - ulTimerDecrementsLeft) as u64 + ullSleepElapsedCounts;
+        let mut ulCompletedTicks = ullCountsSinceTickBoundary / ulTimerCountsForOneTick as u64;
+        if xTimerExpired {
+            ulCompletedTicks =
+                core::cmp::min(ulCompletedTicks, xExpectedIdleTime.saturating_sub(1) as u64);
+        }
 
         // Step the tick count forward
         if ulCompletedTicks > 0 {
+            // Safety: IRQs remain masked, the scheduler is suspended, and the
+            // completed interval was capped below the next unblock deadline.
             crate::kernel::tasks::vTaskStepTick(ulCompletedTicks as TickType_t);
         }
 
         // Calculate remaining counts until next tick
-        let ulRemainingCounts =
-            ulTimerCountsForOneTick - (ulElapsedCounts % ulTimerCountsForOneTick);
+        let ulTickPhase = (ullCountsSinceTickBoundary % ulTimerCountsForOneTick as u64) as u32;
+        let ulRemainingCounts = if ulTickPhase == 0 {
+            ulTimerCountsForOneTick
+        } else {
+            ulTimerCountsForOneTick - ulTickPhase
+        };
+        let ulFirstReloadValue = ulRemainingCounts.saturating_sub(1).max(1);
 
-        // Reload timer for normal operation
-        core::ptr::write_volatile(timer_load, ulRemainingCounts);
+        /* LOAD schedules the partial first interval. As above, enable before
+         * BGLOAD so QEMU does not replace that current interval. */
+        core::ptr::write_volatile(timer_load, ulFirstReloadValue);
         core::ptr::write_volatile(timer_intclr, 1);
         core::ptr::write_volatile(
             timer_control,
             SP804_CTRL_ENABLE | SP804_CTRL_PERIODIC | SP804_CTRL_INTENABLE | SP804_CTRL_32BIT,
         );
+        core::ptr::write_volatile(timer_bgload, ulPeriodicReloadValue);
 
         // Re-enable interrupts
         core::arch::asm!("cpsie i", options(nomem, nostack));

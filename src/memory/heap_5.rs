@@ -45,7 +45,9 @@
 use core::ffi::c_void;
 use core::ptr;
 
-use crate::kernel::tasks::{vTaskSuspendAll, xTaskResumeAll};
+use crate::kernel::tasks::{
+    taskENTER_CRITICAL, taskEXIT_CRITICAL, vTaskSuspendAll, xTaskResumeAll,
+};
 use crate::port::portBYTE_ALIGNMENT;
 
 // =============================================================================
@@ -110,10 +112,11 @@ pub struct HeapRegion {
 }
 
 impl HeapRegion {
-    /// Create a new heap region descriptor
+    /// Create a new heap region descriptor.
     ///
-    /// # Safety
-    /// The memory region must be valid and not used for any other purpose.
+    /// Constructing a descriptor does not inspect or dereference `start`.
+    /// Region validity and exclusivity become safety requirements only when
+    /// the descriptor is passed to [`vPortDefineHeapRegions`].
     pub const fn new(start: *mut u8, size: usize) -> Self {
         HeapRegion {
             puc_start_address: start,
@@ -211,10 +214,11 @@ fn prv_region_bounds(region: &HeapRegion) -> Option<(usize, usize, usize)> {
 /// Regions must be provided in ascending address order.
 ///
 /// # Safety
-/// - Each region must point to valid, unused memory
-/// - Regions must not overlap
-/// - Regions must be in ascending address order
-/// - This function must only be called once
+/// - Every non-empty region must be a valid, writable, non-wrapping byte range
+///   reserved exclusively for this allocator until the heap is reset.
+/// - Regions must not overlap and must be in strictly ascending address order.
+/// - No allocator operation may run concurrently with initialization.
+/// - This function must only be called once between heap resets.
 ///
 /// # Example
 /// ```ignore
@@ -368,8 +372,11 @@ unsafe fn prv_insert_block_into_free_list(px_block_to_insert: *mut BlockLink) {
 /// than needed.
 ///
 /// # Safety
-/// - `vPortDefineHeapRegions` must have been called first
-/// - The returned pointer must be freed with [`vPortFree`]
+///
+/// [`vPortDefineHeapRegions`] must have initialized valid regions and the
+/// port's scheduler-suspension primitives must be usable in the current task
+/// context. A non-null result designates exactly `x_wanted_size` writable,
+/// uninitialized bytes and must be passed exactly once to [`vPortFree`].
 pub unsafe fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void {
     let mut pv_return: *mut c_void = ptr::null_mut();
     let mut x_wanted_size = x_wanted_size;
@@ -436,8 +443,12 @@ pub unsafe fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void {
                     // Update our block size
                     (*px_block).xBlockSize = x_wanted_size;
 
-                    // Insert remainder back into free list
-                    prv_insert_block_into_free_list(px_new_block);
+                    /* Insert the remainder directly at the removed block's
+                     * former position.  Do not run coalescing here: upstream
+                     * deliberately preserves the zero-sized link marker at an
+                     * intermediate heap_5 region boundary. */
+                    (*px_new_block).pxNextFreeBlock = (*px_previous_block).pxNextFreeBlock;
+                    (*px_previous_block).pxNextFreeBlock = px_new_block;
                 }
 
                 // Update stats
@@ -463,7 +474,10 @@ pub unsafe fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void {
 /// Returns the block to the free list and coalesces with adjacent free blocks.
 ///
 /// # Safety
-/// `pv` must have been returned by [`pvPortMalloc`] and not yet freed.
+///
+/// Apart from null, `pv` must be the live pointer returned by this heap's
+/// [`pvPortMalloc`] or [`pvPortCalloc`], must not have been freed already, and
+/// no pointer derived from the allocation may be accessed after this call.
 pub unsafe fn vPortFree(pv: *mut c_void) {
     if pv.is_null() {
         return;
@@ -518,7 +532,13 @@ pub fn xPortResetHeapMinimumEverFreeHeapSize() {
     }
 }
 
-/// Allocate and zero memory
+/// Allocate and zero memory.
+///
+/// # Safety
+///
+/// The same initialization and port requirements as [`pvPortMalloc`] apply. A
+/// non-null result owns exactly `x_num * x_size` writable zeroed bytes and must
+/// be passed exactly once to [`vPortFree`].
 pub unsafe fn pvPortCalloc(x_num: usize, x_size: usize) -> *mut c_void {
     let total = match x_num.checked_mul(x_size) {
         Some(t) => t,
@@ -532,8 +552,17 @@ pub unsafe fn pvPortCalloc(x_num: usize, x_size: usize) -> *mut c_void {
     pv
 }
 
-/// Get detailed heap statistics
-pub fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
+/// Get detailed heap statistics.
+///
+/// # Safety
+///
+/// `px_heap_stats` must be non-null, aligned, and valid for one complete
+/// `HeapStats_t` write, with no conflicting access for the duration.
+pub unsafe fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
+    if px_heap_stats.is_null() {
+        return;
+    }
+
     let mut x_blocks: usize = 0;
     let mut x_max_size: usize = 0;
     let mut x_min_size: usize = usize::MAX;
@@ -566,16 +595,17 @@ pub fn vPortGetHeapStats(px_heap_stats: *mut super::HeapStats_t) {
         xTaskResumeAll();
 
         (*px_heap_stats).xSizeOfLargestFreeBlockInBytes = x_max_size;
-        (*px_heap_stats).xSizeOfSmallestFreeBlockInBytes = if x_min_size != usize::MAX {
-            x_min_size
-        } else {
-            0
-        };
+        (*px_heap_stats).xSizeOfSmallestFreeBlockInBytes = x_min_size;
         (*px_heap_stats).xNumberOfFreeBlocks = x_blocks;
+
+        /* Snapshot counters atomically with respect to allocator operations,
+         * matching the critical section in upstream heap_5.c. */
+        taskENTER_CRITICAL();
         (*px_heap_stats).xAvailableHeapSpaceInBytes = X_FREE_BYTES_REMAINING;
         (*px_heap_stats).xNumberOfSuccessfulAllocations = X_NUMBER_OF_SUCCESSFUL_ALLOCATIONS;
         (*px_heap_stats).xNumberOfSuccessfulFrees = X_NUMBER_OF_SUCCESSFUL_FREES;
         (*px_heap_stats).xMinimumEverFreeBytesRemaining = X_MINIMUM_EVER_FREE_BYTES_REMAINING;
+        taskEXIT_CRITICAL();
     }
 }
 
@@ -584,8 +614,15 @@ pub fn vPortInitialiseBlocks() {
     // No-op - use vPortDefineHeapRegions to initialize
 }
 
-/// Reset heap state (for scheduler restart)
-pub fn vPortHeapResetState() {
+/// Reset heap state for a scheduler restart.
+///
+/// # Safety
+///
+/// There must be no live allocations, no allocator operation may be in
+/// progress, and the scheduler must be stopped. Every pointer previously
+/// returned by this heap becomes invalid for allocator operations, and the
+/// backing regions may only be reused after this call.
+pub unsafe fn vPortHeapResetState() {
     unsafe {
         X_START.pxNextFreeBlock = ptr::null_mut();
         PX_END = ptr::null_mut();
@@ -604,7 +641,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 /// Global allocator that wraps FreeRTOS heap_5
 ///
-/// [AMENDMENT] This allows Rust's `alloc` crate (Vec, Box, etc.) to use
+/// \[AMENDMENT\] This allows Rust's `alloc` crate (Vec, Box, etc.) to use
 /// the FreeRTOS heap_5 allocator. Applications must call `vPortDefineHeapRegions`
 /// before any allocations, then add:
 ///
@@ -620,7 +657,7 @@ const GLOBAL_ALLOC_HEADER_SIZE: usize = core::mem::size_of::<*mut u8>();
 /// Allocate a Rust `Layout` from heap_5 while retaining the original pointer
 /// immediately before the aligned result for `dealloc`.
 ///
-/// [AMENDMENT] `pvPortMalloc` only promises `portBYTE_ALIGNMENT`. Rust's
+/// \[AMENDMENT\] `pvPortMalloc` only promises `portBYTE_ALIGNMENT`. Rust's
 /// `GlobalAlloc` contract permits callers to request a larger alignment, so an
 /// over-allocation and an unaligned metadata write are required here.
 unsafe fn prv_alloc_layout(layout: Layout) -> *mut u8 {

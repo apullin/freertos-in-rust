@@ -1,295 +1,612 @@
-//! Safe MessageBuffer wrapper
+//! Safe byte-oriented message-buffer wrapper.
 //!
-//! Provides a safe wrapper around FreeRTOS message buffers.
-//! Message buffers transfer discrete, variable-length messages
-//! (unlike stream buffers which transfer continuous byte streams).
+//! FreeRTOS message buffers transfer complete, variable-length byte messages
+//! and support exactly one producer and one consumer.  The
+//! [`MessageBuffer::split`] API represents those roles as distinct, non-clone
+//! capabilities.  Neither the owner nor its endpoints is `Sync`.
 //!
-//! **Important**: Message buffers assume a single writer and single reader.
-//! Multiple writers or readers require external synchronization.
+//! This wrapper deliberately does not reinterpret arbitrary Rust values as
+//! bytes.  `T: Copy` does not guarantee that every bit pattern is valid or that
+//! a type contains no references or padding.  Serialize typed values into a
+//! defined byte representation before sending them.
 
+use core::cell::Cell;
 use core::ffi::c_void;
-use core::mem::{size_of, MaybeUninit};
+use core::marker::PhantomData;
+use core::mem::size_of;
 
-use crate::kernel::stream_buffer::{
-    sbTYPE_MESSAGE_BUFFER, xStreamBufferBytesAvailable, xStreamBufferGenericCreateStatic,
-    xStreamBufferIsEmpty, xStreamBufferIsFull, xStreamBufferNextMessageLengthBytes,
-    xStreamBufferReceive, xStreamBufferReset, xStreamBufferSend, xStreamBufferSpacesAvailable,
-    StaticStreamBuffer_t, StreamBufferHandle_t,
-};
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 use crate::kernel::stream_buffer::xStreamBufferGenericCreate;
+use crate::kernel::stream_buffer::{
+    configMESSAGE_BUFFER_LENGTH_TYPE, sbTYPE_MESSAGE_BUFFER, vStreamBufferDelete,
+    xStreamBufferBytesAvailable, xStreamBufferGenericCreateStatic, xStreamBufferIsEmpty,
+    xStreamBufferIsFull, xStreamBufferNextMessageLengthBytes, xStreamBufferReceive,
+    xStreamBufferReceiveFromISR, xStreamBufferReset, xStreamBufferResetFromISR, xStreamBufferSend,
+    xStreamBufferSendFromISR, xStreamBufferSpacesAvailable, StaticStreamBuffer_t,
+    StreamBufferHandle_t,
+};
+use crate::sync::task::TaskContext;
+use crate::sync::{assert_can_block, assert_task_context};
 use crate::types::*;
 
-/// A message buffer for transferring discrete, variable-length messages.
+const MESSAGE_LENGTH_BYTES: usize = size_of::<configMESSAGE_BUFFER_LENGTH_TYPE>();
+
+/// An owned, single-producer/single-consumer byte-message channel.
 ///
-/// Unlike `StreamBuffer` which handles continuous byte streams, `MessageBuffer`
-/// transfers complete messages. Each message is stored with a length prefix,
-/// and receivers always get complete messages (never partial).
+/// Use the methods on this type when one task owns both sides. To transfer
+/// messages between two execution contexts, call [`Self::split`] and move the
+/// endpoints to the producer and consumer respectively.
 ///
-/// # Single Producer / Single Consumer
+/// The wrapper is `Send` but intentionally not `Sync`.
 ///
-/// Message buffers are designed for one writer and one reader. If you need
-/// multiple writers or readers, protect access with a mutex.
+/// ```compile_fail
+/// use freertos_in_rust::sync::MessageBuffer;
 ///
-/// # Message Size
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<MessageBuffer>();
+/// ```
 ///
-/// Each message has a 4-byte length overhead. The buffer size must be large
-/// enough to hold at least one complete message plus its length prefix.
+/// ```compile_fail
+/// use freertos_in_rust::sync::MessageBuffer;
+///
+/// fn arbitrary_values_are_not_messages(buffer: &mut MessageBuffer) {
+///     buffer.send_val(&true);
+/// }
+/// ```
 pub struct MessageBuffer {
     handle: StreamBufferHandle_t,
+    capacity: usize,
+    _not_sync: PhantomData<Cell<()>>,
 }
 
-// Safety: MessageBuffer handles can be shared between tasks
-// (though only one should write and one should read)
-unsafe impl Sync for MessageBuffer {}
+// SAFETY: Moving the unique owner to another task does not access the buffer.
+// Concurrent access is available only through the partitioned endpoints below.
 unsafe impl Send for MessageBuffer {}
 
+/// The sole producer endpoint of a [`MessageBuffer`].
+///
+/// This endpoint is `Send` but intentionally neither `Clone` nor `Sync`.
+pub struct MessageBufferSender<'a> {
+    handle: StreamBufferHandle_t,
+    capacity: usize,
+    _owner: PhantomData<&'a mut MessageBuffer>,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+// SAFETY: A sender is a unique capability, and FreeRTOS permits its single
+// producer to move between tasks. It cannot be shared by safe Rust code.
+unsafe impl Send for MessageBufferSender<'_> {}
+
+/// The sole consumer endpoint of a [`MessageBuffer`].
+///
+/// This endpoint is `Send` but intentionally neither `Clone` nor `Sync`.
+pub struct MessageBufferReceiver<'a> {
+    handle: StreamBufferHandle_t,
+    capacity: usize,
+    _owner: PhantomData<&'a mut MessageBuffer>,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+// SAFETY: A receiver is a unique capability, and FreeRTOS permits its single
+// consumer to move between tasks. It cannot be shared by safe Rust code.
+unsafe impl Send for MessageBufferReceiver<'_> {}
+
 impl MessageBuffer {
-    /// Creates a new message buffer.
+    /// Creates a dynamically allocated message buffer.
     ///
-    /// # Arguments
+    /// `size` is the usable ring capacity, including the length prefix stored
+    /// for each message. A message can contain at most
+    /// `size - size_of::<configMESSAGE_BUFFER_LENGTH_TYPE>()` bytes. Returns
+    /// `None` when the size cannot hold a nonempty message, arithmetic
+    /// overflows, or allocation fails.
     ///
-    /// * `size` - Buffer capacity in bytes (must fit at least one message + 4 bytes overhead)
-    ///
-    /// Returns `None` if creation failed (e.g., out of memory).
+    /// This is a task-context operation; do not allocate a buffer in an ISR.
     #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
-    pub fn new(size: usize) -> Option<Self> {
+    pub fn new(_context: &TaskContext, size: usize) -> Option<Self> {
+        assert_task_context("MessageBuffer::new");
+        if size <= MESSAGE_LENGTH_BYTES || size.checked_add(1).is_none() {
+            return None;
+        }
+
         let handle =
             unsafe { xStreamBufferGenericCreate(size, 1, sbTYPE_MESSAGE_BUFFER, None, None) };
-        if handle.is_null() {
-            None
-        } else {
-            Some(Self { handle })
-        }
+        Self::from_created_handle(handle, size)
     }
 
-    /// Creates a message buffer using static storage.
+    /// Creates a message buffer in caller-provided static storage.
     ///
-    /// # Arguments
-    ///
-    /// * `storage` - Static byte buffer for messages (must hold at least one message + 4 bytes)
-    /// * `msg_buffer` - Static control structure
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use freertos_in_rust::sync::MessageBuffer;
-    /// use freertos_in_rust::kernel::stream_buffer::StaticStreamBuffer_t;
-    ///
-    /// static mut STORAGE: [u8; 256] = [0; 256];
-    /// static mut MB_BUF: StaticStreamBuffer_t = StaticStreamBuffer_t::new();
-    ///
-    /// let msgs = MessageBuffer::new_static(
-    ///     unsafe { &mut STORAGE },
-    ///     unsafe { &mut MB_BUF },
-    /// ).expect("Failed to create message buffer");
-    /// ```
+    /// FreeRTOS reserves one byte of static storage to distinguish full from
+    /// empty. The usable capacity is therefore `storage.len() - 1`, and that
+    /// capacity must exceed the message-length prefix size so at least one data
+    /// byte can be stored.
     pub fn new_static(
+        _context: &TaskContext,
         storage: &'static mut [u8],
-        msg_buffer: &'static mut StaticStreamBuffer_t,
+        message_buffer: &'static mut StaticStreamBuffer_t,
     ) -> Option<Self> {
+        assert_task_context("MessageBuffer::new_static");
+        let capacity = storage.len().checked_sub(1)?;
+        if capacity <= MESSAGE_LENGTH_BYTES {
+            return None;
+        }
+
         let handle = unsafe {
             xStreamBufferGenericCreateStatic(
                 storage.len(),
-                1, // trigger level (1 for message buffers)
+                1,
                 sbTYPE_MESSAGE_BUFFER,
                 storage.as_mut_ptr(),
-                msg_buffer as *mut StaticStreamBuffer_t,
+                message_buffer as *mut StaticStreamBuffer_t,
                 None,
                 None,
             )
         };
+        Self::from_created_handle(handle, capacity)
+    }
+
+    fn from_created_handle(handle: StreamBufferHandle_t, capacity: usize) -> Option<Self> {
         if handle.is_null() {
             None
         } else {
-            Some(Self { handle })
+            Some(Self {
+                handle,
+                capacity,
+                _not_sync: PhantomData,
+            })
         }
     }
 
-    // =========================================================================
-    // Send
-    // =========================================================================
-
-    /// Sends a message to the buffer, blocking until space is available.
+    /// Splits the buffer into its unique producer and consumer capabilities.
     ///
-    /// Returns `true` if the message was sent, `false` if it couldn't fit
-    /// (message larger than buffer capacity).
-    pub fn send(&self, data: &[u8]) -> bool {
-        self.send_timeout(data, portMAX_DELAY)
+    /// The owner remains borrowed until both endpoints are dropped. This also
+    /// prevents resetting or deleting the buffer while a safe endpoint exists.
+    pub fn split(&mut self) -> (MessageBufferSender<'_>, MessageBufferReceiver<'_>) {
+        (
+            MessageBufferSender {
+                handle: self.handle,
+                capacity: self.capacity,
+                _owner: PhantomData,
+                _not_sync: PhantomData,
+            },
+            MessageBufferReceiver {
+                handle: self.handle,
+                capacity: self.capacity,
+                _owner: PhantomData,
+                _not_sync: PhantomData,
+            },
+        )
     }
 
-    /// Attempts to send a message without blocking.
+    /// Returns the usable ring capacity, including message prefixes.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns the largest message payload that can fit in an empty buffer.
+    pub const fn max_message_size(&self) -> usize {
+        self.capacity - MESSAGE_LENGTH_BYTES
+    }
+
+    /// Sends one complete message from task context, waiting indefinitely.
     ///
-    /// Returns `true` if sent, `false` if no space or message too large.
-    pub fn try_send(&self, data: &[u8]) -> bool {
-        self.send_timeout(data, 0)
+    /// Empty messages are rejected. This method must not be called from an ISR.
+    pub fn send(&mut self, _context: &TaskContext, data: &[u8]) -> bool {
+        send_task(self.handle, self.capacity, data, portMAX_DELAY)
     }
 
-    /// Sends a message with a timeout.
+    /// Attempts a nonblocking send from task context.
     ///
-    /// Returns `true` if the message was sent within the timeout.
-    /// Returns `false` if timeout elapsed or message too large for buffer.
-    pub fn send_timeout(&self, data: &[u8], ticks: TickType_t) -> bool {
-        if data.is_empty() {
-            return false;
-        }
-        let sent = unsafe {
-            xStreamBufferSend(
-                self.handle,
-                data.as_ptr() as *const c_void,
-                data.len(),
-                ticks,
-            )
-        };
-        // For message buffers, it's all-or-nothing
-        sent == data.len()
+    /// This still uses the task-context API. Use [`Self::send_from_isr`] from an
+    /// interrupt handler.
+    pub fn try_send(&mut self, _context: &TaskContext, data: &[u8]) -> bool {
+        send_task(self.handle, self.capacity, data, 0)
     }
 
-    // =========================================================================
-    // Typed Send
-    // =========================================================================
-
-    /// Sends a typed value as a message, blocking until space is available.
+    /// Sends one complete message from task context, waiting at most `ticks`.
     ///
-    /// The value is sent as its raw bytes representation.
-    pub fn send_val<T: Copy>(&self, value: &T) -> bool {
-        self.send_val_timeout(value, portMAX_DELAY)
+    /// Returns `false` for an empty/oversized message or if the timeout elapses.
+    pub fn send_timeout(&mut self, _context: &TaskContext, data: &[u8], ticks: TickType_t) -> bool {
+        send_task(self.handle, self.capacity, data, ticks)
     }
 
-    /// Attempts to send a typed value without blocking.
-    pub fn try_send_val<T: Copy>(&self, value: &T) -> bool {
-        self.send_val_timeout(value, 0)
-    }
-
-    /// Sends a typed value with a timeout.
-    pub fn send_val_timeout<T: Copy>(&self, value: &T, ticks: TickType_t) -> bool {
-        let data =
-            unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) };
-        self.send_timeout(data, ticks)
-    }
-
-    // =========================================================================
-    // Receive
-    // =========================================================================
-
-    /// Receives a message from the buffer, blocking until one is available.
+    /// Performs a nonblocking send from interrupt context.
     ///
-    /// Returns the number of bytes received, or 0 if the provided buffer
-    /// is too small for the message (message remains in buffer).
-    pub fn receive(&self, buf: &mut [u8]) -> usize {
-        self.receive_timeout(buf, portMAX_DELAY)
-    }
-
-    /// Attempts to receive a message without blocking.
+    /// Returns `(message_sent, higher_priority_task_woken)`. If the second
+    /// value is true, request a context switch using the active port's ISR
+    /// yield mechanism before returning from the interrupt.
     ///
-    /// Returns the number of bytes received, or 0 if no message available
-    /// or buffer too small.
-    pub fn try_receive(&self, buf: &mut [u8]) -> usize {
-        self.receive_timeout(buf, 0)
-    }
-
-    /// Receives a message with a timeout.
+    /// # Safety
     ///
-    /// Returns the number of bytes received, or 0 if timeout elapsed
-    /// or buffer too small for the waiting message.
-    pub fn receive_timeout(&self, buf: &mut [u8], ticks: TickType_t) -> usize {
-        if buf.is_empty() {
-            return 0;
-        }
-        unsafe {
-            xStreamBufferReceive(
-                self.handle,
-                buf.as_mut_ptr() as *mut c_void,
-                buf.len(),
-                ticks,
-            )
-        }
+    /// The caller must be executing in an ISR at a priority from which
+    /// FreeRTOS system calls are permitted. This value must be the interrupt's
+    /// sole producer; it must not race a task-context producer.
+    pub unsafe fn send_from_isr(&mut self, data: &[u8]) -> (bool, bool) {
+        unsafe { send_isr(self.handle, self.capacity, data) }
     }
 
-    // =========================================================================
-    // Typed Receive
-    // =========================================================================
-
-    /// Receives a message as a typed value, blocking until one is available.
+    /// Receives one complete message in task context, waiting indefinitely.
     ///
-    /// Returns `Some(value)` if a message of exactly `size_of::<T>()` bytes
-    /// was received, `None` otherwise.
-    pub fn receive_val<T: Copy>(&self) -> Option<T> {
-        self.receive_val_timeout(portMAX_DELAY)
+    /// Returns zero and leaves the message queued when `output` is too small.
+    /// This method must not be called from an ISR.
+    pub fn receive(&mut self, _context: &TaskContext, output: &mut [u8]) -> usize {
+        receive_task(self.handle, output, portMAX_DELAY)
     }
 
-    /// Attempts to receive a typed value without blocking.
-    pub fn try_receive_val<T: Copy>(&self) -> Option<T> {
-        self.receive_val_timeout(0)
-    }
-
-    /// Receives a typed value with a timeout.
+    /// Attempts a nonblocking receive from task context.
     ///
-    /// Returns `Some(value)` if a message of exactly `size_of::<T>()` bytes
-    /// was received within the timeout, `None` otherwise.
-    pub fn receive_val_timeout<T: Copy>(&self, ticks: TickType_t) -> Option<T> {
-        let mut value = MaybeUninit::<T>::uninit();
-        let received = unsafe {
-            xStreamBufferReceive(
-                self.handle,
-                value.as_mut_ptr() as *mut c_void,
-                size_of::<T>(),
-                ticks,
-            )
-        };
-        if received == size_of::<T>() {
-            Some(unsafe { value.assume_init() })
-        } else {
-            None
-        }
+    /// This still uses the task-context API. Use [`Self::receive_from_isr`]
+    /// from an interrupt handler.
+    pub fn try_receive(&mut self, _context: &TaskContext, output: &mut [u8]) -> usize {
+        receive_task(self.handle, output, 0)
     }
 
-    // =========================================================================
-    // Query
-    // =========================================================================
+    /// Receives one complete message in task context, waiting at most `ticks`.
+    pub fn receive_timeout(
+        &mut self,
+        _context: &TaskContext,
+        output: &mut [u8],
+        ticks: TickType_t,
+    ) -> usize {
+        receive_task(self.handle, output, ticks)
+    }
 
-    /// Returns the size of the next message in bytes, or 0 if empty.
+    /// Performs a nonblocking receive from interrupt context.
     ///
-    /// Use this to check if your receive buffer is large enough before
-    /// calling `receive()`.
-    pub fn next_message_size(&self) -> usize {
-        unsafe { xStreamBufferNextMessageLengthBytes(self.handle) }
-    }
-
-    /// Returns the total bytes used (including message length prefixes).
-    pub fn bytes_used(&self) -> usize {
-        unsafe { xStreamBufferBytesAvailable(self.handle) }
-    }
-
-    /// Returns the number of bytes of free space.
-    pub fn spaces(&self) -> usize {
-        unsafe { xStreamBufferSpacesAvailable(self.handle) }
-    }
-
-    /// Returns `true` if the buffer is empty (no messages).
-    pub fn is_empty(&self) -> bool {
-        unsafe { xStreamBufferIsEmpty(self.handle) != pdFALSE }
-    }
-
-    /// Returns `true` if the buffer is full.
-    pub fn is_full(&self) -> bool {
-        unsafe { xStreamBufferIsFull(self.handle) != pdFALSE }
-    }
-
-    // =========================================================================
-    // Control
-    // =========================================================================
-
-    /// Resets the buffer to empty state.
+    /// Returns `(bytes_received, higher_priority_task_woken)`.
     ///
-    /// Returns `true` if reset succeeded, `false` if tasks are blocked
-    /// on the buffer (cannot reset while tasks are waiting).
-    pub fn reset(&self) -> bool {
+    /// # Safety
+    ///
+    /// The caller must be executing in an ISR at a priority from which
+    /// FreeRTOS system calls are permitted. This value must be the interrupt's
+    /// sole consumer; it must not race a task-context consumer.
+    pub unsafe fn receive_from_isr(&mut self, output: &mut [u8]) -> (usize, bool) {
+        unsafe { receive_isr(self.handle, output) }
+    }
+
+    /// Returns the next message's payload size, or zero when empty.
+    pub fn next_message_size(&self, _context: &TaskContext) -> usize {
+        assert_task_context("MessageBuffer::next_message_size");
+        next_message_size(self.handle)
+    }
+
+    /// Returns bytes currently used, including message-length prefixes.
+    pub fn bytes_used(&self, _context: &TaskContext) -> usize {
+        assert_task_context("MessageBuffer::bytes_used");
+        bytes_used(self.handle)
+    }
+
+    /// Returns the number of free bytes in the ring.
+    pub fn spaces(&self, _context: &TaskContext) -> usize {
+        assert_task_context("MessageBuffer::spaces");
+        spaces(self.handle)
+    }
+
+    /// Returns `true` if no message is queued.
+    pub fn is_empty(&self, _context: &TaskContext) -> bool {
+        assert_task_context("MessageBuffer::is_empty");
+        is_empty(self.handle)
+    }
+
+    /// Returns `true` when no nonempty message can be added.
+    pub fn is_full(&self, _context: &TaskContext) -> bool {
+        assert_task_context("MessageBuffer::is_full");
+        is_full(self.handle)
+    }
+
+    /// Resets the buffer from task context.
+    ///
+    /// Returns `false` if a task is blocked on the buffer.
+    pub fn reset(&mut self, _context: &TaskContext) -> bool {
+        assert_task_context("MessageBuffer::reset");
         unsafe { xStreamBufferReset(self.handle) == pdPASS }
     }
 
-    /// Returns the raw FreeRTOS handle for interop.
+    /// Resets the buffer from interrupt context.
+    ///
+    /// # Safety
+    ///
+    /// The caller must be in an ISR at a FreeRTOS-compatible priority, and no
+    /// operation may be in progress through an unsafe copy of the raw handle.
+    pub unsafe fn reset_from_isr(&mut self) -> bool {
+        unsafe { xStreamBufferResetFromISR(self.handle) == pdPASS }
+    }
+
+    /// Deletes the underlying FreeRTOS object and consumes the owner.
+    ///
+    /// Dynamic buffers are freed; static control storage is cleared. Buffers
+    /// are not implicitly deleted on `Drop`, because an arbitrary Rust drop
+    /// site cannot prove it is a valid FreeRTOS task context.
+    ///
+    /// # Safety
+    ///
+    /// Call this only from task context when no task or ISR is using or blocked
+    /// on the buffer, including through copies obtained from [`Self::raw_handle`].
+    pub unsafe fn delete(self, _context: &TaskContext) {
+        unsafe { vStreamBufferDelete(self.handle) };
+    }
+
+    /// Returns the raw FreeRTOS handle for low-level interoperation.
+    ///
+    /// # Safety
+    ///
+    /// The caller must preserve this wrapper's unique-producer,
+    /// unique-consumer, lifetime, and execution-context invariants.
     pub unsafe fn raw_handle(&self) -> StreamBufferHandle_t {
         self.handle
+    }
+}
+
+impl MessageBufferSender<'_> {
+    /// Returns the usable ring capacity, including message prefixes.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns the largest message payload that can fit in an empty buffer.
+    pub const fn max_message_size(&self) -> usize {
+        self.capacity - MESSAGE_LENGTH_BYTES
+    }
+
+    /// Sends one complete message from task context, waiting indefinitely.
+    pub fn send(&mut self, _context: &TaskContext, data: &[u8]) -> bool {
+        send_task(self.handle, self.capacity, data, portMAX_DELAY)
+    }
+
+    /// Attempts a nonblocking send from task context.
+    pub fn try_send(&mut self, _context: &TaskContext, data: &[u8]) -> bool {
+        send_task(self.handle, self.capacity, data, 0)
+    }
+
+    /// Sends one complete message from task context, waiting at most `ticks`.
+    pub fn send_timeout(&mut self, _context: &TaskContext, data: &[u8], ticks: TickType_t) -> bool {
+        send_task(self.handle, self.capacity, data, ticks)
+    }
+
+    /// Performs a nonblocking send from interrupt context.
+    ///
+    /// Returns `(message_sent, higher_priority_task_woken)`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must be in an ISR at a FreeRTOS-compatible priority. This
+    /// endpoint must be the ISR's sole producer and must not also be used by a
+    /// task-context producer.
+    pub unsafe fn send_from_isr(&mut self, data: &[u8]) -> (bool, bool) {
+        unsafe { send_isr(self.handle, self.capacity, data) }
+    }
+
+    /// Returns the number of free bytes in the ring.
+    pub fn spaces(&self, _context: &TaskContext) -> usize {
+        assert_task_context("MessageBufferSender::spaces");
+        spaces(self.handle)
+    }
+
+    /// Returns `true` when no nonempty message can be added.
+    pub fn is_full(&self, _context: &TaskContext) -> bool {
+        assert_task_context("MessageBufferSender::is_full");
+        is_full(self.handle)
+    }
+}
+
+impl MessageBufferReceiver<'_> {
+    /// Returns the usable ring capacity, including message prefixes.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns the largest message payload that can fit in an empty buffer.
+    pub const fn max_message_size(&self) -> usize {
+        self.capacity - MESSAGE_LENGTH_BYTES
+    }
+
+    /// Receives one complete message in task context, waiting indefinitely.
+    pub fn receive(&mut self, _context: &TaskContext, output: &mut [u8]) -> usize {
+        receive_task(self.handle, output, portMAX_DELAY)
+    }
+
+    /// Attempts a nonblocking receive from task context.
+    pub fn try_receive(&mut self, _context: &TaskContext, output: &mut [u8]) -> usize {
+        receive_task(self.handle, output, 0)
+    }
+
+    /// Receives one complete message in task context, waiting at most `ticks`.
+    pub fn receive_timeout(
+        &mut self,
+        _context: &TaskContext,
+        output: &mut [u8],
+        ticks: TickType_t,
+    ) -> usize {
+        receive_task(self.handle, output, ticks)
+    }
+
+    /// Performs a nonblocking receive from interrupt context.
+    ///
+    /// Returns `(bytes_received, higher_priority_task_woken)`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must be in an ISR at a FreeRTOS-compatible priority. This
+    /// endpoint must be the ISR's sole consumer and must not also be used by a
+    /// task-context consumer.
+    pub unsafe fn receive_from_isr(&mut self, output: &mut [u8]) -> (usize, bool) {
+        unsafe { receive_isr(self.handle, output) }
+    }
+
+    /// Returns the next message's payload size, or zero when empty.
+    pub fn next_message_size(&self, _context: &TaskContext) -> usize {
+        assert_task_context("MessageBufferReceiver::next_message_size");
+        next_message_size(self.handle)
+    }
+
+    /// Returns bytes currently used, including message-length prefixes.
+    pub fn bytes_used(&self, _context: &TaskContext) -> usize {
+        assert_task_context("MessageBufferReceiver::bytes_used");
+        bytes_used(self.handle)
+    }
+
+    /// Returns `true` if no message is queued.
+    pub fn is_empty(&self, _context: &TaskContext) -> bool {
+        assert_task_context("MessageBufferReceiver::is_empty");
+        is_empty(self.handle)
+    }
+}
+
+fn message_fits(capacity: usize, data_len: usize) -> bool {
+    data_len != 0
+        && data_len
+            .checked_add(MESSAGE_LENGTH_BYTES)
+            .is_some_and(|required| required <= capacity)
+}
+
+fn send_task(
+    handle: StreamBufferHandle_t,
+    capacity: usize,
+    data: &[u8],
+    ticks: TickType_t,
+) -> bool {
+    assert_can_block("MessageBuffer::send", ticks);
+    if !message_fits(capacity, data.len()) {
+        return false;
+    }
+    unsafe {
+        xStreamBufferSend(handle, data.as_ptr().cast::<c_void>(), data.len(), ticks) == data.len()
+    }
+}
+
+fn receive_task(handle: StreamBufferHandle_t, output: &mut [u8], ticks: TickType_t) -> usize {
+    assert_can_block("MessageBuffer::receive", ticks);
+    if output.is_empty() {
+        return 0;
+    }
+    unsafe {
+        xStreamBufferReceive(
+            handle,
+            output.as_mut_ptr().cast::<c_void>(),
+            output.len(),
+            ticks,
+        )
+    }
+}
+
+unsafe fn send_isr(handle: StreamBufferHandle_t, capacity: usize, data: &[u8]) -> (bool, bool) {
+    if !message_fits(capacity, data.len()) {
+        return (false, false);
+    }
+    let mut higher_priority_task_woken = pdFALSE;
+    let sent = unsafe {
+        xStreamBufferSendFromISR(
+            handle,
+            data.as_ptr().cast::<c_void>(),
+            data.len(),
+            &mut higher_priority_task_woken,
+        )
+    };
+    (sent == data.len(), higher_priority_task_woken != pdFALSE)
+}
+
+unsafe fn receive_isr(handle: StreamBufferHandle_t, output: &mut [u8]) -> (usize, bool) {
+    if output.is_empty() {
+        return (0, false);
+    }
+    let mut higher_priority_task_woken = pdFALSE;
+    let received = unsafe {
+        xStreamBufferReceiveFromISR(
+            handle,
+            output.as_mut_ptr().cast::<c_void>(),
+            output.len(),
+            &mut higher_priority_task_woken,
+        )
+    };
+    (received, higher_priority_task_woken != pdFALSE)
+}
+
+fn next_message_size(handle: StreamBufferHandle_t) -> usize {
+    unsafe { xStreamBufferNextMessageLengthBytes(handle) }
+}
+
+fn bytes_used(handle: StreamBufferHandle_t) -> usize {
+    unsafe { xStreamBufferBytesAvailable(handle) }
+}
+
+fn spaces(handle: StreamBufferHandle_t) -> usize {
+    unsafe { xStreamBufferSpacesAvailable(handle) }
+}
+
+fn is_empty(handle: StreamBufferHandle_t) -> bool {
+    unsafe { xStreamBufferIsEmpty(handle) != pdFALSE }
+}
+
+fn is_full(handle: StreamBufferHandle_t) -> bool {
+    unsafe { xStreamBufferIsFull(handle) != pdFALSE }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::boxed::Box;
+    use std::vec;
+
+    fn static_messages(context: &TaskContext, storage_len: usize) -> Option<MessageBuffer> {
+        let storage = Box::leak(vec![0_u8; storage_len].into_boxed_slice());
+        let control = Box::leak(Box::new(StaticStreamBuffer_t::new()));
+        MessageBuffer::new_static(context, storage, control)
+    }
+
+    #[test]
+    fn rejects_storage_that_cannot_hold_a_nonempty_message() {
+        crate::port::test_port_reset();
+        // SAFETY: this single-threaded test models pre-scheduler setup.
+        let context = unsafe { TaskContext::assume() };
+        assert!(static_messages(&context, 0).is_none());
+        assert!(static_messages(&context, MESSAGE_LENGTH_BYTES + 1).is_none());
+        assert!(static_messages(&context, MESSAGE_LENGTH_BYTES + 2).is_some());
+    }
+
+    #[test]
+    fn validates_message_size_before_calling_the_kernel() {
+        crate::port::test_port_reset();
+        // SAFETY: this single-threaded test models pre-scheduler setup.
+        let context = unsafe { TaskContext::assume() };
+        let mut messages = static_messages(&context, 16).expect("valid message buffer");
+        assert_eq!(messages.capacity(), 15);
+        assert_eq!(messages.max_message_size(), 15 - MESSAGE_LENGTH_BYTES);
+        assert!(!messages.try_send(&context, &[]));
+        assert!(!messages.try_send(&context, &[0_u8; 16]));
+
+        assert!(messages.try_send(&context, b"hello"));
+        assert_eq!(messages.next_message_size(&context), 5);
+        let mut too_small = [0_u8; 4];
+        assert_eq!(messages.try_receive(&context, &mut too_small), 0);
+        assert_eq!(messages.next_message_size(&context), 5);
+
+        let mut output = [0_u8; 5];
+        assert_eq!(messages.try_receive(&context, &mut output), 5);
+        assert_eq!(&output, b"hello");
+    }
+
+    #[test]
+    fn split_endpoints_preserve_message_boundaries() {
+        crate::port::test_port_reset();
+        // SAFETY: this single-threaded test models pre-scheduler task context.
+        let context = unsafe { TaskContext::assume() };
+        let mut messages = static_messages(&context, 32).expect("valid message buffer");
+        let (mut sender, mut receiver) = messages.split();
+        assert!(sender.try_send(&context, b"first"));
+        assert!(sender.try_send(&context, b"second"));
+
+        let mut output = [0_u8; 8];
+        assert_eq!(receiver.try_receive(&context, &mut output), 5);
+        assert_eq!(&output[..5], b"first");
+        assert_eq!(receiver.try_receive(&context, &mut output), 6);
+        assert_eq!(&output[..6], b"second");
+    }
+
+    #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+    #[test]
+    fn rejects_dynamic_size_overflow() {
+        crate::port::test_port_reset();
+        // SAFETY: this single-threaded test models pre-scheduler setup.
+        let context = unsafe { TaskContext::assume() };
+        assert!(MessageBuffer::new(&context, usize::MAX).is_none());
     }
 }

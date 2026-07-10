@@ -1,4 +1,4 @@
-# FreeRusTOS - FreeRTOS Kernel ported to Rust
+# FreeRTOS-in-Rust - FreeRTOS Kernel ported to Rust
 #
 # SPDX-License-Identifier: MIT
 #
@@ -9,10 +9,12 @@
 name = "freertos-in-rust"
 version = "0.2.0"
 edition = "2021"
-authors = ["FreeRusTOS Contributors"]
-description = "FreeRTOS kernel ported to Rust - no_std, no C FFI"
+authors = ["FreeRTOS-in-Rust Contributors"]
+description = "Pure-Rust no_std FreeRTOS kernel translation with safe Rust APIs"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/apullin/freertos-in-rust"
+documentation = "https://docs.rs/freertos-in-rust"
 keywords = ["rtos", "embedded", "no-std", "freertos"]
 categories = ["embedded", "no-std", "concurrency"]
 exclude = [
@@ -25,6 +27,7 @@ exclude = [
     "Cargo.toml.orig",
     "EXECPLAN.md",
     "FreeRTOS-Kernel/",
+    "hardware-tests/",
     "QUESTIONS.md",
     "demo/",
     "tests/",
@@ -53,8 +56,7 @@ port-test = ["std", "arch-32bit", "tick-32bit"]  # Deterministic host test port
 arch-32bit = []
 arch-64bit = []
 
-# Tick counter width for TickType_t
-tick-16bit = []
+# Tick counter width for TickType_t (selected by each supported port)
 tick-32bit = []
 tick-64bit = []
 
@@ -84,11 +86,9 @@ all-kernel-features = [
     "stream-buffers",
     "queue-sets",
     "queue-registry",
-    "posix-errno",
     "pend-function-call",
     "application-task-tag",
     "thread-local-storage",
-    "critical-nesting-in-tcb",
     "idle-yield",
     "stats-formatting",
     "generate-run-time-stats",
@@ -117,11 +117,9 @@ timers = []                   # configUSE_TIMERS
 stream-buffers = []           # configUSE_STREAM_BUFFERS
 queue-sets = []               # configUSE_QUEUE_SETS
 queue-registry = []           # configQUEUE_REGISTRY_SIZE > 0
-posix-errno = []              # configUSE_POSIX_ERRNO
 pend-function-call = []       # INCLUDE_xTimerPendFunctionCall
 application-task-tag = []     # configUSE_APPLICATION_TASK_TAG
 thread-local-storage = []     # configNUM_THREAD_LOCAL_STORAGE_POINTERS
-critical-nesting-in-tcb = []  # portCRITICAL_NESTING_IN_TCB
 idle-yield = []               # Yield in idle task
 stats-formatting = []         # configUSE_STATS_FORMATTING_FUNCTIONS
 generate-run-time-stats = []  # configGENERATE_RUN_TIME_STATS

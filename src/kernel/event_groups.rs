@@ -36,13 +36,12 @@
 #![allow(static_mut_refs)]
 
 use core::ffi::c_void;
-#[cfg(any(
-    feature = "alloc",
-    feature = "heap-4",
-    feature = "heap-5",
-    all(feature = "pend-function-call", feature = "timers")
-))]
 use core::ptr;
+#[cfg(not(feature = "tick-64bit"))]
+use core::sync::atomic::AtomicU32;
+#[cfg(feature = "tick-64bit")]
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::Ordering;
 
 use crate::config::*;
 use crate::kernel::list::*;
@@ -57,40 +56,28 @@ use crate::types::*;
 // =============================================================================
 
 /// Clear events on exit bit (stored in event list item value)
-#[cfg(feature = "tick-16bit")]
-pub const eventCLEAR_EVENTS_ON_EXIT_BIT: EventBits_t = 0x0100;
-
-#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
+#[cfg(not(feature = "tick-64bit"))]
 pub const eventCLEAR_EVENTS_ON_EXIT_BIT: EventBits_t = 0x0100_0000;
 
 #[cfg(feature = "tick-64bit")]
 pub const eventCLEAR_EVENTS_ON_EXIT_BIT: EventBits_t = 0x0100_0000_0000_0000;
 
 /// Bit set to indicate task was unblocked due to bit set (not timeout)
-#[cfg(feature = "tick-16bit")]
-pub const eventUNBLOCKED_DUE_TO_BIT_SET: EventBits_t = 0x0200;
-
-#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
+#[cfg(not(feature = "tick-64bit"))]
 pub const eventUNBLOCKED_DUE_TO_BIT_SET: EventBits_t = 0x0200_0000;
 
 #[cfg(feature = "tick-64bit")]
 pub const eventUNBLOCKED_DUE_TO_BIT_SET: EventBits_t = 0x0200_0000_0000_0000;
 
 /// Wait for all bits (AND vs OR wait condition)
-#[cfg(feature = "tick-16bit")]
-pub const eventWAIT_FOR_ALL_BITS: EventBits_t = 0x0400;
-
-#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
+#[cfg(not(feature = "tick-64bit"))]
 pub const eventWAIT_FOR_ALL_BITS: EventBits_t = 0x0400_0000;
 
 #[cfg(feature = "tick-64bit")]
 pub const eventWAIT_FOR_ALL_BITS: EventBits_t = 0x0400_0000_0000_0000;
 
 /// Mask for control bytes (top 8 bits of EventBits_t)
-#[cfg(feature = "tick-16bit")]
-pub const eventEVENT_BITS_CONTROL_BYTES: EventBits_t = 0xFF00;
-
-#[cfg(all(not(feature = "tick-16bit"), not(feature = "tick-64bit")))]
+#[cfg(not(feature = "tick-64bit"))]
 pub const eventEVENT_BITS_CONTROL_BYTES: EventBits_t = 0xFF00_0000;
 
 #[cfg(feature = "tick-64bit")]
@@ -103,6 +90,23 @@ pub const eventEVENT_BITS_CONTROL_BYTES: EventBits_t = 0xFF00_0000_0000_0000;
 /// EventBits_t is the same as TickType_t
 pub type EventBits_t = TickType_t;
 
+/// Atomic storage with the same width and layout as [`EventBits_t`].
+///
+/// Only atomic loads and stores are required. Task-side read/modify/write
+/// sequences remain serialized by the same scheduler/critical sections as the
+/// pinned kernel, while interrupt-side observation no longer races those Rust
+/// accesses.
+#[cfg(not(feature = "tick-64bit"))]
+pub type AtomicEventBits_t = AtomicU32;
+
+#[cfg(feature = "tick-64bit")]
+pub type AtomicEventBits_t = AtomicU64;
+
+const _: () =
+    assert!(core::mem::size_of::<AtomicEventBits_t>() == core::mem::size_of::<EventBits_t>());
+const _: () =
+    assert!(core::mem::align_of::<AtomicEventBits_t>() == core::mem::align_of::<EventBits_t>());
+
 // =============================================================================
 // Event Group Structure
 // =============================================================================
@@ -111,7 +115,7 @@ pub type EventBits_t = TickType_t;
 #[repr(C)]
 pub struct EventGroupDef_t {
     /// The current event bits
-    pub uxEventBits: EventBits_t,
+    pub uxEventBits: AtomicEventBits_t,
 
     /// List of tasks waiting for bits
     pub xTasksWaitingForBits: List_t,
@@ -136,7 +140,7 @@ pub type EventGroup_t = EventGroupDef_t;
 #[repr(C)]
 pub struct StaticEventGroup_t {
     /// Placeholder - event bits
-    pub xDummy1: EventBits_t,
+    pub xDummy1: AtomicEventBits_t,
     /// Placeholder - list
     pub xDummy2: StaticList_t,
     /// Placeholder - trace number
@@ -156,7 +160,7 @@ impl StaticEventGroup_t {
     /// ```
     pub const fn new() -> Self {
         StaticEventGroup_t {
-            xDummy1: 0,
+            xDummy1: AtomicEventBits_t::new(0),
             xDummy2: StaticList_t::new(),
             #[cfg(feature = "trace-facility")]
             uxDummy3: 0,
@@ -185,6 +189,20 @@ const _: () =
     assert!(core::mem::size_of::<StaticEventGroup_t>() == core::mem::size_of::<EventGroup_t>());
 const _: () =
     assert!(core::mem::align_of::<StaticEventGroup_t>() == core::mem::align_of::<EventGroup_t>());
+const _: () = assert!(
+    core::mem::offset_of!(StaticEventGroup_t, xDummy2)
+        == core::mem::offset_of!(EventGroup_t, xTasksWaitingForBits)
+);
+#[cfg(feature = "trace-facility")]
+const _: () = assert!(
+    core::mem::offset_of!(StaticEventGroup_t, uxDummy3)
+        == core::mem::offset_of!(EventGroup_t, uxEventGroupNumber)
+);
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+const _: () = assert!(
+    core::mem::offset_of!(StaticEventGroup_t, ucDummy4)
+        == core::mem::offset_of!(EventGroup_t, ucStaticallyAllocated)
+);
 
 // =============================================================================
 // Helper Functions
@@ -194,13 +212,34 @@ const _: () =
 #[inline(always)]
 fn mtCOVERAGE_TEST_MARKER() {}
 
+/// Load the event word without adding ordering beyond the scheduler and port
+/// synchronization already required by the raw API.
+#[inline(always)]
+unsafe fn prvLoadEventBits(pxEventBits: *const EventGroup_t) -> EventBits_t {
+    unsafe { (*pxEventBits).uxEventBits.load(Ordering::Relaxed) }
+}
+
+/// Store the event word. Callers retain the pinned kernel's task-side
+/// serialization around every read/modify/write sequence.
+#[inline(always)]
+unsafe fn prvStoreEventBits(pxEventBits: *mut EventGroup_t, uxBits: EventBits_t) {
+    unsafe { (*pxEventBits).uxEventBits.store(uxBits, Ordering::Relaxed) };
+}
+
 // =============================================================================
 // Event Group Creation
 // =============================================================================
 
-/// Create an event group (dynamic allocation)
+/// Create a dynamically allocated event group.
+///
+/// # Safety
+///
+/// Call only from task context while the selected FreeRTOS allocator and port
+/// critical-section implementation are initialized. The allocator must not be
+/// reset concurrently. A non-null returned handle must eventually be deleted
+/// exactly once after all task and interrupt access has ceased.
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
-pub fn xEventGroupCreate() -> EventGroupHandle_t {
+pub unsafe fn xEventGroupCreate() -> EventGroupHandle_t {
     traceENTER_xEventGroupCreate();
 
     let pxEventBits: *mut EventGroup_t =
@@ -213,14 +252,14 @@ pub fn xEventGroupCreate() -> EventGroupHandle_t {
             ptr::write(
                 pxEventBits,
                 EventGroup_t {
-                    uxEventBits: 0,
+                    uxEventBits: AtomicEventBits_t::new(0),
                     xTasksWaitingForBits: List_t::new(),
                     #[cfg(feature = "trace-facility")]
                     uxEventGroupNumber: 0,
                     ucStaticallyAllocated: pdFALSE as u8,
                 },
             );
-            vListInitialise(&mut (*pxEventBits).xTasksWaitingForBits);
+            vListInitialise(ptr::addr_of_mut!((*pxEventBits).xTasksWaitingForBits));
         }
 
         traceEVENT_GROUP_CREATE(pxEventBits as *mut c_void);
@@ -233,11 +272,23 @@ pub fn xEventGroupCreate() -> EventGroupHandle_t {
     pxEventBits as EventGroupHandle_t
 }
 
-/// Create an event group (static allocation)
-pub fn xEventGroupCreateStatic(pxEventGroupBuffer: *mut StaticEventGroup_t) -> EventGroupHandle_t {
+/// Create an event group in caller-provided storage.
+///
+/// # Safety
+///
+/// `pxEventGroupBuffer` must be non-null, properly aligned, uniquely writable,
+/// and remain at a stable address until the group is deleted and no handle to
+/// it can be used again.
+pub unsafe fn xEventGroupCreateStatic(
+    pxEventGroupBuffer: *mut StaticEventGroup_t,
+) -> EventGroupHandle_t {
     traceENTER_xEventGroupCreateStatic(pxEventGroupBuffer);
 
-    configASSERT(!pxEventGroupBuffer.is_null());
+    if pxEventGroupBuffer.is_null() {
+        traceEVENT_GROUP_CREATE_FAILED();
+        traceRETURN_xEventGroupCreateStatic(ptr::null_mut());
+        return ptr::null_mut();
+    }
 
     // Verify StaticEventGroup_t is same size as EventGroup_t
     #[cfg(debug_assertions)]
@@ -251,18 +302,20 @@ pub fn xEventGroupCreateStatic(pxEventGroupBuffer: *mut StaticEventGroup_t) -> E
 
     if !pxEventBits.is_null() {
         unsafe {
-            (*pxEventBits).uxEventBits = 0;
-            vListInitialise(&mut (*pxEventBits).xTasksWaitingForBits);
-
-            #[cfg(feature = "trace-facility")]
-            {
-                (*pxEventBits).uxEventGroupNumber = 0;
-            }
-
-            #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
-            {
-                (*pxEventBits).ucStaticallyAllocated = pdTRUE as u8;
-            }
+            /* [AMENDMENT] Begin the EventGroup_t lifetime in the caller's
+             * layout-compatible static storage before accessing its fields. */
+            ptr::write(
+                pxEventBits,
+                EventGroup_t {
+                    uxEventBits: AtomicEventBits_t::new(0),
+                    xTasksWaitingForBits: List_t::new(),
+                    #[cfg(feature = "trace-facility")]
+                    uxEventGroupNumber: 0,
+                    #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+                    ucStaticallyAllocated: pdTRUE as u8,
+                },
+            );
+            vListInitialise(ptr::addr_of_mut!((*pxEventBits).xTasksWaitingForBits));
         }
 
         traceEVENT_GROUP_CREATE(pxEventBits as *mut c_void);
@@ -279,7 +332,7 @@ pub fn xEventGroupCreateStatic(pxEventGroupBuffer: *mut StaticEventGroup_t) -> E
 // Event Group Wait Functions
 // =============================================================================
 
-/// Wait for bits to be set in an event group
+/// Wait for bits to be set in an event group.
 ///
 /// # Arguments
 /// * `xEventGroup` - Event group handle
@@ -290,7 +343,13 @@ pub fn xEventGroupCreateStatic(pxEventGroupBuffer: *mut StaticEventGroup_t) -> E
 ///
 /// # Returns
 /// The event bits value when unblocked (or timed out)
-pub fn xEventGroupWaitBits(
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group for the entire call and must
+/// not be deleted concurrently. This task-context API must not be called from
+/// an interrupt handler.
+pub unsafe fn xEventGroupWaitBits(
     xEventGroup: EventGroupHandle_t,
     uxBitsToWaitFor: EventBits_t,
     xClearOnExit: BaseType_t,
@@ -315,11 +374,14 @@ pub fn xEventGroupWaitBits(
     configASSERT(!xEventGroup.is_null());
     configASSERT((uxBitsToWaitFor & eventEVENT_BITS_CONTROL_BYTES) == 0);
     configASSERT(uxBitsToWaitFor != 0);
+    configASSERT(!(xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED && xTicksToWait != 0));
 
-    vTaskSuspendAll();
+    /* SAFETY: this task-context operation owns the suspension until the
+     * paired resume below and cannot return through the intervening block. */
+    unsafe { vTaskSuspendAll() };
 
     unsafe {
-        let uxCurrentEventBits = (*pxEventBits).uxEventBits;
+        let uxCurrentEventBits = prvLoadEventBits(pxEventBits);
 
         xWaitConditionMet =
             prvTestWaitCondition(uxCurrentEventBits, uxBitsToWaitFor, xWaitForAllBits);
@@ -329,7 +391,7 @@ pub fn xEventGroupWaitBits(
             xTicksToWait = 0;
 
             if xClearOnExit != pdFALSE {
-                (*pxEventBits).uxEventBits &= !uxBitsToWaitFor;
+                prvStoreEventBits(pxEventBits, uxCurrentEventBits & !uxBitsToWaitFor);
             }
         } else if xTicksToWait == 0 {
             uxReturn = uxCurrentEventBits;
@@ -343,7 +405,7 @@ pub fn xEventGroupWaitBits(
             }
 
             vTaskPlaceOnUnorderedEventList(
-                &mut (*pxEventBits).xTasksWaitingForBits,
+                ptr::addr_of_mut!((*pxEventBits).xTasksWaitingForBits),
                 uxBitsToWaitFor | uxControlBits,
                 xTicksToWait,
             );
@@ -357,7 +419,8 @@ pub fn xEventGroupWaitBits(
         }
     }
 
-    xAlreadyYielded = xTaskResumeAll();
+    /* SAFETY: this consumes the scheduler suspension acquired above. */
+    xAlreadyYielded = unsafe { xTaskResumeAll() };
 
     if xTicksToWait != 0 {
         if xAlreadyYielded == pdFALSE {
@@ -369,11 +432,11 @@ pub fn xEventGroupWaitBits(
         if (uxReturn & eventUNBLOCKED_DUE_TO_BIT_SET) == 0 {
             taskENTER_CRITICAL();
             unsafe {
-                uxReturn = (*pxEventBits).uxEventBits;
+                uxReturn = prvLoadEventBits(pxEventBits);
 
                 if prvTestWaitCondition(uxReturn, uxBitsToWaitFor, xWaitForAllBits) != pdFALSE {
                     if xClearOnExit != pdFALSE {
-                        (*pxEventBits).uxEventBits &= !uxBitsToWaitFor;
+                        prvStoreEventBits(pxEventBits, uxReturn & !uxBitsToWaitFor);
                     }
                 }
 
@@ -396,10 +459,16 @@ pub fn xEventGroupWaitBits(
     uxReturn
 }
 
-/// Synchronization point (rendezvous)
+/// Synchronization point (rendezvous).
 ///
 /// Sets bits and then waits for all specified bits to be set.
-pub fn xEventGroupSync(
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group for the entire call and must
+/// not be deleted concurrently. This task-context API must not be called from
+/// an interrupt handler.
+pub unsafe fn xEventGroupSync(
     xEventGroup: EventGroupHandle_t,
     uxBitsToSet: EventBits_t,
     uxBitsToWaitFor: EventBits_t,
@@ -413,19 +482,27 @@ pub fn xEventGroupSync(
 
     traceENTER_xEventGroupSync(xEventGroup, uxBitsToSet, uxBitsToWaitFor, xTicksToWait);
 
+    configASSERT(!xEventGroup.is_null());
+    configASSERT((uxBitsToSet & eventEVENT_BITS_CONTROL_BYTES) == 0);
     configASSERT((uxBitsToWaitFor & eventEVENT_BITS_CONTROL_BYTES) == 0);
     configASSERT(uxBitsToWaitFor != 0);
+    configASSERT(!(xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED && xTicksToWait != 0));
 
-    vTaskSuspendAll();
+    /* SAFETY: this task-context operation owns the suspension until the
+     * paired resume below and cannot return through the intervening block. */
+    unsafe { vTaskSuspendAll() };
 
     unsafe {
-        uxOriginalBitValue = (*pxEventBits).uxEventBits;
+        uxOriginalBitValue = prvLoadEventBits(pxEventBits);
 
+        /* SAFETY: this function's contract establishes the same live event
+         * group invariant for the nested operation. */
         let _ = xEventGroupSetBits(xEventGroup, uxBitsToSet);
 
         if ((uxOriginalBitValue | uxBitsToSet) & uxBitsToWaitFor) == uxBitsToWaitFor {
             uxReturn = uxOriginalBitValue | uxBitsToSet;
-            (*pxEventBits).uxEventBits &= !uxBitsToWaitFor;
+            let uxCurrentEventBits = prvLoadEventBits(pxEventBits);
+            prvStoreEventBits(pxEventBits, uxCurrentEventBits & !uxBitsToWaitFor);
             xTicksToWait = 0;
         } else {
             if xTicksToWait != 0 {
@@ -436,20 +513,21 @@ pub fn xEventGroupSync(
                 );
 
                 vTaskPlaceOnUnorderedEventList(
-                    &mut (*pxEventBits).xTasksWaitingForBits,
+                    ptr::addr_of_mut!((*pxEventBits).xTasksWaitingForBits),
                     uxBitsToWaitFor | eventCLEAR_EVENTS_ON_EXIT_BIT | eventWAIT_FOR_ALL_BITS,
                     xTicksToWait,
                 );
 
                 uxReturn = 0;
             } else {
-                uxReturn = (*pxEventBits).uxEventBits;
+                uxReturn = prvLoadEventBits(pxEventBits);
                 xTimeoutOccurred = pdTRUE;
             }
         }
     }
 
-    xAlreadyYielded = xTaskResumeAll();
+    /* SAFETY: this consumes the scheduler suspension acquired above. */
+    xAlreadyYielded = unsafe { xTaskResumeAll() };
 
     if xTicksToWait != 0 {
         if xAlreadyYielded == pdFALSE {
@@ -461,10 +539,10 @@ pub fn xEventGroupSync(
         if (uxReturn & eventUNBLOCKED_DUE_TO_BIT_SET) == 0 {
             taskENTER_CRITICAL();
             unsafe {
-                uxReturn = (*pxEventBits).uxEventBits;
+                uxReturn = prvLoadEventBits(pxEventBits);
 
                 if (uxReturn & uxBitsToWaitFor) == uxBitsToWaitFor {
-                    (*pxEventBits).uxEventBits &= !uxBitsToWaitFor;
+                    prvStoreEventBits(pxEventBits, uxReturn & !uxBitsToWaitFor);
                 }
             }
             taskEXIT_CRITICAL();
@@ -500,7 +578,13 @@ pub fn xEventGroupSync(
 /// # Returns
 /// The event bits value after setting
 #[allow(unused_assignments)] // C pattern: initialize to fail
-pub fn xEventGroupSetBits(
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group through the operation and
+/// must not be deleted concurrently. This task-context API must not be called
+/// from an interrupt handler.
+pub unsafe fn xEventGroupSetBits(
     xEventGroup: EventGroupHandle_t,
     uxBitsToSet: EventBits_t,
 ) -> EventBits_t {
@@ -515,7 +599,9 @@ pub fn xEventGroupSetBits(
     configASSERT((uxBitsToSet & eventEVENT_BITS_CONTROL_BYTES) == 0);
 
     unsafe {
-        let pxList = &(*pxEventBits).xTasksWaitingForBits;
+        /* [AMENDMENT] The wait list is self-referential. Traverse it through
+         * raw pointers so inspecting it cannot retag the retained links. */
+        let pxList = ptr::addr_of!((*pxEventBits).xTasksWaitingForBits);
         let pxListEnd = listGET_END_MARKER(pxList);
 
         vTaskSuspendAll();
@@ -523,8 +609,10 @@ pub fn xEventGroupSetBits(
         traceEVENT_GROUP_SET_BITS(xEventGroup as *mut c_void, uxBitsToSet as UBaseType_t);
 
         let mut pxListItem = listGET_HEAD_ENTRY(pxList);
+        let mut uxCurrentEventBits = prvLoadEventBits(pxEventBits);
 
-        (*pxEventBits).uxEventBits |= uxBitsToSet;
+        uxCurrentEventBits |= uxBitsToSet;
+        prvStoreEventBits(pxEventBits, uxCurrentEventBits);
 
         while pxListItem != pxListEnd as *mut ListItem_t {
             let pxNext = listGET_NEXT(pxListItem);
@@ -536,10 +624,10 @@ pub fn xEventGroupSetBits(
 
             if (uxControlBits & eventWAIT_FOR_ALL_BITS) == 0 {
                 // OR wait - any bit matches
-                if (uxBitsWaitedFor & (*pxEventBits).uxEventBits) != 0 {
+                if (uxBitsWaitedFor & uxCurrentEventBits) != 0 {
                     xMatchFound = pdTRUE;
                 }
-            } else if (uxBitsWaitedFor & (*pxEventBits).uxEventBits) == uxBitsWaitedFor {
+            } else if (uxBitsWaitedFor & uxCurrentEventBits) == uxBitsWaitedFor {
                 // AND wait - all bits match
                 xMatchFound = pdTRUE;
             }
@@ -551,19 +639,22 @@ pub fn xEventGroupSetBits(
 
                 let _ = xTaskRemoveFromUnorderedEventList(
                     pxListItem,
-                    (*pxEventBits).uxEventBits | eventUNBLOCKED_DUE_TO_BIT_SET,
+                    uxCurrentEventBits | eventUNBLOCKED_DUE_TO_BIT_SET,
                 );
             }
 
             pxListItem = pxNext;
         }
 
-        (*pxEventBits).uxEventBits &= !uxBitsToClear;
+        uxCurrentEventBits &= !uxBitsToClear;
+        prvStoreEventBits(pxEventBits, uxCurrentEventBits);
 
-        uxReturnBits = (*pxEventBits).uxEventBits;
+        uxReturnBits = uxCurrentEventBits;
     }
 
-    let _ = xTaskResumeAll();
+    /* SAFETY: this consumes the suspension acquired while scanning the event
+     * group's wait list above. */
+    let _ = unsafe { xTaskResumeAll() };
 
     traceRETURN_xEventGroupSetBits(uxReturnBits);
 
@@ -578,7 +669,13 @@ pub fn xEventGroupSetBits(
 ///
 /// # Returns
 /// The event bits value before clearing
-pub fn xEventGroupClearBits(
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group through the operation and
+/// must not be deleted concurrently. This task-context API must not be called
+/// from an interrupt handler.
+pub unsafe fn xEventGroupClearBits(
     xEventGroup: EventGroupHandle_t,
     uxBitsToClear: EventBits_t,
 ) -> EventBits_t {
@@ -594,8 +691,8 @@ pub fn xEventGroupClearBits(
     unsafe {
         traceEVENT_GROUP_CLEAR_BITS(xEventGroup as *mut c_void, uxBitsToClear as UBaseType_t);
 
-        uxReturn = (*pxEventBits).uxEventBits;
-        (*pxEventBits).uxEventBits &= !uxBitsToClear;
+        uxReturn = prvLoadEventBits(pxEventBits);
+        prvStoreEventBits(pxEventBits, uxReturn & !uxBitsToClear);
     }
     taskEXIT_CRITICAL();
 
@@ -604,16 +701,24 @@ pub fn xEventGroupClearBits(
     uxReturn
 }
 
-/// Get bits from an event group (from ISR)
-pub fn xEventGroupGetBitsFromISR(xEventGroup: EventGroupHandle_t) -> EventBits_t {
+/// Get bits from an event group (from ISR).
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group through the operation and
+/// must not be deleted concurrently. The port's FromISR calling rules and
+/// interrupt-priority restrictions must be satisfied.
+pub unsafe fn xEventGroupGetBitsFromISR(xEventGroup: EventGroupHandle_t) -> EventBits_t {
     let pxEventBits = xEventGroup as *const EventGroup_t;
     let uxReturn: EventBits_t;
 
     traceENTER_xEventGroupGetBitsFromISR(xEventGroup);
 
+    configASSERT(!xEventGroup.is_null());
+
     unsafe {
         let uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
-        uxReturn = (*pxEventBits).uxEventBits;
+        uxReturn = prvLoadEventBits(pxEventBits);
         taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
     }
 
@@ -622,9 +727,15 @@ pub fn xEventGroupGetBitsFromISR(xEventGroup: EventGroupHandle_t) -> EventBits_t
     uxReturn
 }
 
-/// Get current bits (convenience function)
+/// Get current bits (convenience function).
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group through the operation and
+/// must not be deleted concurrently. This task-context API must not be called
+/// from an interrupt handler.
 #[inline(always)]
-pub fn xEventGroupGetBits(xEventGroup: EventGroupHandle_t) -> EventBits_t {
+pub unsafe fn xEventGroupGetBits(xEventGroup: EventGroupHandle_t) -> EventBits_t {
     xEventGroupClearBits(xEventGroup, 0)
 }
 
@@ -632,8 +743,15 @@ pub fn xEventGroupGetBits(xEventGroup: EventGroupHandle_t) -> EventBits_t {
 // Event Group Delete
 // =============================================================================
 
-/// Delete an event group
-pub fn vEventGroupDelete(xEventGroup: EventGroupHandle_t) {
+/// Delete an event group.
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group and this must be the final
+/// deletion request for it. No task or interrupt may start another operation
+/// with this handle once deletion begins, and every copy of the handle must be
+/// treated as invalid when this function returns.
+pub unsafe fn vEventGroupDelete(xEventGroup: EventGroupHandle_t) {
     let pxEventBits = xEventGroup as *mut EventGroup_t;
 
     traceENTER_vEventGroupDelete(xEventGroup);
@@ -641,7 +759,7 @@ pub fn vEventGroupDelete(xEventGroup: EventGroupHandle_t) {
     configASSERT(!pxEventBits.is_null());
 
     unsafe {
-        let pxTasksWaitingForBits = &(*pxEventBits).xTasksWaitingForBits;
+        let pxTasksWaitingForBits = ptr::addr_of!((*pxEventBits).xTasksWaitingForBits);
 
         vTaskSuspendAll();
 
@@ -650,7 +768,7 @@ pub fn vEventGroupDelete(xEventGroup: EventGroupHandle_t) {
         while listCURRENT_LIST_LENGTH(pxTasksWaitingForBits) > 0 {
             configASSERT(
                 (*pxTasksWaitingForBits).xListEnd.pxNext
-                    != &(*pxTasksWaitingForBits).xListEnd as *const _ as *mut _,
+                    != ptr::addr_of!((*pxTasksWaitingForBits).xListEnd).cast_mut(),
             );
 
             let _ = xTaskRemoveFromUnorderedEventList(
@@ -660,7 +778,9 @@ pub fn vEventGroupDelete(xEventGroup: EventGroupHandle_t) {
         }
     }
 
-    let _ = xTaskResumeAll();
+    /* SAFETY: this consumes the suspension acquired while draining the event
+     * group's waiter list above. */
+    let _ = unsafe { xTaskResumeAll() };
 
     #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
     unsafe {
@@ -676,8 +796,15 @@ pub fn vEventGroupDelete(xEventGroup: EventGroupHandle_t) {
 // Static Buffer Query
 // =============================================================================
 
-/// Get the static buffer used by a statically allocated event group
-pub fn xEventGroupGetStaticBuffer(
+/// Get the static buffer used by a statically allocated event group.
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group through the call.
+/// `ppxEventGroupBuffer` must be non-null, aligned, and valid for one pointer
+/// write. The returned pointer remains governed by the creation-time storage
+/// lifetime and must not be used to alias or move the live group.
+pub unsafe fn xEventGroupGetStaticBuffer(
     xEventGroup: EventGroupHandle_t,
     ppxEventGroupBuffer: *mut *mut StaticEventGroup_t,
 ) -> BaseType_t {
@@ -718,9 +845,15 @@ pub fn xEventGroupGetStaticBuffer(
 // Callback Functions (for ISR support via timer pend)
 // =============================================================================
 
-/// Callback to set bits (used by xEventGroupSetBitsFromISR)
+/// Callback to set bits (used by `xEventGroupSetBitsFromISR`).
+///
+/// # Safety
+///
+/// `pvEventGroup` must identify a live event group and `ulBitsToSet` must not
+/// contain event-group control bits. The callback must run in task context
+/// (normally the timer daemon), not directly in an interrupt handler.
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
-pub extern "C" fn vEventGroupSetBitsCallback(
+pub unsafe extern "C" fn vEventGroupSetBitsCallback(
     pvEventGroup: *mut c_void,
     ulBitsToSet: crate::kernel::timers::PendedFunctionParameter_t,
 ) {
@@ -734,9 +867,15 @@ pub extern "C" fn vEventGroupSetBitsCallback(
     traceRETURN_vEventGroupSetBitsCallback();
 }
 
-/// Callback to clear bits (used by xEventGroupClearBitsFromISR)
+/// Callback to clear bits (used by `xEventGroupClearBitsFromISR`).
+///
+/// # Safety
+///
+/// `pvEventGroup` must identify a live event group and `ulBitsToClear` must not
+/// contain event-group control bits. The callback must run in task context
+/// (normally the timer daemon), not directly in an interrupt handler.
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
-pub extern "C" fn vEventGroupClearBitsCallback(
+pub unsafe extern "C" fn vEventGroupClearBitsCallback(
     pvEventGroup: *mut c_void,
     ulBitsToClear: crate::kernel::timers::PendedFunctionParameter_t,
 ) {
@@ -754,9 +893,16 @@ pub extern "C" fn vEventGroupClearBitsCallback(
 // ISR Functions (require timer pend function call support)
 // =============================================================================
 
-/// Set bits from ISR (requires INCLUDE_xTimerPendFunctionCall)
+/// Set bits from ISR (requires `INCLUDE_xTimerPendFunctionCall`).
+///
+/// # Safety
+///
+/// `xEventGroup` must remain live until the timer daemon has executed the
+/// deferred callback, not merely until this function returns. If non-null,
+/// `pxHigherPriorityTaskWoken` must be aligned and valid for a `BaseType_t`
+/// write. The port's FromISR priority restrictions must be satisfied.
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
-pub fn xEventGroupSetBitsFromISR(
+pub unsafe fn xEventGroupSetBitsFromISR(
     xEventGroup: EventGroupHandle_t,
     uxBitsToSet: EventBits_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
@@ -765,23 +911,38 @@ pub fn xEventGroupSetBitsFromISR(
 
     traceENTER_xEventGroupSetBitsFromISR(xEventGroup, uxBitsToSet, pxHigherPriorityTaskWoken);
 
+    if xEventGroup.is_null() || (uxBitsToSet & eventEVENT_BITS_CONTROL_BYTES) != 0 {
+        traceRETURN_xEventGroupSetBitsFromISR(pdFAIL);
+        return pdFAIL;
+    }
+
     traceEVENT_GROUP_SET_BITS_FROM_ISR(xEventGroup as *mut c_void, uxBitsToSet as UBaseType_t);
 
-    let xReturn = xTimerPendFunctionCallFromISR(
-        vEventGroupSetBitsCallback,
-        xEventGroup as *mut c_void,
-        uxBitsToSet as crate::kernel::timers::PendedFunctionParameter_t,
-        pxHigherPriorityTaskWoken,
-    );
+    /* SAFETY: this API's contract keeps the group live through callback
+     * execution and establishes the caller's FromISR pointer invariants. */
+    let xReturn = unsafe {
+        xTimerPendFunctionCallFromISR(
+            vEventGroupSetBitsCallback,
+            xEventGroup as *mut c_void,
+            uxBitsToSet as crate::kernel::timers::PendedFunctionParameter_t,
+            pxHigherPriorityTaskWoken,
+        )
+    };
 
     traceRETURN_xEventGroupSetBitsFromISR(xReturn);
 
     xReturn
 }
 
-/// Clear bits from ISR (requires INCLUDE_xTimerPendFunctionCall)
+/// Clear bits from ISR (requires `INCLUDE_xTimerPendFunctionCall`).
+///
+/// # Safety
+///
+/// `xEventGroup` must remain live until the timer daemon has executed the
+/// deferred callback. The port's FromISR priority restrictions must be
+/// satisfied.
 #[cfg(all(feature = "pend-function-call", feature = "timers"))]
-pub fn xEventGroupClearBitsFromISR(
+pub unsafe fn xEventGroupClearBitsFromISR(
     xEventGroup: EventGroupHandle_t,
     uxBitsToClear: EventBits_t,
 ) -> BaseType_t {
@@ -789,14 +950,23 @@ pub fn xEventGroupClearBitsFromISR(
 
     traceENTER_xEventGroupClearBitsFromISR(xEventGroup, uxBitsToClear);
 
+    if xEventGroup.is_null() || (uxBitsToClear & eventEVENT_BITS_CONTROL_BYTES) != 0 {
+        traceRETURN_xEventGroupClearBitsFromISR(pdFAIL);
+        return pdFAIL;
+    }
+
     traceEVENT_GROUP_CLEAR_BITS_FROM_ISR(xEventGroup as *mut c_void, uxBitsToClear as UBaseType_t);
 
-    let xReturn = xTimerPendFunctionCallFromISR(
-        vEventGroupClearBitsCallback,
-        xEventGroup as *mut c_void,
-        uxBitsToClear as crate::kernel::timers::PendedFunctionParameter_t,
-        ptr::null_mut(),
-    );
+    /* SAFETY: this API's contract keeps the group live through callback
+     * execution and establishes the caller's FromISR context invariant. */
+    let xReturn = unsafe {
+        xTimerPendFunctionCallFromISR(
+            vEventGroupClearBitsCallback,
+            xEventGroup as *mut c_void,
+            uxBitsToClear as crate::kernel::timers::PendedFunctionParameter_t,
+            ptr::null_mut(),
+        )
+    };
 
     traceRETURN_xEventGroupClearBitsFromISR(xReturn);
 
@@ -807,9 +977,13 @@ pub fn xEventGroupClearBitsFromISR(
 // Trace Facility Functions
 // =============================================================================
 
-/// Get event group number (for trace facility)
+/// Get event group number (for trace facility).
+///
+/// # Safety
+///
+/// A non-null `xEventGroup` must identify a live event group through the call.
 #[cfg(feature = "trace-facility")]
-pub fn uxEventGroupGetNumber(xEventGroup: EventGroupHandle_t) -> UBaseType_t {
+pub unsafe fn uxEventGroupGetNumber(xEventGroup: EventGroupHandle_t) -> UBaseType_t {
     let xReturn: UBaseType_t;
 
     traceENTER_uxEventGroupGetNumber(xEventGroup);
@@ -826,10 +1000,20 @@ pub fn uxEventGroupGetNumber(xEventGroup: EventGroupHandle_t) -> UBaseType_t {
     xReturn
 }
 
-/// Set event group number (for trace facility)
+/// Set event group number (for trace facility).
+///
+/// # Safety
+///
+/// `xEventGroup` must identify a live event group through the call and the
+/// caller must serialize this write with other trace-number accesses.
 #[cfg(feature = "trace-facility")]
-pub fn vEventGroupSetNumber(xEventGroup: EventGroupHandle_t, uxEventGroupNumber: UBaseType_t) {
+pub unsafe fn vEventGroupSetNumber(
+    xEventGroup: EventGroupHandle_t,
+    uxEventGroupNumber: UBaseType_t,
+) {
     traceENTER_vEventGroupSetNumber(xEventGroup, uxEventGroupNumber);
+
+    configASSERT(!xEventGroup.is_null());
 
     unsafe {
         (*(xEventGroup as *mut EventGroup_t)).uxEventGroupNumber = uxEventGroupNumber;
@@ -987,6 +1171,14 @@ mod tests {
     #[test]
     fn static_event_group_storage_matches_internal_layout() {
         assert_eq!(
+            core::mem::size_of::<AtomicEventBits_t>(),
+            core::mem::size_of::<EventBits_t>()
+        );
+        assert_eq!(
+            core::mem::align_of::<AtomicEventBits_t>(),
+            core::mem::align_of::<EventBits_t>()
+        );
+        assert_eq!(
             core::mem::size_of::<StaticEventGroup_t>(),
             core::mem::size_of::<EventGroup_t>()
         );
@@ -994,6 +1186,69 @@ mod tests {
             core::mem::align_of::<StaticEventGroup_t>(),
             core::mem::align_of::<EventGroup_t>()
         );
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn task_side_stores_and_isr_reads_share_one_atomic_event_word() {
+        use core::sync::atomic::AtomicBool;
+
+        const FIRST: EventBits_t = 0x0055_5555;
+        const SECOND: EventBits_t = 0x00aa_aaaa;
+        #[cfg(miri)]
+        const TRANSFERS: usize = 500;
+        #[cfg(not(miri))]
+        const TRANSFERS: usize = 20_000;
+
+        struct SendHandle(*mut EventGroup_t);
+
+        impl SendHandle {
+            fn into_raw(self) -> *mut EventGroup_t {
+                self.0
+            }
+        }
+
+        // SAFETY: the fixture leaks the event group for both execution
+        // contexts and the only concurrent field is the atomic event word.
+        unsafe impl Send for SendHandle {}
+
+        crate::port::test_port_reset();
+        let storage = std::boxed::Box::leak(std::boxed::Box::new(StaticEventGroup_t::new()));
+        // SAFETY: leaked storage has a stable unique address for the test.
+        let event_group = unsafe { xEventGroupCreateStatic(storage) };
+        assert!(!event_group.is_null());
+        // SAFETY: the group is live and this initializes the first observable
+        // value before either host execution context starts sampling it.
+        unsafe { prvStoreEventBits(event_group.cast(), FIRST) };
+
+        let writer_handle = SendHandle(event_group.cast());
+        let start = AtomicBool::new(false);
+        crate::port::test_port_set_inside_interrupt(true);
+        std::thread::scope(|scope| {
+            let start_ref = &start;
+            scope.spawn(move || {
+                while !start_ref.load(Ordering::Acquire) {
+                    core::hint::spin_loop();
+                }
+
+                let event_group = writer_handle.into_raw();
+                for index in 0..TRANSFERS {
+                    let bits = if index & 1 == 0 { SECOND } else { FIRST };
+                    // SAFETY: this writer models the task-side serialized
+                    // store, and the leaked event group remains live.
+                    unsafe { prvStoreEventBits(event_group, bits) };
+                }
+            });
+
+            start.store(true, Ordering::Release);
+            for _ in 0..TRANSFERS {
+                // SAFETY: the test port models a permitted ISR, while atomic
+                // storage makes this read race-free with the task-side writer.
+                let observed = unsafe { xEventGroupGetBitsFromISR(event_group) };
+                assert!(observed == FIRST || observed == SECOND);
+            }
+        });
+        crate::port::test_port_set_inside_interrupt(false);
     }
 
     #[cfg(all(
@@ -1004,20 +1259,59 @@ mod tests {
     #[test]
     fn deferred_callbacks_preserve_all_usable_32_bit_event_bits() {
         let mut storage = StaticEventGroup_t::new();
-        let event_group = xEventGroupCreateStatic(&mut storage);
+        // SAFETY: storage is unique and stable for this entire sequence; the
+        // callbacks run synchronously in port-test task context, and the handle
+        // is never used after storage leaves scope.
+        unsafe {
+            let event_group = xEventGroupCreateStatic(&mut storage);
+            assert!(!event_group.is_null());
+
+            let highest_usable_bit = 0x0080_0000 as EventBits_t;
+            vEventGroupSetBitsCallback(
+                event_group,
+                highest_usable_bit as crate::kernel::timers::PendedFunctionParameter_t,
+            );
+            assert_eq!(xEventGroupGetBits(event_group), highest_usable_bit);
+
+            vEventGroupClearBitsCallback(
+                event_group,
+                highest_usable_bit as crate::kernel::timers::PendedFunctionParameter_t,
+            );
+            assert_eq!(xEventGroupGetBits(event_group), 0);
+        }
+    }
+
+    #[cfg(all(
+        feature = "port-test",
+        feature = "pend-function-call",
+        feature = "timers"
+    ))]
+    #[test]
+    fn from_isr_calls_reject_reserved_control_bits_before_queueing() {
+        crate::port::test_port_reset();
+        let mut storage = StaticEventGroup_t::new();
+        // SAFETY: the storage is uniquely owned and stable for this test.
+        let event_group = unsafe { xEventGroupCreateStatic(&mut storage) };
         assert!(!event_group.is_null());
 
-        let highest_usable_bit = 0x0080_0000 as EventBits_t;
-        vEventGroupSetBitsCallback(
-            event_group,
-            highest_usable_bit as crate::kernel::timers::PendedFunctionParameter_t,
-        );
-        assert_eq!(xEventGroupGetBits(event_group), highest_usable_bit);
-
-        vEventGroupClearBitsCallback(
-            event_group,
-            highest_usable_bit as crate::kernel::timers::PendedFunctionParameter_t,
-        );
-        assert_eq!(xEventGroupGetBits(event_group), 0);
+        crate::port::test_port_set_inside_interrupt(true);
+        // SAFETY: the test port reports ISR context and the group is live.
+        // Reserved bits are an explicitly checked input, not a safety
+        // precondition, and neither rejected call reaches the timer queue.
+        unsafe {
+            assert_eq!(
+                xEventGroupSetBitsFromISR(
+                    event_group,
+                    eventEVENT_BITS_CONTROL_BYTES,
+                    ptr::null_mut(),
+                ),
+                pdFAIL,
+            );
+            assert_eq!(
+                xEventGroupClearBitsFromISR(event_group, eventEVENT_BITS_CONTROL_BYTES),
+                pdFAIL,
+            );
+        }
+        crate::port::test_port_set_inside_interrupt(false);
     }
 }

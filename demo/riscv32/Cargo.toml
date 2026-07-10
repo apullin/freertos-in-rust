@@ -2,8 +2,8 @@
 name = "freertos-demo-riscv32"
 version = "0.1.0"
 edition = "2021"
-authors = ["FreeRusTOS Contributors"]
-description = "Demo application for FreeRusTOS on RISC-V RV32"
+authors = ["FreeRTOS-in-Rust Contributors"]
+description = "Demo application for FreeRTOS-in-Rust on RISC-V RV32"
 
 [[bin]]
 name = "demo"
@@ -14,7 +14,7 @@ default = ["use-heap-4"]
 use-heap-4 = ["freertos-in-rust/heap-4"]
 
 [dependencies]
-freertos-in-rust = { path = "../..", features = [
+freertos-in-rust = { path = "../..", default-features = false, features = [
     "port-riscv32",
     "use-mutexes",
     "timers",

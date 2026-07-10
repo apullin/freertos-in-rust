@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This is the Rust port of stream_buffer.c for FreeRusTOS.
+ * [AMENDMENT] This is the Rust port of stream_buffer.c for FreeRTOS-in-Rust.
  */
 
 //! Stream Buffer Implementation
@@ -42,8 +42,7 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use crate::config::*;
 use crate::kernel::tasks::*;
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
-use crate::memory::pvPortMalloc;
-use crate::memory::vPortFree;
+use crate::memory::{pvPortMalloc, vPortFree};
 use crate::port::*;
 use crate::types::*;
 
@@ -161,6 +160,9 @@ impl StaticStreamBuffer_t {
     }
 }
 
+/// Message buffers use the same control-block storage as stream buffers.
+pub type StaticMessageBuffer_t = StaticStreamBuffer_t;
+
 // =============================================================================
 // Creation Functions
 // =============================================================================
@@ -178,6 +180,13 @@ impl StaticStreamBuffer_t {
 /// # Returns
 ///
 /// Handle to the created stream buffer, or NULL on failure
+///
+/// # Safety
+///
+/// Call only from task context while the selected allocator and port critical
+/// sections are initialized and cannot be reset concurrently. The returned
+/// raw handle must be given a single producer and a single consumer, and must
+/// eventually be deleted exactly once after all access has ceased.
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 pub unsafe fn xStreamBufferGenericCreate(
     xBufferSizeBytes: usize,
@@ -262,6 +271,14 @@ pub unsafe fn xStreamBufferGenericCreate(
 /// # Returns
 ///
 /// Handle to the created stream buffer, or NULL on failure
+///
+/// # Safety
+///
+/// `pucStreamBufferStorageArea` must be uniquely writable for
+/// `xBufferSizeBytes` bytes. `pxStaticStreamBuffer` must be aligned, uniquely
+/// writable, and stable until deletion and the end of every access. Call only
+/// from task context; the resulting handle permits one producer and one
+/// consumer.
 pub unsafe fn xStreamBufferGenericCreateStatic(
     xBufferSizeBytes: usize,
     mut xTriggerLevelBytes: usize,
@@ -320,7 +337,12 @@ pub unsafe fn xStreamBufferGenericCreateStatic(
     }
 }
 
-/// Convenience wrapper: create a stream buffer
+/// Convenience wrapper: create a stream buffer.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreate`]'s task-context,
+/// allocator, and size requirements.
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 pub unsafe fn xStreamBufferCreate(
@@ -336,14 +358,69 @@ pub unsafe fn xStreamBufferCreate(
     )
 }
 
-/// Convenience wrapper: create a message buffer
+/// Header-macro veneer: create a stream buffer with completion callbacks.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreate`]'s task-context,
+/// allocator, size, and callback-lifetime requirements.
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
-pub unsafe fn xMessageBufferCreate(xBufferSizeBytes: usize) -> StreamBufferHandle_t {
-    xStreamBufferGenericCreate(xBufferSizeBytes, 1, sbTYPE_MESSAGE_BUFFER, None, None)
+pub unsafe fn xStreamBufferCreateWithCallback(
+    xBufferSizeBytes: usize,
+    xTriggerLevelBytes: usize,
+    pxSendCompletedCallback: StreamBufferCallbackFunction_t,
+    pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
+) -> StreamBufferHandle_t {
+    xStreamBufferGenericCreate(
+        xBufferSizeBytes,
+        xTriggerLevelBytes,
+        sbTYPE_STREAM_BUFFER,
+        pxSendCompletedCallback,
+        pxReceiveCompletedCallback,
+    )
 }
 
-/// Convenience wrapper: create a batching buffer
+/// Convenience wrapper: create a message buffer.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreate`]'s task-context,
+/// allocator, and size requirements.
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+#[inline(always)]
+pub unsafe fn xMessageBufferCreate(xBufferSizeBytes: usize) -> MessageBufferHandle_t {
+    xStreamBufferGenericCreate(xBufferSizeBytes, 0, sbTYPE_MESSAGE_BUFFER, None, None)
+}
+
+/// Header-macro veneer: create a message buffer with completion callbacks.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreate`]'s task-context,
+/// allocator, size, and callback-lifetime requirements.
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+#[inline(always)]
+pub unsafe fn xMessageBufferCreateWithCallback(
+    xBufferSizeBytes: usize,
+    pxSendCompletedCallback: StreamBufferCallbackFunction_t,
+    pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
+) -> MessageBufferHandle_t {
+    xStreamBufferGenericCreate(
+        xBufferSizeBytes,
+        0,
+        sbTYPE_MESSAGE_BUFFER,
+        pxSendCompletedCallback,
+        pxReceiveCompletedCallback,
+    )
+}
+
+/// Convenience wrapper: create a batching buffer.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreate`]'s task-context,
+/// allocator, and size requirements.
 #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
 #[inline(always)]
 pub unsafe fn xStreamBatchingBufferCreate(
@@ -359,6 +436,177 @@ pub unsafe fn xStreamBatchingBufferCreate(
     )
 }
 
+/// Header-macro veneer: create a batching buffer with completion callbacks.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreate`]'s task-context,
+/// allocator, size, and callback-lifetime requirements.
+#[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
+#[inline(always)]
+pub unsafe fn xStreamBatchingBufferCreateWithCallback(
+    xBufferSizeBytes: usize,
+    xTriggerLevelBytes: usize,
+    pxSendCompletedCallback: StreamBufferCallbackFunction_t,
+    pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
+) -> StreamBufferHandle_t {
+    xStreamBufferGenericCreate(
+        xBufferSizeBytes,
+        xTriggerLevelBytes,
+        sbTYPE_STREAM_BATCHING_BUFFER,
+        pxSendCompletedCallback,
+        pxReceiveCompletedCallback,
+    )
+}
+
+/// Header-macro veneer: create a stream buffer in caller-provided storage.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreateStatic`]'s storage,
+/// lifetime, size, task-context, and callback requirements.
+#[inline(always)]
+pub unsafe fn xStreamBufferCreateStatic(
+    xBufferSizeBytes: usize,
+    xTriggerLevelBytes: usize,
+    pucStreamBufferStorageArea: *mut u8,
+    pxStaticStreamBuffer: *mut StaticStreamBuffer_t,
+) -> StreamBufferHandle_t {
+    xStreamBufferGenericCreateStatic(
+        xBufferSizeBytes,
+        xTriggerLevelBytes,
+        sbTYPE_STREAM_BUFFER,
+        pucStreamBufferStorageArea,
+        pxStaticStreamBuffer,
+        None,
+        None,
+    )
+}
+
+/// Header-macro veneer: create a static stream buffer with callbacks.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreateStatic`]'s storage,
+/// lifetime, size, task-context, and callback requirements.
+#[inline(always)]
+pub unsafe fn xStreamBufferCreateStaticWithCallback(
+    xBufferSizeBytes: usize,
+    xTriggerLevelBytes: usize,
+    pucStreamBufferStorageArea: *mut u8,
+    pxStaticStreamBuffer: *mut StaticStreamBuffer_t,
+    pxSendCompletedCallback: StreamBufferCallbackFunction_t,
+    pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
+) -> StreamBufferHandle_t {
+    xStreamBufferGenericCreateStatic(
+        xBufferSizeBytes,
+        xTriggerLevelBytes,
+        sbTYPE_STREAM_BUFFER,
+        pucStreamBufferStorageArea,
+        pxStaticStreamBuffer,
+        pxSendCompletedCallback,
+        pxReceiveCompletedCallback,
+    )
+}
+
+/// Header-macro veneer: create a message buffer in caller-provided storage.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreateStatic`]'s storage,
+/// lifetime, size, and task-context requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferCreateStatic(
+    xBufferSizeBytes: usize,
+    pucMessageBufferStorageArea: *mut u8,
+    pxStaticMessageBuffer: *mut StaticMessageBuffer_t,
+) -> MessageBufferHandle_t {
+    xStreamBufferGenericCreateStatic(
+        xBufferSizeBytes,
+        0,
+        sbTYPE_MESSAGE_BUFFER,
+        pucMessageBufferStorageArea,
+        pxStaticMessageBuffer,
+        None,
+        None,
+    )
+}
+
+/// Header-macro veneer: create a static message buffer with callbacks.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreateStatic`]'s storage,
+/// lifetime, size, task-context, and callback requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferCreateStaticWithCallback(
+    xBufferSizeBytes: usize,
+    pucMessageBufferStorageArea: *mut u8,
+    pxStaticMessageBuffer: *mut StaticMessageBuffer_t,
+    pxSendCompletedCallback: StreamBufferCallbackFunction_t,
+    pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
+) -> MessageBufferHandle_t {
+    xStreamBufferGenericCreateStatic(
+        xBufferSizeBytes,
+        0,
+        sbTYPE_MESSAGE_BUFFER,
+        pucMessageBufferStorageArea,
+        pxStaticMessageBuffer,
+        pxSendCompletedCallback,
+        pxReceiveCompletedCallback,
+    )
+}
+
+/// Header-macro veneer: create a batching buffer in caller-provided storage.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreateStatic`]'s storage,
+/// lifetime, size, and task-context requirements.
+#[inline(always)]
+pub unsafe fn xStreamBatchingBufferCreateStatic(
+    xBufferSizeBytes: usize,
+    xTriggerLevelBytes: usize,
+    pucStreamBufferStorageArea: *mut u8,
+    pxStaticStreamBuffer: *mut StaticStreamBuffer_t,
+) -> StreamBufferHandle_t {
+    xStreamBufferGenericCreateStatic(
+        xBufferSizeBytes,
+        xTriggerLevelBytes,
+        sbTYPE_STREAM_BATCHING_BUFFER,
+        pucStreamBufferStorageArea,
+        pxStaticStreamBuffer,
+        None,
+        None,
+    )
+}
+
+/// Header-macro veneer: create a static batching buffer with callbacks.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGenericCreateStatic`]'s storage,
+/// lifetime, size, task-context, and callback requirements.
+#[inline(always)]
+pub unsafe fn xStreamBatchingBufferCreateStaticWithCallback(
+    xBufferSizeBytes: usize,
+    xTriggerLevelBytes: usize,
+    pucStreamBufferStorageArea: *mut u8,
+    pxStaticStreamBuffer: *mut StaticStreamBuffer_t,
+    pxSendCompletedCallback: StreamBufferCallbackFunction_t,
+    pxReceiveCompletedCallback: StreamBufferCallbackFunction_t,
+) -> StreamBufferHandle_t {
+    xStreamBufferGenericCreateStatic(
+        xBufferSizeBytes,
+        xTriggerLevelBytes,
+        sbTYPE_STREAM_BATCHING_BUFFER,
+        pucStreamBufferStorageArea,
+        pxStaticStreamBuffer,
+        pxSendCompletedCallback,
+        pxReceiveCompletedCallback,
+    )
+}
+
 // =============================================================================
 // Delete Function
 // =============================================================================
@@ -366,6 +614,12 @@ pub unsafe fn xStreamBatchingBufferCreate(
 /// Delete a stream buffer
 ///
 /// Frees memory if dynamically allocated, otherwise zeros the structure.
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer created by this module. This
+/// must be its sole deletion, after all task/ISR operations and outstanding
+/// references have ceased; caller-provided static storage must remain writable.
 pub unsafe fn vStreamBufferDelete(xStreamBuffer: StreamBufferHandle_t) {
     configASSERT(!xStreamBuffer.is_null());
 
@@ -373,7 +627,14 @@ pub unsafe fn vStreamBufferDelete(xStreamBuffer: StreamBufferHandle_t) {
 
     if ((*pxStreamBuffer).ucFlags & sbFLAGS_IS_STATICALLY_ALLOCATED) == 0 {
         // Both structure and buffer were allocated by pvPortMalloc together.
+        #[cfg(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))]
         vPortFree(pxStreamBuffer as *mut c_void);
+
+        /* With dynamic allocation disabled, a non-static object cannot have
+         * been created. Match upstream's deliberately-failing assertion so a
+         * corrupted allocation flag is diagnosed instead of freed. */
+        #[cfg(not(any(feature = "alloc", feature = "heap-4", feature = "heap-5")))]
+        configASSERT(xStreamBuffer as usize == usize::MAX);
     } else {
         // Static allocation - just zero it out
         ptr::write_bytes(pxStreamBuffer, 0, 1);
@@ -391,6 +652,12 @@ pub unsafe fn vStreamBufferDelete(xStreamBuffer: StreamBufferHandle_t) {
 /// # Returns
 ///
 /// pdPASS if reset, pdFAIL if tasks are blocked
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that remains allocated for the
+/// call. Call only from task context with initialized kernel state, while no
+/// producer or consumer can access the buffer and no task is blocked on it.
 pub unsafe fn xStreamBufferReset(xStreamBuffer: StreamBufferHandle_t) -> BaseType_t {
     configASSERT(!xStreamBuffer.is_null());
 
@@ -434,6 +701,13 @@ pub unsafe fn xStreamBufferReset(xStreamBuffer: StreamBufferHandle_t) -> BaseTyp
 }
 
 /// Reset a stream buffer from ISR
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that remains allocated for the
+/// call. The interrupt must be permitted to call FreeRTOS APIs, no task may be
+/// blocked on the buffer, and no other execution context may access it during
+/// the reset.
 pub unsafe fn xStreamBufferResetFromISR(xStreamBuffer: StreamBufferHandle_t) -> BaseType_t {
     configASSERT(!xStreamBuffer.is_null());
 
@@ -481,6 +755,11 @@ pub unsafe fn xStreamBufferResetFromISR(xStreamBuffer: StreamBufferHandle_t) -> 
 // =============================================================================
 
 /// Get number of bytes available to read
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call.
 pub unsafe fn xStreamBufferBytesAvailable(xStreamBuffer: StreamBufferHandle_t) -> usize {
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
@@ -488,6 +767,11 @@ pub unsafe fn xStreamBufferBytesAvailable(xStreamBuffer: StreamBufferHandle_t) -
 }
 
 /// Get number of bytes of free space
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call.
 pub unsafe fn xStreamBufferSpacesAvailable(xStreamBuffer: StreamBufferHandle_t) -> usize {
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
@@ -509,6 +793,11 @@ pub unsafe fn xStreamBufferSpacesAvailable(xStreamBuffer: StreamBufferHandle_t) 
 }
 
 /// Check if stream buffer is empty
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call.
 pub unsafe fn xStreamBufferIsEmpty(xStreamBuffer: StreamBufferHandle_t) -> BaseType_t {
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
@@ -523,6 +812,11 @@ pub unsafe fn xStreamBufferIsEmpty(xStreamBuffer: StreamBufferHandle_t) -> BaseT
 }
 
 /// Check if stream buffer is full
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call.
 pub unsafe fn xStreamBufferIsFull(xStreamBuffer: StreamBufferHandle_t) -> BaseType_t {
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *const StreamBuffer_t;
@@ -542,6 +836,12 @@ pub unsafe fn xStreamBufferIsFull(xStreamBuffer: StreamBufferHandle_t) -> BaseTy
 }
 
 /// Set the trigger level
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call. Call from task context and synchronize this update with
+/// operations that can block waiting for the buffer's trigger level.
 pub unsafe fn xStreamBufferSetTriggerLevel(
     xStreamBuffer: StreamBufferHandle_t,
     mut xTriggerLevel: usize,
@@ -564,6 +864,12 @@ pub unsafe fn xStreamBufferSetTriggerLevel(
 }
 
 /// Get the next message length (for message buffers)
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call. The caller must be the buffer's sole consumer, with no
+/// concurrent receive operation advancing the read position.
 pub unsafe fn xStreamBufferNextMessageLengthBytes(xStreamBuffer: StreamBufferHandle_t) -> usize {
     configASSERT(!xStreamBuffer.is_null());
     let pxStreamBuffer = xStreamBuffer as *mut StreamBuffer_t;
@@ -581,6 +887,9 @@ pub unsafe fn xStreamBufferNextMessageLengthBytes(xStreamBuffer: StreamBufferHan
             );
             xTempReturn as usize
         } else {
+            /* A message length prefix is published atomically with its
+             * payload, so a non-zero partial prefix indicates corruption. */
+            configASSERT(xBytesAvailable == 0);
             0
         }
     } else {
@@ -604,6 +913,14 @@ pub unsafe fn xStreamBufferNextMessageLengthBytes(xStreamBuffer: StreamBufferHan
 /// # Returns
 ///
 /// Number of bytes actually sent
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call, and this caller must be its sole producer. `pvTxData` must
+/// be non-null and readable for `xDataLengthBytes` bytes without overlapping
+/// the stream buffer's storage. Call only from task context with initialized
+/// scheduler and port state; any configured callback must be valid to invoke.
 pub unsafe fn xStreamBufferSend(
     xStreamBuffer: StreamBufferHandle_t,
     pvTxData: *const c_void,
@@ -639,7 +956,9 @@ pub unsafe fn xStreamBufferSend(
 
     if xTicksToWait != 0 {
         let mut xTimeOut = TimeOut_t::default();
-        vTaskSetTimeOutState(&mut xTimeOut);
+        // SAFETY: xTimeOut is an initialized, uniquely owned local and this
+        // send API runs in task context.
+        unsafe { vTaskSetTimeOutState(&mut xTimeOut) };
 
         loop {
             portENTER_CRITICAL();
@@ -682,7 +1001,9 @@ pub unsafe fn xStreamBufferSend(
                 .xTaskWaitingToSend
                 .store(ptr::null_mut(), Ordering::Release);
 
-            if xTaskCheckForTimeOut(&mut xTimeOut, &mut xTicksToWait) != pdFALSE {
+            // SAFETY: both timeout values remain initialized and uniquely
+            // owned throughout this task-context loop.
+            if unsafe { xTaskCheckForTimeOut(&mut xTimeOut, &mut xTicksToWait) } != pdFALSE {
                 break;
             }
         }
@@ -713,6 +1034,15 @@ pub unsafe fn xStreamBufferSend(
 }
 
 /// Send bytes to a stream buffer from ISR
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call, and the interrupt-side caller must be its sole producer.
+/// `pvTxData` must be non-null and readable for `xDataLengthBytes` bytes without
+/// overlapping the stream buffer's storage. The interrupt must be permitted to
+/// call FreeRTOS APIs, a non-null `pxHigherPriorityTaskWoken` must be uniquely
+/// writable, and any configured callback must be valid to invoke from an ISR.
 pub unsafe fn xStreamBufferSendFromISR(
     xStreamBuffer: StreamBufferHandle_t,
     pvTxData: *const c_void,
@@ -769,6 +1099,14 @@ pub unsafe fn xStreamBufferSendFromISR(
 /// # Returns
 ///
 /// Number of bytes received
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call, and this caller must be its sole consumer. `pvRxData` must
+/// be non-null and writable for `xBufferLengthBytes` bytes without overlapping
+/// the stream buffer's storage. Call only from task context with initialized
+/// scheduler and port state; any configured callback must be valid to invoke.
 pub unsafe fn xStreamBufferReceive(
     xStreamBuffer: StreamBufferHandle_t,
     pvRxData: *mut c_void,
@@ -853,6 +1191,15 @@ pub unsafe fn xStreamBufferReceive(
 }
 
 /// Receive bytes from a stream buffer from ISR
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call, and the interrupt-side caller must be its sole consumer.
+/// `pvRxData` must be non-null and writable for `xBufferLengthBytes` bytes
+/// without overlapping the stream buffer's storage. The interrupt must be
+/// permitted to call FreeRTOS APIs, a non-null `pxHigherPriorityTaskWoken` must
+/// be uniquely writable, and any callback must be valid to invoke from an ISR.
 pub unsafe fn xStreamBufferReceiveFromISR(
     xStreamBuffer: StreamBufferHandle_t,
     pvRxData: *mut c_void,
@@ -895,6 +1242,11 @@ pub unsafe fn xStreamBufferReceiveFromISR(
 // =============================================================================
 
 /// Get the notification index used by this stream buffer
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call.
 pub unsafe fn uxStreamBufferGetStreamBufferNotificationIndex(
     xStreamBuffer: StreamBufferHandle_t,
 ) -> UBaseType_t {
@@ -906,6 +1258,13 @@ pub unsafe fn uxStreamBufferGetStreamBufferNotificationIndex(
 }
 
 /// Set the notification index used by this stream buffer
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call, and `uxNotificationIndex` must select an existing task
+/// notification slot. Call from task context while no task is waiting on, or
+/// can concurrently begin an operation on, this buffer.
 pub unsafe fn vStreamBufferSetStreamBufferNotificationIndex(
     xStreamBuffer: StreamBufferHandle_t,
     uxNotificationIndex: UBaseType_t,
@@ -940,6 +1299,12 @@ pub unsafe fn vStreamBufferSetStreamBufferNotificationIndex(
 // =============================================================================
 
 /// Notify that send completed (from ISR)
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call. The interrupt must be permitted to call FreeRTOS APIs, and
+/// a non-null `pxHigherPriorityTaskWoken` must be uniquely writable.
 pub unsafe fn xStreamBufferSendCompletedFromISR(
     xStreamBuffer: StreamBufferHandle_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
@@ -970,6 +1335,12 @@ pub unsafe fn xStreamBufferSendCompletedFromISR(
 }
 
 /// Notify that receive completed (from ISR)
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call. The interrupt must be permitted to call FreeRTOS APIs, and
+/// a non-null `pxHigherPriorityTaskWoken` must be uniquely writable.
 pub unsafe fn xStreamBufferReceiveCompletedFromISR(
     xStreamBuffer: StreamBufferHandle_t,
     pxHigherPriorityTaskWoken: *mut BaseType_t,
@@ -1395,6 +1766,8 @@ pub unsafe fn xStreamBufferGetStaticBuffers(
     ppxStaticStreamBuffer: *mut *mut StaticStreamBuffer_t,
 ) -> BaseType_t {
     configASSERT(!xStreamBuffer.is_null());
+    configASSERT(!ppucStreamBufferStorageArea.is_null());
+    configASSERT(!ppxStaticStreamBuffer.is_null());
 
     let pxStreamBuffer = xStreamBuffer as *mut StreamBuffer_t;
     let xReturn: BaseType_t;
@@ -1403,19 +1776,224 @@ pub unsafe fn xStreamBufferGetStaticBuffers(
         xReturn = pdTRUE;
 
         // Return the storage area pointer
-        if !ppucStreamBufferStorageArea.is_null() {
-            *ppucStreamBufferStorageArea = (*pxStreamBuffer).pucBuffer;
-        }
+        *ppucStreamBufferStorageArea = (*pxStreamBuffer).pucBuffer;
 
         // Return the static structure pointer (same as the handle for static allocation)
-        if !ppxStaticStreamBuffer.is_null() {
-            *ppxStaticStreamBuffer = pxStreamBuffer as *mut StaticStreamBuffer_t;
-        }
+        *ppxStaticStreamBuffer = pxStreamBuffer as *mut StaticStreamBuffer_t;
     } else {
         xReturn = pdFALSE;
     }
 
     xReturn
+}
+
+// =============================================================================
+// Message Buffer Header-Macro Veneers
+// =============================================================================
+
+/// Return the caller-provided storage behind a static message buffer.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferGetStaticBuffers`]'s live-handle and
+/// output-pointer requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferGetStaticBuffers(
+    xMessageBuffer: MessageBufferHandle_t,
+    ppucMessageBufferStorageArea: *mut *mut u8,
+    ppxStaticMessageBuffer: *mut *mut StaticMessageBuffer_t,
+) -> BaseType_t {
+    xStreamBufferGetStaticBuffers(
+        xMessageBuffer,
+        ppucMessageBufferStorageArea,
+        ppxStaticMessageBuffer,
+    )
+}
+
+/// Send one complete message from task context.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferSend`]'s live-handle, source-buffer,
+/// single-writer, and task-context requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferSend(
+    xMessageBuffer: MessageBufferHandle_t,
+    pvTxData: *const c_void,
+    xDataLengthBytes: usize,
+    xTicksToWait: TickType_t,
+) -> usize {
+    xStreamBufferSend(xMessageBuffer, pvTxData, xDataLengthBytes, xTicksToWait)
+}
+
+/// Send one complete message from interrupt context.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferSendFromISR`]'s live-handle,
+/// source-buffer, single-writer, wake-pointer, and ISR-priority requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferSendFromISR(
+    xMessageBuffer: MessageBufferHandle_t,
+    pvTxData: *const c_void,
+    xDataLengthBytes: usize,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> usize {
+    xStreamBufferSendFromISR(
+        xMessageBuffer,
+        pvTxData,
+        xDataLengthBytes,
+        pxHigherPriorityTaskWoken,
+    )
+}
+
+/// Receive one complete message in task context.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferReceive`]'s live-handle,
+/// destination-buffer, single-reader, and task-context requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferReceive(
+    xMessageBuffer: MessageBufferHandle_t,
+    pvRxData: *mut c_void,
+    xBufferLengthBytes: usize,
+    xTicksToWait: TickType_t,
+) -> usize {
+    xStreamBufferReceive(xMessageBuffer, pvRxData, xBufferLengthBytes, xTicksToWait)
+}
+
+/// Receive one complete message from interrupt context.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferReceiveFromISR`]'s live-handle,
+/// destination-buffer, single-reader, wake-pointer, and ISR requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferReceiveFromISR(
+    xMessageBuffer: MessageBufferHandle_t,
+    pvRxData: *mut c_void,
+    xBufferLengthBytes: usize,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> usize {
+    xStreamBufferReceiveFromISR(
+        xMessageBuffer,
+        pvRxData,
+        xBufferLengthBytes,
+        pxHigherPriorityTaskWoken,
+    )
+}
+
+/// Delete a message buffer.
+///
+/// # Safety
+///
+/// The caller must uphold [`vStreamBufferDelete`]'s exclusive final-access and
+/// allocation-origin requirements.
+#[inline(always)]
+pub unsafe fn vMessageBufferDelete(xMessageBuffer: MessageBufferHandle_t) {
+    vStreamBufferDelete(xMessageBuffer)
+}
+
+/// Return whether a message buffer is full.
+///
+/// # Safety
+///
+/// The handle must identify a live message buffer through the call.
+#[inline(always)]
+pub unsafe fn xMessageBufferIsFull(xMessageBuffer: MessageBufferHandle_t) -> BaseType_t {
+    xStreamBufferIsFull(xMessageBuffer)
+}
+
+/// Return whether a message buffer is empty.
+///
+/// # Safety
+///
+/// The handle must identify a live message buffer through the call.
+#[inline(always)]
+pub unsafe fn xMessageBufferIsEmpty(xMessageBuffer: MessageBufferHandle_t) -> BaseType_t {
+    xStreamBufferIsEmpty(xMessageBuffer)
+}
+
+/// Reset a message buffer from task context.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferReset`]'s live-handle, exclusion, and
+/// task-context requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferReset(xMessageBuffer: MessageBufferHandle_t) -> BaseType_t {
+    xStreamBufferReset(xMessageBuffer)
+}
+
+/// Reset a message buffer from interrupt context.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferResetFromISR`]'s live-handle,
+/// exclusion, and ISR-priority requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferResetFromISR(xMessageBuffer: MessageBufferHandle_t) -> BaseType_t {
+    xStreamBufferResetFromISR(xMessageBuffer)
+}
+
+/// Return the free space in a message buffer.
+///
+/// # Safety
+///
+/// The handle must identify a live message buffer through the call.
+#[inline(always)]
+pub unsafe fn xMessageBufferSpaceAvailable(xMessageBuffer: MessageBufferHandle_t) -> usize {
+    xStreamBufferSpacesAvailable(xMessageBuffer)
+}
+
+/// Compatibility spelling of [`xMessageBufferSpaceAvailable`].
+///
+/// # Safety
+///
+/// The handle must identify a live message buffer through the call.
+#[inline(always)]
+pub unsafe fn xMessageBufferSpacesAvailable(xMessageBuffer: MessageBufferHandle_t) -> usize {
+    xStreamBufferSpacesAvailable(xMessageBuffer)
+}
+
+/// Return the length of the next complete message.
+///
+/// # Safety
+///
+/// The handle must identify a live, single-reader message buffer through the
+/// call.
+#[inline(always)]
+pub unsafe fn xMessageBufferNextLengthBytes(xMessageBuffer: MessageBufferHandle_t) -> usize {
+    xStreamBufferNextMessageLengthBytes(xMessageBuffer)
+}
+
+/// Run message-buffer send completion processing from an interrupt.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferSendCompletedFromISR`]'s live-handle,
+/// wake-pointer, and ISR-priority requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferSendCompletedFromISR(
+    xMessageBuffer: MessageBufferHandle_t,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> BaseType_t {
+    xStreamBufferSendCompletedFromISR(xMessageBuffer, pxHigherPriorityTaskWoken)
+}
+
+/// Run message-buffer receive completion processing from an interrupt.
+///
+/// # Safety
+///
+/// The caller must uphold [`xStreamBufferReceiveCompletedFromISR`]'s
+/// live-handle, wake-pointer, and ISR-priority requirements.
+#[inline(always)]
+pub unsafe fn xMessageBufferReceiveCompletedFromISR(
+    xMessageBuffer: MessageBufferHandle_t,
+    pxHigherPriorityTaskWoken: *mut BaseType_t,
+) -> BaseType_t {
+    xStreamBufferReceiveCompletedFromISR(xMessageBuffer, pxHigherPriorityTaskWoken)
 }
 
 // =============================================================================
@@ -1426,6 +2004,11 @@ pub unsafe fn xStreamBufferGetStaticBuffers(
 ///
 /// Returns the number assigned to this stream buffer, which can be used
 /// for trace and debugging purposes.
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call. Access to its trace number must not race a setter.
 #[cfg(feature = "trace-facility")]
 pub unsafe fn uxStreamBufferGetStreamBufferNumber(
     xStreamBuffer: StreamBufferHandle_t,
@@ -1438,6 +2021,11 @@ pub unsafe fn uxStreamBufferGetStreamBufferNumber(
 /// Set the stream buffer number (for trace facility)
 ///
 /// Assigns a number to this stream buffer for trace and debugging purposes.
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call. The caller must have exclusive access to its trace number.
 #[cfg(feature = "trace-facility")]
 pub unsafe fn vStreamBufferSetStreamBufferNumber(
     xStreamBuffer: StreamBufferHandle_t,
@@ -1451,6 +2039,11 @@ pub unsafe fn vStreamBufferSetStreamBufferNumber(
 /// Get the stream buffer type (for trace facility)
 ///
 /// Returns non-zero if this is a message buffer, zero if it's a stream buffer.
+///
+/// # Safety
+///
+/// `xStreamBuffer` must identify a live buffer that cannot be reset or deleted
+/// during the call.
 #[cfg(feature = "trace-facility")]
 pub unsafe fn ucStreamBufferGetStreamBufferType(xStreamBuffer: StreamBufferHandle_t) -> u8 {
     configASSERT(!xStreamBuffer.is_null());
@@ -1597,12 +2190,215 @@ mod tests {
         assert_eq!(ISR_CALLBACKS.load(Ordering::Relaxed), 2);
     }
 
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn header_macro_veneers_preserve_buffer_types_and_message_boundaries() {
+        crate::port::test_port_reset();
+
+        let mut stream_storage = [0u8; 8];
+        let mut stream_control = StaticStreamBuffer_t::new();
+        let stream = unsafe {
+            xStreamBufferCreateStatic(
+                stream_storage.len(),
+                2,
+                stream_storage.as_mut_ptr(),
+                &mut stream_control,
+            )
+        };
+        assert!(!stream.is_null());
+        assert_eq!(
+            unsafe { (*(stream as *mut StreamBuffer_t)).ucFlags },
+            sbFLAGS_IS_STATICALLY_ALLOCATED,
+        );
+
+        let mut batching_storage = [0u8; 8];
+        let mut batching_control = StaticStreamBuffer_t::new();
+        let batching = unsafe {
+            xStreamBatchingBufferCreateStaticWithCallback(
+                batching_storage.len(),
+                2,
+                batching_storage.as_mut_ptr(),
+                &mut batching_control,
+                Some(no_op_callback),
+                Some(no_op_callback),
+            )
+        };
+        assert!(!batching.is_null());
+        assert_eq!(
+            unsafe { (*(batching as *mut StreamBuffer_t)).ucFlags },
+            sbFLAGS_IS_STATICALLY_ALLOCATED | sbFLAGS_IS_BATCHING_BUFFER,
+        );
+
+        let mut message_storage = [0u8; 24];
+        let mut message_control = StaticMessageBuffer_t::new();
+        let message_storage_ptr = message_storage.as_mut_ptr();
+        let message_control_ptr = core::ptr::addr_of_mut!(message_control);
+        let message = unsafe {
+            xMessageBufferCreateStaticWithCallback(
+                message_storage.len(),
+                message_storage_ptr,
+                message_control_ptr,
+                Some(no_op_callback),
+                Some(no_op_callback),
+            )
+        };
+        assert!(!message.is_null());
+        assert_eq!(
+            unsafe { (*(message as *mut StreamBuffer_t)).ucFlags },
+            sbFLAGS_IS_STATICALLY_ALLOCATED | sbFLAGS_IS_MESSAGE_BUFFER,
+        );
+
+        let payload = [1u8, 2, 3];
+        assert_eq!(
+            unsafe { xMessageBufferSend(message, payload.as_ptr().cast(), payload.len(), 0) },
+            payload.len(),
+        );
+        assert_eq!(
+            unsafe { xMessageBufferNextLengthBytes(message) },
+            payload.len(),
+        );
+        assert_eq!(unsafe { xMessageBufferIsEmpty(message) }, pdFALSE);
+        assert_eq!(unsafe { xMessageBufferSpaceAvailable(message) }, unsafe {
+            xMessageBufferSpacesAvailable(message)
+        },);
+
+        let mut received = [0u8; 3];
+        assert_eq!(
+            unsafe {
+                xMessageBufferReceive(message, received.as_mut_ptr().cast(), received.len(), 0)
+            },
+            received.len(),
+        );
+        assert_eq!(received, payload);
+
+        let mut returned_storage = ptr::null_mut();
+        let mut returned_control = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                xMessageBufferGetStaticBuffers(
+                    message,
+                    &mut returned_storage,
+                    &mut returned_control,
+                )
+            },
+            pdTRUE,
+        );
+        assert_eq!(returned_storage, message_storage_ptr);
+        assert!(core::ptr::eq(returned_control, message_control_ptr));
+
+        crate::port::test_port_set_inside_interrupt(true);
+        let mut higher_priority_task_woken = pdFALSE;
+        assert_eq!(
+            unsafe {
+                xMessageBufferSendFromISR(
+                    message,
+                    payload.as_ptr().cast(),
+                    payload.len(),
+                    &mut higher_priority_task_woken,
+                )
+            },
+            payload.len(),
+        );
+        assert_eq!(
+            unsafe {
+                xMessageBufferReceiveFromISR(
+                    message,
+                    received.as_mut_ptr().cast(),
+                    received.len(),
+                    &mut higher_priority_task_woken,
+                )
+            },
+            received.len(),
+        );
+        assert_eq!(
+            unsafe { xMessageBufferSendCompletedFromISR(message, &mut higher_priority_task_woken) },
+            pdFALSE,
+        );
+        assert_eq!(
+            unsafe {
+                xMessageBufferReceiveCompletedFromISR(message, &mut higher_priority_task_woken)
+            },
+            pdFALSE,
+        );
+        assert_eq!(unsafe { xMessageBufferResetFromISR(message) }, pdPASS);
+        crate::port::test_port_set_inside_interrupt(false);
+
+        unsafe {
+            assert_eq!(xMessageBufferReset(message), pdPASS);
+            assert_eq!(xMessageBufferIsFull(message), pdFALSE);
+            vMessageBufferDelete(message);
+        }
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    #[should_panic(expected = "FreeRTOS assertion failed")]
+    fn next_message_length_rejects_a_partial_published_prefix() {
+        let mut storage = [0u8; 16];
+        let mut control = StaticStreamBuffer_t::new();
+        // SAFETY: both buffers are unique and remain live for the test.
+        let handle = unsafe {
+            xStreamBufferGenericCreateStatic(
+                storage.len(),
+                1,
+                sbTYPE_MESSAGE_BUFFER,
+                storage.as_mut_ptr(),
+                &mut control,
+                None,
+                None,
+            )
+        };
+        assert!(!handle.is_null());
+
+        // Model the impossible/corrupt state diagnosed by upstream: exactly a
+        // length prefix is visible without any payload byte.
+        let stream = handle as *mut StreamBuffer_t;
+        unsafe {
+            (*stream)
+                .xHead
+                .store(sbBYTES_TO_STORE_MESSAGE_LENGTH, Ordering::Release);
+            let _ = xStreamBufferNextMessageLengthBytes(handle);
+        }
+    }
+
+    #[cfg(all(
+        feature = "port-test",
+        not(any(feature = "alloc", feature = "heap-4", feature = "heap-5"))
+    ))]
+    #[test]
+    #[should_panic(expected = "FreeRTOS assertion failed")]
+    fn static_only_delete_rejects_a_corrupt_dynamic_allocation_flag() {
+        let mut storage = [0u8; 8];
+        let mut control = StaticStreamBuffer_t::new();
+        // SAFETY: both buffers are unique and remain live for the test.
+        let handle = unsafe {
+            xStreamBufferGenericCreateStatic(
+                storage.len(),
+                1,
+                sbTYPE_STREAM_BUFFER,
+                storage.as_mut_ptr(),
+                &mut control,
+                None,
+                None,
+            )
+        };
+        assert!(!handle.is_null());
+
+        // Simulate structure corruption: this configuration cannot create a
+        // dynamically allocated object, so upstream asserts on deletion.
+        unsafe {
+            (*(handle as *mut StreamBuffer_t)).ucFlags &= !sbFLAGS_IS_STATICALLY_ALLOCATED;
+            vStreamBufferDelete(handle);
+        }
+    }
+
     #[cfg(all(feature = "port-test", feature = "heap-4"))]
     #[test]
     fn dynamic_buffer_uses_and_returns_freertos_heap_storage() {
         use crate::memory::{pvPortMalloc, vPortFree, vPortHeapResetState, xPortGetFreeHeapSize};
 
-        vPortHeapResetState();
+        // SAFETY: this isolated test has no live heap allocations at reset.
+        unsafe { vPortHeapResetState() };
         unsafe {
             let probe = pvPortMalloc(1);
             assert!(!probe.is_null());
@@ -1617,13 +2413,30 @@ mod tests {
             vStreamBufferDelete(handle);
             assert_eq!(xPortGetFreeHeapSize(), initial_free);
         }
-        vPortHeapResetState();
+        // SAFETY: the stream buffer and probe were both deleted above.
+        unsafe { vPortHeapResetState() };
     }
 
     #[cfg(feature = "port-test")]
     #[test]
     fn atomic_spsc_handoff_preserves_bytes_under_host_threads() {
+        #[cfg(miri)]
+        const TRANSFERS: usize = 500;
+        #[cfg(not(miri))]
         const TRANSFERS: usize = 50_000;
+
+        struct SendHandle(StreamBufferHandle_t);
+
+        impl SendHandle {
+            fn into_raw(self) -> StreamBufferHandle_t {
+                self.0
+            }
+        }
+
+        // SAFETY: the fixture leaks the buffer for both threads' lifetimes and
+        // assigns exactly one sender and one receiver, which is the concurrency
+        // contract implemented by the stream buffer's atomic indices.
+        unsafe impl Send for SendHandle {}
 
         let storage = std::boxed::Box::leak(std::boxed::Box::new([0u8; 257]));
         let control = std::boxed::Box::leak(std::boxed::Box::new(StaticStreamBuffer_t::new()));
@@ -1640,9 +2453,9 @@ mod tests {
         };
         assert!(!handle.is_null());
 
-        let sender_handle = handle as usize;
+        let sender_handle = SendHandle(handle);
         let sender = std::thread::spawn(move || {
-            let handle = sender_handle as StreamBufferHandle_t;
+            let handle = sender_handle.into_raw();
             let mut index = 0usize;
             while index < TRANSFERS {
                 let byte = (index % 251) as u8;
@@ -1654,9 +2467,9 @@ mod tests {
             }
         });
 
-        let receiver_handle = handle as usize;
+        let receiver_handle = SendHandle(handle);
         let receiver = std::thread::spawn(move || {
-            let handle = receiver_handle as StreamBufferHandle_t;
+            let handle = receiver_handle.into_raw();
             let mut index = 0usize;
             while index < TRANSFERS {
                 let mut byte = 0u8;

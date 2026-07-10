@@ -165,10 +165,15 @@ pub fn test_port_advance_tick_count(ticks: TickType_t) -> TickType_t {
 
 /// Deliver one tick to the kernel and perform the corresponding ISR yield.
 ///
-/// The caller must initialize or reset the kernel scheduler globals first.
-pub fn test_port_fire_tick() -> BaseType_t {
+/// # Safety
+///
+/// The caller must initialize the scheduler lists and install a live current
+/// TCB before calling, then keep all reachable TCB/list storage valid through
+/// the simulated interrupt.
+pub unsafe fn test_port_fire_tick() -> BaseType_t {
     TICK_INTERRUPT_COUNT.fetch_add(1, Ordering::SeqCst);
-    let xSwitchRequired = crate::kernel::tasks::xTaskIncrementTick();
+    // Safety: forwarded under this test helper's scheduler-state contract.
+    let xSwitchRequired = unsafe { crate::kernel::tasks::xTaskIncrementTick() };
     portYIELD_FROM_ISR(xSwitchRequired);
     xSwitchRequired
 }
@@ -375,5 +380,8 @@ mod tests {
         assert_eq!(snapshot.scheduler_start_count, 1);
         assert_eq!(snapshot.scheduler_end_count, 1);
         assert!(!snapshot.scheduler_running);
+
+        // Do not leak synthetic ISR context into later single-threaded tests.
+        test_port_set_inside_interrupt(false);
     }
 }

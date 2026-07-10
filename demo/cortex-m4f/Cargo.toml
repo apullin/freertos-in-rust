@@ -2,8 +2,8 @@
 name = "freertos-demo"
 version = "0.1.0"
 edition = "2021"
-authors = ["FreeRusTOS Contributors"]
-description = "Demo application for FreeRusTOS on Cortex-M4F"
+authors = ["FreeRTOS-in-Rust Contributors"]
+description = "Demo application for FreeRTOS-in-Rust on Cortex-M4F"
 
 [[bin]]
 name = "demo"
@@ -18,7 +18,7 @@ use-embedded-alloc = ["freertos-in-rust/alloc", "dep:embedded-alloc"]
 
 [dependencies]
 # The FreeRTOS kernel
-freertos-in-rust = { path = "../..", features = [
+freertos-in-rust = { path = "../..", default-features = false, features = [
     "port-cortex-m4f",
     "use-mutexes",
     "timers",

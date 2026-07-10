@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * [AMENDMENT] This is the Cortex-M4F port for FreeRusTOS.
+ * [AMENDMENT] This is the Cortex-M4F port for FreeRTOS-in-Rust.
  * Ported from portable/GCC/ARM_CM4F/port.c
  *
  * This port is for ARM Cortex-M4 with FPU (Floating Point Unit).
@@ -194,7 +194,16 @@ pub fn portEND_SWITCHING_ISR(xSwitchRequired: BaseType_t) {
 /// - R12, R3, R2, R1, R0 (R0 = pvParameters)
 /// - EXC_RETURN
 /// - R11, R10, R9, R8, R7, R6, R5, R4
-pub fn pxPortInitialiseStack(
+///
+/// # Safety
+///
+/// `pxTopOfStack` must be non-null, aligned, and lie near the high end of a
+/// uniquely writable stack allocation with enough lower-addressed words for
+/// the complete frame documented above. The allocation must remain live and
+/// stationary for the task's lifetime. `pvParameters` is stored without
+/// validation and must satisfy the task entry function's requirements when it
+/// is eventually invoked.
+pub unsafe fn pxPortInitialiseStack(
     pxTopOfStack: *mut StackType_t,
     pxCode: TaskFunction_t,
     pvParameters: *mut c_void,
@@ -256,6 +265,13 @@ fn prvTaskExitError() -> ! {
 ///
 /// This is called via `svc 0` from prvPortStartFirstTask.
 /// It restores the context of the first task from pxCurrentTCB.
+///
+/// # Safety
+///
+/// Enter only as the scheduler-start SVC exception while in handler mode.
+/// `pxCurrentTCB` must name a live task whose saved stack was built by
+/// [`pxPortInitialiseStack`]; ordinary function entry can corrupt the processor
+/// context.
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn vPortSVCHandler() {
@@ -281,6 +297,12 @@ pub unsafe extern "C" fn vPortSVCHandler() {
 ///
 /// This is triggered by setting the PENDSVSET bit in ICSR.
 /// It saves the current task's context and restores the next task's context.
+///
+/// # Safety
+///
+/// Enter only as the Cortex-M PendSV exception with a valid process stack and
+/// floating-point exception state, live `pxCurrentTCB`, and initialized
+/// scheduler lists. Ordinary function entry can corrupt task and FPU state.
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn xPortPendSVHandler() {
@@ -363,7 +385,9 @@ pub extern "C" fn xPortSysTickHandler() {
 
     crate::trace::traceISR_ENTER();
 
-    if crate::kernel::tasks::xTaskIncrementTick() != pdFALSE {
+    // SAFETY: SysTick runs at the configured kernel interrupt priority and
+    // serializes the scheduler tick update with the port interrupt mask.
+    if unsafe { crate::kernel::tasks::xTaskIncrementTick() } != pdFALSE {
         crate::trace::traceISR_EXIT_TO_SCHEDULER();
         unsafe {
             core::ptr::write_volatile(NVIC_ICSR, NVIC_PENDSVSET_BIT);

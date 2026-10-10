@@ -9,7 +9,7 @@ name = "smoke"
 path = "src/bin/smoke.rs"
 
 [dependencies]
-riscv-rt = "0.13"
+riscv-rt = "0.16"
 freertos-in-rust = { path = "../../..", default-features = false, features = [
     "port-riscv32",
     "task-suspend",

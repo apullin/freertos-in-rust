@@ -34,7 +34,7 @@ freertos-in-rust = { path = "../..", default-features = false, features = [
 ] }
 
 riscv = "0.12"
-riscv-rt = "0.13"
+riscv-rt = "0.16"
 panic-halt = "1.0"
 
 [profile.dev]

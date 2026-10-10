@@ -139,7 +139,8 @@ cortex-m-rt = { version = "0.7", optional = true }
 
 # RISC-V support (optional, for port-riscv32)
 riscv = { version = "0.12", optional = true }
-riscv-rt = { version = "0.13", optional = true }
+# 0.16 keeps startup assembly contiguous across global_asm expansion.
+riscv-rt = { version = "0.16", optional = true }
 
 [dev-dependencies]
 

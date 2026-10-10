@@ -671,6 +671,22 @@ unsafe fn prvAddNewTaskToReadyList(pxNewTCB: *mut TCB_t) {
     }
 }
 
+/// Find a pre-start replacement without saving/restoring a running context.
+#[cfg(feature = "task-delete")]
+unsafe fn prvFindInitialReadyTask() -> *mut TCB_t {
+    let mut priority = uxTopReadyPriority;
+    loop {
+        let list = ptr::addr_of!(pxReadyTasksLists[priority as usize]);
+        if listLIST_IS_EMPTY(list) == pdFALSE {
+            return listGET_OWNER_OF_HEAD_ENTRY(list) as *mut TCB_t;
+        }
+        if priority == 0 {
+            return ptr::null_mut();
+        }
+        priority -= 1;
+    }
+}
+
 /// Initialize a new task's TCB and stack.
 unsafe fn prvInitialiseNewTask(
     pxTaskCode: TaskFunction_t,
@@ -2513,7 +2529,13 @@ pub unsafe fn vTaskDelete(xTaskToDelete: TaskHandle_t) {
         // of critical section. If a task deletes itself, prvDeleteTCB is called
         // from prvCheckTasksWaitingTermination which is called from the idle task.
         if xDeleteTCBInIdleTask != pdTRUE {
-            prvDeleteTCB(prvGetTCBFromHandle(xTaskToDelete));
+            let pxTCB = prvGetTCBFromHandle(xTaskToDelete);
+            prvDeleteTCB(pxTCB);
+            // [AMENDMENT] Pre-start setup is exclusive. Do not retain the
+            // selected TCB after freeing it, including deletion via null.
+            if xSchedulerRunning == pdFALSE && pxTCB == pxCurrentTCB {
+                pxCurrentTCB = prvFindInitialReadyTask();
+            }
         }
 
         // Force a reschedule if it is the currently running task that has just
@@ -5855,6 +5877,33 @@ mod tests {
             assert_eq!(xTickCount, configINITIAL_TICK_COUNT.wrapping_add(3));
             assert_eq!(xPendedTicks, 0);
 
+            reset_synthetic_scheduler_state();
+        }
+        crate::port::test_port_reset();
+    }
+
+    #[cfg(all(feature = "port-test", feature = "task-delete"))]
+    #[test]
+    fn deleting_selected_task_before_start_keeps_a_live_current_pointer() {
+        crate::port::test_port_reset();
+        let mut first = TCB_t::new();
+        let mut second = TCB_t::new();
+        let first_ptr = ptr::addr_of_mut!(first);
+        let second_ptr = ptr::addr_of_mut!(second);
+        unsafe {
+            reset_synthetic_scheduler_state();
+            initialise_synthetic_tcb(first_ptr, 1);
+            initialise_synthetic_tcb(second_ptr, 2);
+            (*first_ptr).ucStaticallyAllocated = tskSTATICALLY_ALLOCATED_STACK_AND_TCB;
+            (*second_ptr).ucStaticallyAllocated = tskSTATICALLY_ALLOCATED_STACK_AND_TCB;
+            prvAddNewTaskToReadyList(first_ptr);
+            prvAddNewTaskToReadyList(second_ptr);
+            assert_eq!(prvGetTCBFromHandle(ptr::null_mut()), second_ptr);
+            vTaskDelete(second_ptr.cast());
+            assert_eq!(prvGetTCBFromHandle(ptr::null_mut()), first_ptr);
+            vTaskDelete(ptr::null_mut());
+            assert!(prvGetTCBFromHandle(ptr::null_mut()).is_null());
+            assert_eq!(uxTaskGetNumberOfTasks(), 0);
             reset_synthetic_scheduler_state();
         }
         crate::port::test_port_reset();

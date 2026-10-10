@@ -14,7 +14,8 @@ use freertos_in_rust::port::{
 };
 use freertos_in_rust::types::{StackType_t, TickType_t};
 use freertos_qemu_cortex_a53::{
-    finish, init, spawn_static, start_scheduler, tap, timer_interrupts, AlignedTaskBuffer,
+    finish, init, set_tick_isr_hook, spawn_static, start_scheduler, tap, timer_interrupts,
+    AlignedTaskBuffer,
 };
 
 const STACK_WORDS: usize = 2048;
@@ -33,6 +34,8 @@ const ERROR_STACK_SELECTOR: u64 = 1 << 2;
 const ERROR_GP_REGISTERS: u64 = 1 << 3;
 const ERROR_FP_REGISTERS: u64 = 1 << 4;
 const ERROR_IRQ_MASK: u64 = 1 << 5;
+const ERROR_FP_CONTROL: u64 = 1 << 6;
+const ERROR_FP_STATUS: u64 = 1 << 7;
 
 #[repr(C, align(16))]
 struct GuardedStack<const WORDS: usize> {
@@ -124,6 +127,99 @@ fn yield_with_fp_register(seed: u64) -> bool {
     value.to_bits() == expected.to_bits()
 }
 
+fn yield_with_fp_state(identity: u64) -> u64 {
+    let expected_control = if identity == 0xaaaa { 0 } else { 1 << 22 };
+    let expected_status = if identity == 0xaaaa { 0 } else { 1 << 27 };
+    let control: u64;
+    let status: u64;
+    unsafe {
+        asm!(
+            "msr fpcr, {expected_control}",
+            "msr fpsr, {expected_status}",
+            "svc 0",
+            "mrs {control}, fpcr",
+            "mrs {status}, fpsr",
+            expected_control = in(reg) expected_control,
+            expected_status = in(reg) expected_status,
+            control = out(reg) control,
+            status = out(reg) status,
+            options(nostack)
+        );
+    }
+    let mut errors = 0;
+    if control != expected_control {
+        errors |= ERROR_FP_CONTROL;
+    }
+    if status != expected_status {
+        errors |= ERROR_FP_STATUS;
+    }
+    errors
+}
+
+// The C ABI permits this IRQ callback to clobber v0 and the upper half of v8.
+extern "C" fn clobber_irq_fp_state() {
+    unsafe {
+        asm!(
+            "movi v0.16b, #0", "movi v8.16b, #0",
+            "msr fpcr, xzr", "msr fpsr, xzr",
+            out("v0") _, out("v8") _, options(nostack)
+        );
+    }
+}
+
+fn irq_runs_without_fp_access() -> bool {
+    // Reporter has not registered FP context yet and remains the highest
+    // priority task, so this IRQ need not restore any other task's FP state.
+    let before = timer_interrupts();
+    unsafe {
+        asm!(
+            "mrs x9, cpacr_el1",
+            "bic x10, x9, #(3 << 20)",
+            "msr cpacr_el1, x10", "isb",
+            "wfi",
+            "msr cpacr_el1, x9", "isb",
+            out("x9") _, out("x10") _, options(nostack)
+        );
+    }
+    timer_interrupts() > before
+}
+
+fn irq_preserves_fp_state() -> bool {
+    vPortTaskUsesFPU();
+    set_tick_isr_hook(clobber_irq_fp_state);
+    let before = timer_interrupts();
+    let value = 0x1234_5678_9abc_def0_u64;
+    let control = 1_u64 << 22;
+    let status = 1_u64 << 27;
+    let v0_low: u64;
+    let v0_high: u64;
+    let v8_high: u64;
+    let actual_control: u64;
+    let actual_status: u64;
+    unsafe {
+        asm!(
+            "fmov d0, {value}", "ins v0.d[1], {value}",
+            "fmov d8, {value}", "ins v8.d[1], {value}",
+            "msr fpcr, {control}", "msr fpsr, {status}",
+            "wfi",
+            "fmov {v0_low}, d0", "umov {v0_high}, v0.d[1]",
+            "umov {v8_high}, v8.d[1]",
+            "mrs {actual_control}, fpcr", "mrs {actual_status}, fpsr",
+            value = in(reg) value, control = in(reg) control, status = in(reg) status,
+            v0_low = out(reg) v0_low, v0_high = out(reg) v0_high,
+            v8_high = out(reg) v8_high, actual_control = out(reg) actual_control,
+            actual_status = out(reg) actual_status,
+            out("v0") _, out("v8") _, options(nostack)
+        );
+    }
+    timer_interrupts() > before
+        && v0_low == value
+        && v0_high == value
+        && v8_high == value
+        && actual_control == control
+        && actual_status == status
+}
+
 #[inline(always)]
 fn interrupt_disable_sets_daif_i() -> bool {
     portDISABLE_INTERRUPTS();
@@ -195,6 +291,7 @@ fn worker(
         if !yield_with_fp_register(pattern ^ iteration) {
             worker_errors |= ERROR_FP_REGISTERS;
         }
+        worker_errors |= yield_with_fp_state(identity);
 
         errors.fetch_or(worker_errors, Ordering::Relaxed);
         runs.fetch_add(1, Ordering::Release);
@@ -290,10 +387,26 @@ extern "C" fn reporter(_parameter: *mut c_void) {
         (a_errors | b_errors) & ERROR_IRQ_MASK == 0,
         "global_interrupt_disable_leaves_daif_masked",
     );
+    output.check(
+        (a_errors | b_errors) & ERROR_FP_CONTROL == 0,
+        "fpcr_is_task_local",
+    );
+    output.check(
+        (a_errors | b_errors) & ERROR_FP_STATUS == 0,
+        "fpsr_is_task_local",
+    );
+    output.check(
+        irq_runs_without_fp_access(),
+        "irq_runs_with_fp_access_disabled",
+    );
+    output.check(
+        irq_preserves_fp_state(),
+        "irq_preserves_full_simd_and_fp_state",
+    );
     output.diagnostic(format_args!(
         "elapsed={elapsed} irq={interrupts} a={a_runs}/0x{a_errors:x}/0x{a_local:x} b={b_runs}/0x{b_errors:x}/0x{b_local:x}"
     ));
-    finish(output, 10)
+    finish(output, 14)
 }
 
 #[no_mangle]

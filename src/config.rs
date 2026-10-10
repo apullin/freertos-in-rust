@@ -110,6 +110,11 @@ pub const configNUMBER_OF_CORES: BaseType_t = 1;
 #[cfg(feature = "smp")]
 pub const configNUMBER_OF_CORES: BaseType_t = 2;
 
+/// Each core runs its highest-priority eligible task, even when the two
+/// selected tasks have different priorities. This is the fixed SMP policy.
+#[cfg(feature = "smp")]
+pub const configRUN_MULTIPLE_PRIORITIES: BaseType_t = 1;
+
 // =============================================================================
 // Hook Functions
 // =============================================================================

@@ -34,10 +34,10 @@ is pinned to upstream commit
 in the Rust sources. The reference `FreeRTOS-Kernel/` tree is excluded from
 crate packages and is not compiled.
 
-Version 0.3.x is single-core. Separate SMP work remains experimental on the
-`smp` branch. Its early boot scaffolding has run in QEMU, but it has not passed
-the two-core scheduler gate and is not part of the 0.3.0 crate API or the
-qualification below.
+The published 0.3.x crate is single-core. This separate `smp` branch adds a
+two-core Cortex-A9 implementation with multithreaded QEMU regressions. It is
+not part of the published 0.3.0 crate and has not been qualified on SMP hardware.
+See [Two-core SMP](#two-core-smp) for its configuration and BSP contract.
 
 ## Feature support
 
@@ -106,7 +106,7 @@ coverage from code actually exercised in QEMU or on hardware.
 | Cortex-A9 | ✅ | QEMU `vexpress-a9` |
 | Cortex-A53 / AArch64 | ✅ | QEMU `virt` |
 | **Deliberate scope boundaries** | | |
-| SMP / multi-core scheduler | ⚠️ | Experimental `smp` branch; two-core scheduler gate does not yet pass |
+| SMP / multi-core scheduler | ⚠️ | Separate `smp` branch: two Cortex-A9 cores pass five QEMU suites; no SMP hardware qualification |
 | MPU ports | ➖ | Out of scope for the current translation |
 | Co-routines | ➖ | Deprecated upstream and intentionally omitted |
 
@@ -206,6 +206,11 @@ Create a fresh `TaskContext` at each task entry. It is neither `Send` nor
 `Sync`. ISR APIs remain a separate, mostly `unsafe` boundary because Rust types
 cannot prove interrupt priority, wake flags, or platform dispatch contracts.
 
+Task deletion is also `unsafe`, even with a unique `TaskHandle`: the caller
+must arrange shutdown and resource release before deletion, which skips stack
+destructors. Suspending a task does not prove that it holds no mutexes or other
+resources. See [the task veneer contract](RUST_WRAPPER.md#tasks).
+
 ## Allocation policy
 
 Select at most one allocator feature:
@@ -224,6 +229,12 @@ For `heap-4` or `heap-5`, the provided adapter can back Rust allocation:
 static ALLOCATOR: freertos_in_rust::memory::FreeRtosAllocator =
     freertos_in_rust::memory::FreeRtosAllocator;
 ```
+
+These heaps are task-only. The `GlobalAlloc` adapter returns null for ISR
+allocation/reallocation and deliberately leaves ISR-deallocated blocks allocated
+to avoid corrupting an interrupted heap operation. Transfer owned allocations
+back to a task for disposal; the raw heap functions retain their unsafe
+task-context contract.
 
 Static veneer constructors borrow their stack, data, and control storage for
 the complete object lifetime. Do not form references to uninitialized control
@@ -245,7 +256,7 @@ particular board, clock tree, interrupt controller, and compiler profile.
 | Cortex-M7 / `thumbv7em-none-eabihf` | Target check and Clippy with `heap-4` plus all capabilities; **QEMU-tested** | `mps2-an500`: smoke 3/3, kernel-core 5/5, ISR 4/4, allocator 4/4, stream/event/timer 6/6, port/FPU context 8/8, tickless 3/3 | ARM erratum 837070 handling for affected early M7 revisions is not implemented. |
 | RV32IMAC / `riscv32imac-unknown-none-elf` | Minimal and maximal target checks; **QEMU-tested** | `sifive_e` composite smoke: 10/10, covering traps/ISR yield, PLIC dispatch, MTIME rollover/fractional cadence, and tickless accounting | Single-hart, machine mode, and SiFive E only. The application callback must claim and complete external interrupt-controller sources. |
 | Cortex-A9 / `armv7a-none-eabi` | Focused target check with tickless/stats; **QEMU-tested** | `vexpress-a9` smoke: 7/7, including a non-tick early wake, repeated suppressed sleeps, periodic reload restoration, and WFI runtime accounting | The port assumes the vexpress-style MPCore private-peripheral/GIC mapping and SP804 integration. Validate addresses and clocks on real hardware. |
-| Cortex-A53 / `aarch64-unknown-none` | Focused target check with tickless/stats; **QEMU-tested** | `virt`: smoke 3/3, port/context 10/10, tickless 4/4, event/timer 3/3 | Runtime stats read `CNTPCT_EL0`; platform firmware or a higher exception level must permit EL1 access. |
+| Cortex-A53 / `aarch64-unknown-none` | Focused target check with tickless/stats; **QEMU-tested** | `virt`: smoke 3/3, port/context 14/14 (including FPCR/FPSR and IRQ SIMD preservation), tickless 4/4, event/timer 3/3 | Runtime stats read `CNTPCT_EL0`; platform firmware or a higher exception level must permit EL1 access. |
 
 The recovered LP-MSPM0G5187 application is preserved under
 [`hardware-tests/mspm0g5187`](hardware-tests/mspm0g5187/README.md) and is
@@ -258,6 +269,41 @@ Current QEMU qualification covers tickless idle on every registered
 single-core port. Each Cortex-M tickless guest suppresses 200 ticks, wakes at
 tick 180, and observes two SysTick interrupts across the test.
 
+## Two-core SMP
+
+Enable `port-cortex-a9,smp`, optionally `core-affinity`, on this branch. Both
+static-only and allocator-backed configurations are supported. Each core runs
+its highest-priority eligible ready task (`configRUN_MULTIPLE_PRIORITIES = 1`);
+equal-priority tasks are time-sliced. Affinity uses bit 0 for CPU0 and bit 1 for
+CPU1 through `vTaskCoreAffinitySet` / `uxTaskCoreAffinityGet`.
+
+The kernel keeps its C-shaped lists and TCBs. A recursive core-owned spinlock
+serializes kernel mutations; local IRQ masking protects per-core state.
+`vTaskSuspendAll` retains that lock while allowing local ISRs to pend work, so
+do not wait for progress on another core while scheduling is suspended.
+Remote suspend, delete, and affinity changes that evict a running task wait for
+its context handoff before returning. Do not call these operations with an
+outer critical section or scheduler suspension held. Deletion defers stack
+reclamation to idle after the outgoing context is saved.
+A stack high-water query returns zero (unknown) for a task still executing on
+the other core; suspend the task first for an exact scan.
+
+The BSP must provide coherent, shareable RAM, enable SCU/SMP participation,
+initialize separate exception stacks and vector bases for both CPUs, and
+reserve GIC SGI 0 for rescheduling. CPU0 alone starts the kernel and delivers
+the periodic tick. CPU1 calls `vPortStartSecondaryCore`, which waits for
+primary initialization. Both cores must enable VFP; tasks using it must call
+`vPortTaskUsesFPU`. The QEMU BSP under `tests/qemu/cortex-a9` is the executable
+reference, including secondary boot. Scheduler stop/restart and coordinated
+tickless sleep are not supported; `smp,tickless-idle` fails at compile time.
+
+`cargo run --manifest-path xtask/Cargo.toml -- qemu-test --arch cortex-a9-smp --suite all`
+runs five bounded guests with `-smp 2 -accel tcg,thread=multi`: scheduler/affinity
+(4 checks), queue/mutex/notification/lifecycle/stats (14), register/FPU migration
+(6), message-buffer/ISR/event/timer integration (4), and static-only shared-ready
+preemption without affinity (4). CI runs these in addition to every single-core
+suite. QEMU coverage is not an exhaustive interleaving proof or board qualification.
+
 ## Test driver
 
 Use the repository test driver instead of assembling ad-hoc QEMU command lines:
@@ -266,7 +312,7 @@ Use the repository test driver instead of assembling ad-hoc QEMU command lines:
 # Deterministic host tests in debug and release modes.
 cargo run --manifest-path xtask/Cargo.toml -- test host
 
-# Required feature/allocator/port matrix, docs, and expected-failure checks.
+# Feature/allocator/port matrix, optimized compiler barriers, docs, and rejections.
 cargo run --manifest-path xtask/Cargo.toml -- check-features
 
 # One bounded guest.
@@ -315,6 +361,7 @@ src/
 ├── types.rs    # Port-selected FreeRTOS scalar and handle types
 └── lib.rs
 tests/qemu/     # Bounded bare-metal QEMU firmware suites
+tests/codegen/  # Optimized port synchronization regressions
 xtask/          # Host, feature-matrix, and QEMU test driver
 ```
 

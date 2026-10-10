@@ -644,15 +644,15 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
         // Enter a critical section but don't use the taskENTER_CRITICAL()
         // method as that will mask interrupts that should exit sleep mode.
-        core::arch::asm!("cpsid i", options(nomem, nostack));
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         // If a context switch is pending or a task is waiting for the scheduler
         // to be unsuspended then abandon the low power entry.
         if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
             // Re-enable interrupts
-            core::arch::asm!("cpsie i", options(nomem, nostack));
+            core::arch::asm!("cpsie i", options(nostack));
         } else {
             // Stop the SysTick momentarily. The time the SysTick is stopped for
             // is accounted for as best it can be.
@@ -697,22 +697,22 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
             );
 
             // Sleep until something happens (WFI = Wait For Interrupt)
-            core::arch::asm!("dsb", options(nomem, nostack));
-            core::arch::asm!("wfi", options(nomem, nostack));
-            core::arch::asm!("isb", options(nomem, nostack));
+            core::arch::asm!("dsb", options(nostack));
+            core::arch::asm!("wfi", options(nostack));
+            core::arch::asm!("isb", options(nostack));
 
             // Re-enable interrupts to allow the interrupt that brought the MCU
             // out of sleep mode to execute immediately.
-            core::arch::asm!("cpsie i", options(nomem, nostack));
-            core::arch::asm!("dsb", options(nomem, nostack));
-            core::arch::asm!("isb", options(nomem, nostack));
+            core::arch::asm!("cpsie i", options(nostack));
+            core::arch::asm!("dsb", options(nostack));
+            core::arch::asm!("isb", options(nostack));
 
             // Disable interrupts again because the clock is about to be stopped
             // and interrupts that execute while the clock is stopped will increase
             // any slippage between the time maintained by the RTOS and calendar time.
-            core::arch::asm!("cpsid i", options(nomem, nostack));
-            core::arch::asm!("dsb", options(nomem, nostack));
-            core::arch::asm!("isb", options(nomem, nostack));
+            core::arch::asm!("cpsid i", options(nostack));
+            core::arch::asm!("dsb", options(nostack));
+            core::arch::asm!("isb", options(nostack));
 
             // Disable the SysTick clock without reading the CTRL register
             // to ensure the COUNT flag is not cleared if it is set.
@@ -783,7 +783,7 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
             crate::kernel::tasks::vTaskStepTick(ulCompleteTickPeriods as TickType_t);
 
             // Exit with interrupts enabled.
-            core::arch::asm!("cpsie i", options(nomem, nostack));
+            core::arch::asm!("cpsie i", options(nostack));
         }
     }
 }

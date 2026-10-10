@@ -60,7 +60,10 @@
 #![allow(static_mut_refs)] // TODO: Migrate to raw pointers for Rust 2024
 
 #[cfg(all(feature = "smp", not(feature = "port-cortex-a9")))]
-compile_error!("the experimental SMP scaffolding currently supports only port-cortex-a9");
+compile_error!("two-core SMP currently supports only port-cortex-a9");
+
+#[cfg(all(feature = "smp", feature = "tickless-idle"))]
+compile_error!("two-core SMP requires periodic ticks; tickless-idle is not supported");
 
 #[cfg(not(any(
     feature = "port-cortex-m0",

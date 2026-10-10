@@ -1478,8 +1478,12 @@ pub unsafe fn uxQueueMessagesWaitingFromISR(xQueue: QueueHandle_t) -> UBaseType_
 
     configASSERT(!xQueue.is_null());
 
-    // No critical section needed - single read is atomic
+    // [AMENDMENT] A word-sized load still races a write on another core.
+    #[cfg(feature = "smp")]
+    let saved = portSET_INTERRUPT_MASK_FROM_ISR();
     uxReturn = (*xQueue).uxMessagesWaiting;
+    #[cfg(feature = "smp")]
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(saved);
 
     traceRETURN_uxQueueMessagesWaitingFromISR(uxReturn);
 
@@ -1569,7 +1573,7 @@ pub unsafe fn xQueueIsQueueEmptyFromISR(xQueue: QueueHandle_t) -> BaseType_t {
 
     configASSERT(!xQueue.is_null());
 
-    if (*xQueue).uxMessagesWaiting == 0 {
+    if uxQueueMessagesWaitingFromISR(xQueue) == 0 {
         xReturn = pdTRUE;
     } else {
         xReturn = pdFALSE;
@@ -1596,7 +1600,7 @@ pub unsafe fn xQueueIsQueueFullFromISR(xQueue: QueueHandle_t) -> BaseType_t {
 
     configASSERT(!xQueue.is_null());
 
-    if (*xQueue).uxMessagesWaiting == (*xQueue).uxLength {
+    if uxQueueMessagesWaitingFromISR(xQueue) == (*xQueue).uxLength {
         xReturn = pdTRUE;
     } else {
         xReturn = pdFALSE;
@@ -2512,12 +2516,18 @@ pub unsafe fn xQueueGetMutexHolderFromISR(xSemaphore: QueueHandle_t) -> TaskHand
     // Mutexes cannot be used in interrupt service routines, so the mutex
     // holder should not change in an ISR, and therefore a critical section is
     // not required here.
+    // [AMENDMENT] On SMP a task on another core can change the holder.
+    #[cfg(feature = "smp")]
+    let saved = portSET_INTERRUPT_MASK_FROM_ISR();
     // Check if this is a mutex (pcHead == NULL indicates mutex)
     if (*(xSemaphore as *mut Queue_t)).pcHead.is_null() {
         pxReturn = (*(xSemaphore as *mut Queue_t)).u.xSemaphore.xMutexHolder;
     } else {
         pxReturn = ptr::null_mut();
     }
+
+    #[cfg(feature = "smp")]
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(saved);
 
     traceRETURN_xQueueGetMutexHolderFromISR(pxReturn);
 
@@ -2548,7 +2558,7 @@ pub unsafe fn xQueueGiveMutexRecursive(xMutex: QueueHandle_t) -> BaseType_t {
 
     // If this is the task that holds the mutex then xMutexHolder will not
     // change outside of this task.
-    if (*pxMutex).u.xSemaphore.xMutexHolder == xTaskGetCurrentTaskHandle() {
+    if xQueueGetMutexHolder(xMutex) == xTaskGetCurrentTaskHandle() {
         traceGIVE_MUTEX_RECURSIVE(pxMutex as *mut c_void);
 
         // uxRecursiveCallCount cannot be zero if xMutexHolder is equal to
@@ -2750,7 +2760,7 @@ pub unsafe fn xQueueTakeMutexRecursive(
     // still running.
     let xCurrentTaskHandle = xTaskGetCurrentTaskHandle();
 
-    if (*pxMutex).u.xSemaphore.xMutexHolder == xCurrentTaskHandle {
+    if xQueueGetMutexHolder(xMutex) == xCurrentTaskHandle {
         (*pxMutex).u.xSemaphore.uxRecursiveCallCount =
             (*pxMutex).u.xSemaphore.uxRecursiveCallCount.wrapping_add(1);
         configASSERT((*pxMutex).u.xSemaphore.uxRecursiveCallCount != 0);

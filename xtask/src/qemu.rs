@@ -43,11 +43,7 @@ pub fn run(repository: &Path, arguments: QemuTestArgs) -> Result<(), String> {
     let mut completed = 0;
     for arch in architectures {
         let suites: Vec<&str> = if arguments.suite == "all" {
-            if arch == Architecture::CortexA9Smp {
-                vec!["smp"]
-            } else {
-                suites_for_arch(arch).to_vec()
-            }
+            suites_for_arch(arch).to_vec()
         } else {
             vec![arguments.suite.as_str()]
         };
@@ -82,7 +78,7 @@ fn suites_for_arch(arch: Architecture) -> &'static [&'static str] {
         }
         Architecture::CortexM4f => CORTEX_M4F_SUITES,
         Architecture::CortexA53 => CORTEX_A53_SUITES,
-        Architecture::CortexA9Smp => &["smp"],
+        Architecture::CortexA9Smp => &["smp", "smp-kernel", "smp-port", "smp-ipc", "smp-shared"],
         Architecture::Riscv32 | Architecture::CortexA9 => UNQUALIFIED_SINGLE_CORE_SUITES,
     }
 }
@@ -192,8 +188,16 @@ fn build_firmware(
             .arg("--no-default-features")
             .arg("--features")
             .arg("static-only");
-    } else if suite == "smp" {
-        command.arg("--features").arg("smp");
+    } else if suite.starts_with("smp") {
+        let features = match suite {
+            "smp-shared" => "smp",
+            "smp-ipc" => "smp-ipc",
+            _ => "smp-affinity",
+        };
+        command
+            .arg("--no-default-features")
+            .arg("--features")
+            .arg(features);
     } else if suite == "tickless" {
         command.arg("--features").arg("tickless");
     }
@@ -425,6 +429,7 @@ impl Platform {
         }
         if cpus > 1 {
             command.arg("-smp").arg(cpus.to_string());
+            command.args(["-accel", "tcg,thread=multi"]);
         }
         command.args([
             OsStr::new("-display"),
@@ -492,8 +497,10 @@ mod tests {
         let rendered = format!("{command:?}");
         assert!(rendered.contains("vexpress-a9"));
         assert!(rendered.contains("-smp"));
+        assert!(rendered.contains("tcg,thread=multi"));
         assert!(rendered.contains('2'));
         assert_eq!(platform.maximum_cpus, 2);
+        assert_eq!(suites_for_arch(Architecture::CortexA9Smp).len(), 5);
     }
 
     #[test]

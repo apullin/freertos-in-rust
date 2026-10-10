@@ -356,24 +356,44 @@ impl TaskHandle {
         unsafe { vTaskResume(self.handle.as_ptr()) };
     }
 
-    /// Delete this task and consume the sole safe deletion authority.
+    /// Delete another task and consume its unique handle.
     ///
     /// For a dynamically allocated task its TCB and stack may be freed before
     /// this method returns.  The by-value receiver prevents safe use afterward.
-    /// This method only deletes another task; deleting the executing task skips
-    /// its Rust stack destructors and must use unsafe [`delete_self`] instead.
+    /// Deletion does not run the target's Rust stack destructors. Deleting the
+    /// executing task must use [`delete_self`] instead.
     /// Deletion is unavailable during pre-scheduler setup because FreeRTOS may
     /// retain the selected task in its internal current-task pointer there.
+    ///
+    /// # Safety
+    ///
+    /// The caller must coordinate shutdown so that the target cannot acquire
+    /// resources or start new operations before deletion. It must hold no
+    /// mutexes, leave no outstanding kernel references (including stream/message
+    /// buffer waiters), and have no stack values whose destruction is required
+    /// for memory safety. All raw aliases must cease being used. Suspending a
+    /// task alone does not establish these conditions.
+    ///
+    /// Unique handle ownership prevents stale safe handles, but cannot prove
+    /// that the target has released its resources:
+    ///
+    /// ```compile_fail,E0133
+    /// use freertos_in_rust::sync::{TaskContext, TaskHandle};
+    /// fn cannot_cancel_safely(handle: TaskHandle, context: &TaskContext) {
+    ///     handle.delete(context);
+    /// }
+    /// ```
     ///
     /// # Panics
     ///
     /// Panics before the scheduler starts, or if this handle identifies the
     /// currently executing task.
     #[cfg(feature = "task-delete")]
-    pub fn delete(self, context: &TaskContext) {
+    pub unsafe fn delete(self, context: &TaskContext) {
         let current = context.current().map(|task| task.as_raw());
         assert_deletable_task(self.handle.as_ptr(), current);
-        // Safety: `self` is the unique safe deletion authority and is consumed.
+        // Safety: ownership is consumed; the caller establishes target quiescence
+        // and that skipping its stack destructors leaves no dangling resources.
         unsafe { vTaskDelete(self.handle.as_ptr()) };
     }
 
@@ -432,7 +452,7 @@ impl TaskHandle {
     /// `handle` must be non-null and identify a live task.  No other
     /// [`TaskHandle`] may own the same task, and the task must not independently
     /// delete itself while the returned owner is usable.  The caller must also
-    /// arrange that all raw aliases stop being used before safe deletion.
+    /// arrange that all raw aliases stop being used before deletion.
     pub unsafe fn from_raw_owned(handle: TaskHandle_t) -> Option<Self> {
         NonNull::new(handle).map(Self::from_non_null)
     }
@@ -493,7 +513,7 @@ impl TaskRef<'_> {
 /// use freertos_in_rust::sync::{CurrentTask, TaskContext};
 ///
 /// fn cannot_delete(current: CurrentTask<'_>, context: &TaskContext) {
-///     current.delete(context); // only an owning `TaskHandle` can delete safely
+///     current.delete(context); // a current-task view has no deletion authority
 /// }
 /// ```
 pub struct CurrentTask<'context> {
@@ -557,7 +577,9 @@ pub fn suspend_self(context: &TaskContext) -> bool {
 /// The context must represent an executing task, not pre-scheduler setup.  No
 /// live [`TaskHandle`] may own the current task, because that handle would
 /// become stale.  This operation does not run destructors for values on the
-/// task's stack.
+/// task's stack. The caller must first release all mutexes and other resources
+/// whose cleanup is required for memory safety, and leave no outstanding
+/// references to this task in kernel objects or raw callers.
 #[cfg(feature = "task-delete")]
 pub unsafe fn delete_self(context: TaskContext) -> ! {
     assert!(

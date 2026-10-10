@@ -46,6 +46,12 @@
 use core::arch::global_asm;
 use core::ffi::c_void;
 
+#[cfg(feature = "smp")]
+#[path = "cortex_a9_smp.rs"]
+mod smp;
+#[cfg(feature = "smp")]
+pub use smp::*;
+
 use crate::config::*;
 use crate::types::*;
 
@@ -169,19 +175,23 @@ const ulMaxAPIPriorityMask: u32 = configMAX_API_CALL_INTERRUPT_PRIORITY << portP
 /// Initialized to a non-zero value to ensure interrupts don't get unmasked
 /// before the scheduler starts. Set to 0 when first task starts.
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub static mut ulCriticalNesting: u32 = 9999;
 
 /// FPU context flag for current task.
 /// 0 = no FPU context, non-zero = task has FPU context
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub static mut ulPortTaskHasFPUContext: u32 = pdFALSE as u32;
 
 /// Yield required flag. Set to pdTRUE in ISR to request context switch.
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub static mut ulPortYieldRequired: u32 = pdFALSE as u32;
 
 /// Interrupt nesting depth. Context switch only allowed when this is 0.
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub static mut ulPortInterruptNesting: u32 = 0;
 
 // GIC register addresses for assembly code
@@ -198,6 +208,9 @@ pub static ulMaxAPIPriorityMaskConst: u32 = ulMaxAPIPriorityMask;
 // Critical Section Management
 // =============================================================================
 
+// [AMENDMENT] Mask changes, yields, and barriers synchronize ordinary memory
+// with tasks/ISRs as well as the CPU; their assembly must not promise `nomem`.
+
 /// Enter a critical section by masking interrupts via GIC priority register
 #[inline(always)]
 pub fn portENTER_CRITICAL() {
@@ -212,6 +225,7 @@ pub fn portEXIT_CRITICAL() {
 
 /// Enter critical section implementation
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub extern "C" fn vPortEnterCritical() {
     // Mask interrupts up to max syscall priority
     ulPortSetInterruptMask();
@@ -229,6 +243,7 @@ pub extern "C" fn vPortEnterCritical() {
 
 /// Exit critical section implementation
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub extern "C" fn vPortExitCritical() {
     unsafe {
         if ulCriticalNesting > portNO_CRITICAL_NESTING {
@@ -244,24 +259,27 @@ pub extern "C" fn vPortExitCritical() {
 
 /// Disable interrupts by setting GIC priority mask
 #[inline(always)]
+#[cfg(not(feature = "smp"))]
 pub fn portDISABLE_INTERRUPTS() -> UBaseType_t {
     ulPortSetInterruptMask()
 }
 
 /// Enable interrupts by clearing GIC priority mask
 #[inline(always)]
+#[cfg(not(feature = "smp"))]
 pub fn portENABLE_INTERRUPTS() {
     vPortClearInterruptMask(0);
 }
 
 /// Set interrupt mask and return previous state
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub extern "C" fn ulPortSetInterruptMask() -> u32 {
     let ulReturn: u32;
 
     unsafe {
         // Disable CPU IRQ while modifying ICCPMR
-        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
 
         let iccpmr = ICCPMR_ADDRESS as *mut u32;
         let current = core::ptr::read_volatile(iccpmr);
@@ -272,11 +290,11 @@ pub extern "C" fn ulPortSetInterruptMask() -> u32 {
         } else {
             ulReturn = pdFALSE as u32;
             core::ptr::write_volatile(iccpmr, ulMaxAPIPriorityMask);
-            core::arch::asm!("dsb", "isb", options(nomem, nostack));
+            core::arch::asm!("dsb", "isb", options(nostack));
         }
 
         // Re-enable CPU IRQ
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 
     ulReturn
@@ -284,6 +302,7 @@ pub extern "C" fn ulPortSetInterruptMask() -> u32 {
 
 /// Clear interrupt mask (restore previous state)
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub extern "C" fn vPortClearInterruptMask(ulNewMaskValue: u32) {
     if ulNewMaskValue == pdFALSE as u32 {
         portCLEAR_INTERRUPT_MASK();
@@ -292,26 +311,29 @@ pub extern "C" fn vPortClearInterruptMask(ulNewMaskValue: u32) {
 
 /// Clear interrupt mask macro implementation
 #[inline(always)]
+#[cfg(not(feature = "smp"))]
 fn portCLEAR_INTERRUPT_MASK() {
     unsafe {
-        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
 
         let iccpmr = ICCPMR_ADDRESS as *mut u32;
         core::ptr::write_volatile(iccpmr, portUNMASK_VALUE);
 
-        core::arch::asm!("dsb", "isb", options(nomem, nostack));
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("dsb", "isb", options(nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 }
 
 /// Set interrupt mask from ISR
 #[inline(always)]
+#[cfg(not(feature = "smp"))]
 pub fn portSET_INTERRUPT_MASK_FROM_ISR() -> UBaseType_t {
     ulPortSetInterruptMask()
 }
 
 /// Clear interrupt mask from ISR
 #[inline(always)]
+#[cfg(not(feature = "smp"))]
 pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus: UBaseType_t) {
     vPortClearInterruptMask(uxSavedInterruptStatus as u32);
 }
@@ -322,14 +344,16 @@ pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus: UBaseType_t) {
 
 /// Trigger a context switch via SWI
 #[inline(always)]
+#[cfg(not(feature = "smp"))]
 pub fn portYIELD() {
     unsafe {
-        core::arch::asm!("svc 0", options(nomem, nostack));
+        core::arch::asm!("svc 0", options(nostack));
     }
 }
 
 /// Yield from ISR by setting yield required flag
 #[inline(always)]
+#[cfg(not(feature = "smp"))]
 pub fn portYIELD_FROM_ISR(xSwitchRequired: BaseType_t) {
     if xSwitchRequired != pdFALSE {
         unsafe {
@@ -395,7 +419,7 @@ pub unsafe fn pxPortInitialiseStack(
         pxStack = pxStack.sub(1);
 
         // LR (R14) - task exit error handler
-        *pxStack = prvTaskExitError as StackType_t;
+        *pxStack = prvTaskExitError as *const () as StackType_t;
         pxStack = pxStack.sub(1);
 
         // R12
@@ -468,7 +492,7 @@ fn prvTaskExitError() -> ! {
     portDISABLE_INTERRUPTS();
     loop {
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 }
@@ -482,6 +506,7 @@ fn prvTaskExitError() -> ! {
 /// Verifies we're not in user mode, sets up tick interrupt, and
 /// starts the first task via vPortRestoreTaskContext.
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub extern "C" fn xPortStartScheduler() -> BaseType_t {
     let ulAPSR: u32;
 
@@ -501,7 +526,7 @@ pub extern "C" fn xPortStartScheduler() -> BaseType_t {
         if (bpr & 0x03) <= portMAX_BINARY_POINT_VALUE {
             // Disable CPU IRQ before starting
             unsafe {
-                core::arch::asm!("cpsid i", options(nomem, nostack));
+                core::arch::asm!("cpsid i", options(nostack));
             }
 
             // User must call vPortSetupTimerInterrupt or equivalent
@@ -523,7 +548,7 @@ pub fn vPortEndScheduler() {
     configASSERT(false);
     loop {
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 }
@@ -538,16 +563,17 @@ pub fn vPortEndScheduler() {
 /// 1. Set up a timer to call this function at configTICK_RATE_HZ
 /// 2. Clear the timer interrupt after calling this
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub extern "C" fn FreeRTOS_Tick_Handler() {
     // Mask interrupts up to max syscall priority
     unsafe {
-        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
 
         let iccpmr = ICCPMR_ADDRESS as *mut u32;
         core::ptr::write_volatile(iccpmr, ulMaxAPIPriorityMask);
 
-        core::arch::asm!("dsb", "isb", options(nomem, nostack));
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("dsb", "isb", options(nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 
     // Increment tick count
@@ -574,6 +600,7 @@ pub extern "C" fn FreeRTOS_Tick_Handler() {
 /// Call this from a task before using any FPU instructions.
 /// This ensures the FPU context will be saved/restored on context switch.
 #[no_mangle]
+#[cfg(not(feature = "smp"))]
 pub extern "C" fn vPortTaskUsesFPU() {
     unsafe {
         ulPortTaskHasFPUContext = pdTRUE as u32;
@@ -590,6 +617,7 @@ pub extern "C" fn vPortTaskUsesFPU() {
 
 /// Check if currently executing in an interrupt context
 #[inline(always)]
+#[cfg(not(feature = "smp"))]
 pub fn xPortIsInsideInterrupt() -> BaseType_t {
     unsafe {
         if ulPortInterruptNesting > 0 {
@@ -612,7 +640,7 @@ pub fn portNOP() {
 #[inline(always)]
 pub fn portMEMORY_BARRIER() {
     unsafe {
-        core::arch::asm!("dmb", options(nomem, nostack));
+        core::arch::asm!("dmb", options(nostack));
     }
 }
 
@@ -658,7 +686,7 @@ pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
         let control = A9_GLOBAL_TIMER_CONTROL as *mut u32;
         let current = core::ptr::read_volatile(control);
         core::ptr::write_volatile(control, current | A9_GLOBAL_TIMER_ENABLE);
-        core::arch::asm!("dsb", "isb", options(nomem, nostack));
+        core::arch::asm!("dsb", "isb", options(nostack));
         ullRunTimeCounterStart = prvReadRunTimeCounter();
     }
 }
@@ -761,15 +789,15 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         }
 
         // Disable interrupts (but not via GIC - use CPU flag)
-        core::arch::asm!("cpsid i", options(nomem, nostack));
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         // Check if sleep should be aborted
         // Safety: the idle task has suspended the scheduler and this port has
         // masked IRQs for the tickless confirmation protocol.
         if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
-            core::arch::asm!("cpsie i", options(nomem, nostack));
+            core::arch::asm!("cpsie i", options(nostack));
             return;
         }
 
@@ -812,9 +840,9 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::ptr::write_volatile(timer_bgload, ulPeriodicReloadValue);
 
         // Sleep until interrupt (WFI = Wait For Interrupt)
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("wfi", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("wfi", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         /* Snapshot and stop the timer before servicing the wake source.  A
          * periodic SP804 has already reloaded by the time WFI returns on its
@@ -826,14 +854,14 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::ptr::write_volatile(timer_control, ctrl & !SP804_CTRL_ENABLE);
 
         // Re-enable interrupts briefly to let the wake interrupt execute
-        core::arch::asm!("cpsie i", options(nomem, nostack));
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("cpsie i", options(nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         // Disable interrupts again for tick compensation
-        core::arch::asm!("cpsid i", options(nomem, nostack));
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         // Calculate counter clocks elapsed before the wake interrupt ran.
         let ullCurrentCounts = ulTimerValueAtWake as u64 + 1;
@@ -886,7 +914,7 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::ptr::write_volatile(timer_bgload, ulPeriodicReloadValue);
 
         // Re-enable interrupts
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 }
 
@@ -1128,11 +1156,13 @@ global_asm!(
     "push {{r0-r12, r14}}",
     // Push critical nesting count
     "ldr r2, =ulCriticalNesting",
-    "ldr r1, [r2]",
+    "mrc p15, 0, r0, c0, c0, 5",
+    "and r0, r0, #0xff",
+    "ldr r1, [r2, r0, lsl #2]",
     "push {{r1}}",
     // Check if FPU context needs saving
     "ldr r2, =ulPortTaskHasFPUContext",
-    "ldr r3, [r2]",
+    "ldr r3, [r2, r0, lsl #2]",
     "cmp r3, #0",
     // Save FPU context if needed (conditional)
     "fmrxne r1, fpscr",
@@ -1152,6 +1182,7 @@ global_asm!(
     // portRESTORE_CONTEXT macro (SMP version)
     // ==========================================================================
     ".macro portRESTORE_CONTEXT",
+    "cps #SYS_MODE",
     // Get stack pointer from TCB (SMP: index by core ID)
     "ldr r0, =pxCurrentTCBs",
     "mrc p15, 0, r2, c0, c0, 5", // Read MPIDR
@@ -1160,6 +1191,7 @@ global_asm!(
     "ldr sp, [r1]",
     // Pop FPU context flag
     "ldr r0, =ulPortTaskHasFPUContext",
+    "add r0, r0, r2, lsl #2",
     "pop {{r1}}",
     "str r1, [r0]",
     "cmp r1, #0",
@@ -1170,6 +1202,7 @@ global_asm!(
     "vmsrne fpscr, r0",
     // Pop critical nesting count
     "ldr r0, =ulCriticalNesting",
+    "add r0, r0, r2, lsl #2",
     "pop {{r1}}",
     "str r1, [r0]",
     // Set GIC priority mask based on critical nesting
@@ -1180,6 +1213,8 @@ global_asm!(
     "ldrne r4, =ulMaxAPIPriorityMaskConst",
     "ldrne r4, [r4]",
     "str r4, [r2]",
+    "dsb",
+    "isb",
     // Restore R0-R12 and R14
     "pop {{r0-r12, r14}}",
     // Return to task, loading CPSR
@@ -1198,6 +1233,8 @@ global_asm!(
     "and r2, r2, #4",
     "sub sp, sp, r2",
     // Call vTaskSwitchContext
+    // Do not run the scheduler on a task stack which another core may restore.
+    "cps #SVC_MODE",
     "bl vTaskSwitchContext",
     // Restore context of next task
     "portRESTORE_CONTEXT",
@@ -1228,6 +1265,9 @@ global_asm!(
     "push {{r0-r4, r12}}",
     // Increment interrupt nesting count
     "ldr r3, =ulPortInterruptNesting",
+    "mrc p15, 0, r4, c0, c0, 5",
+    "and r4, r4, #0xff",
+    "add r3, r3, r4, lsl #2",
     "ldr r1, [r3]",
     "add r4, r1, #1",
     "str r4, [r3]",
@@ -1241,7 +1281,15 @@ global_asm!(
     "sub sp, sp, r2",
     // Call application IRQ handler (r0 = ICCIAR value)
     "push {{r0-r4, lr}}",
+    // SGI 0 is owned by the port, not the application dispatcher.
+    "ubfx r4, r0, #0, #10",
+    "cmp r4, #0",
+    "bne 1f",
+    "bl vPortYieldInterruptHandler",
+    "b 2f",
+    "1:",
     "bl vApplicationIRQHandler",
+    "2:",
     "pop {{r0-r4, lr}}",
     "add sp, sp, r2",
     // Disable interrupts for EOI
@@ -1259,6 +1307,9 @@ global_asm!(
     "bne exit_without_switch",
     // Check if context switch requested
     "ldr r1, =ulPortYieldRequired",
+    "mrc p15, 0, r0, c0, c0, 5",
+    "and r0, r0, #0xff",
+    "add r1, r1, r0, lsl #2",
     "ldr r0, [r1]",
     "cmp r0, #0",
     "bne switch_before_exit",
@@ -1287,6 +1338,8 @@ global_asm!(
     "and r2, r2, #4",
     "sub sp, sp, r2",
     // Call vTaskSwitchContext
+    // Do not run the scheduler on a task stack which another core may restore.
+    "cps #SVC_MODE",
     "bl vTaskSwitchContext",
     // Restore new task context
     "portRESTORE_CONTEXT",

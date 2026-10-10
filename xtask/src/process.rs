@@ -32,6 +32,13 @@ pub fn run_captured(
     timeout: Duration,
     stop_after_result: bool,
 ) -> Result<CapturedProcess, String> {
+    // A launcher may leave children holding its output pipes. Own a separate
+    // process group so timeout/result handling also closes those descendants.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let command_description = format!("{command:?}");
     let mut child = command
@@ -79,18 +86,18 @@ pub fn run_captured(
 
         if stop_after_result
             && !result_seen
-            && (contains(&stdout_bytes, RESULT_PREFIX) || contains(&stderr_bytes, RESULT_PREFIX))
+            && (contains_result_line(&stdout_bytes) || contains_result_line(&stderr_bytes))
         {
             result_seen = true;
             terminated_after_result = true;
-            child.kill().map_err(|error| {
+            terminate_process_tree(&mut child).map_err(|error| {
                 format!("could not stop {command_description} after its result: {error}")
             })?;
         }
 
         if started.elapsed() >= timeout {
             timed_out = true;
-            child.kill().map_err(|error| {
+            terminate_process_tree(&mut child).map_err(|error| {
                 format!("could not terminate timed-out {command_description}: {error}")
             })?;
             status = child
@@ -110,6 +117,11 @@ pub fn run_captured(
             Err(RecvTimeoutError::Disconnected) => {}
         }
     }
+
+    // Also clean up descendants after a natural parent exit, before joining
+    // readers whose pipes would otherwise stay open indefinitely.
+    terminate_process_tree(&mut child)
+        .map_err(|error| format!("could not stop descendants of {command_description}: {error}"))?;
 
     while done_readers < 2 {
         match receiver.recv_timeout(Duration::from_millis(100)) {
@@ -139,6 +151,22 @@ pub fn run_captured(
         terminated_after_result,
         elapsed: started.elapsed(),
     })
+}
+
+fn terminate_process_tree(child: &mut std::process::Child) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        // SAFETY: this is the private group created for this child, not the
+        // caller's shell group. SIGKILL also terminates pipe-holding children.
+        if unsafe { kill(-(child.id() as i32), 9) } == 0 {
+            return Ok(());
+        }
+        // The group can already be gone after a natural/previous exit.
+    }
+    child.kill()
 }
 
 fn spawn_reader<R>(
@@ -194,15 +222,42 @@ fn handle_event(
     }
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+fn contains_result_line(output: &[u8]) -> bool {
+    // Serial/pipe reads can split even the final word. Do not kill QEMU
+    // between receiving RESULT= and the rest of its PASS/FAIL line.
+    output
+        .split_inclusive(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(RESULT_PREFIX) && line.ends_with(b"\n"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_detection_requires_a_complete_line() {
+        assert!(!contains_result_line(b"FREERUSTOS_TEST_RESULT="));
+        assert!(!contains_result_line(b"FREERUSTOS_TEST_RESULT=PAS"));
+        assert!(!contains_result_line(b"FREERUSTOS_TEST_RESULT=PASS"));
+        assert!(contains_result_line(
+            b"TAP version 13\nFREERUSTOS_TEST_RESULT=PASS\n"
+        ));
+        assert!(contains_result_line(b"FREERUSTOS_TEST_RESULT=FAIL\r\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn waits_for_a_split_result_before_terminating() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf FREERUSTOS_TEST_RESULT=; sleep 0.05; printf 'PASS\\n'; sleep 5");
+        let output = run_captured(&mut command, Duration::from_secs(2), true).unwrap();
+        assert_eq!(output.stdout, b"FREERUSTOS_TEST_RESULT=PASS\n");
+        assert!(output.terminated_after_result);
+        assert!(!output.timed_out);
+        assert!(output.elapsed < Duration::from_secs(2));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -225,6 +280,18 @@ mod tests {
         );
         let output = run_captured(&mut command, Duration::from_secs(2), true).unwrap();
         assert!(output.terminated_after_result);
+        assert!(!output.timed_out);
+        assert!(output.elapsed < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn naturally_exited_parent_does_not_leave_pipe_holding_children() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 5 & printf done");
+        let output = run_captured(&mut command, Duration::from_secs(2), false).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done");
         assert!(!output.timed_out);
         assert!(output.elapsed < Duration::from_secs(2));
     }

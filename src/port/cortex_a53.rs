@@ -36,6 +36,12 @@
 //! ## Configuration Required
 //!
 //! Users must define GIC addresses in their configuration before starting scheduler.
+//!
+//! Tasks using FP/SIMD must call `vPortTaskUsesFPU` before use (including
+//! compiler-generated SIMD). Task switches preserve Q0-Q31, FPCR, and FPSR.
+//! IRQ callbacks use the ordinary C ABI; the port preserves FP/SIMD whenever
+//! CPACR_EL1 permits EL1 access. Callbacks must not change CPACR_EL1. Allow an
+//! additional 544 bytes on the IRQ stack for that preservation frame.
 
 use core::arch::global_asm;
 use core::ffi::c_void;
@@ -76,8 +82,8 @@ const portNO_FLOATING_POINT_CONTEXT: StackType_t = 0;
 /// Unmask all interrupt priorities
 const portUNMASK_VALUE: u32 = 0xFF;
 
-/// Number of FPU register words (32 x 128-bit = 64 x 64-bit)
-const portFPU_REGISTER_WORDS: usize = 64;
+/// FPU register words: 32 x 128-bit vectors plus FPCR and FPSR.
+const portFPU_REGISTER_WORDS: usize = 66;
 
 // =============================================================================
 // GIC Configuration
@@ -241,8 +247,8 @@ pub fn portDISABLE_INTERRUPTS() {
         // The interrupt transition is also a compiler memory barrier, matching
         // the upstream port's `"memory"` clobber.
         core::arch::asm!("msr daifset, #2", options(nostack));
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
     }
 }
 
@@ -253,8 +259,8 @@ pub fn portENABLE_INTERRUPTS() {
         // See portDISABLE_INTERRUPTS: task/ISR memory accesses must not move
         // across the point at which interrupts become observable.
         core::arch::asm!("msr daifclr, #2", options(nostack));
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
     }
 }
 
@@ -276,8 +282,8 @@ pub extern "C" fn ulPortSetInterruptMask() -> u64 {
         } else {
             ulReturn = pdFALSE as u64;
             core::ptr::write_volatile(iccpmr, mask_value);
-            core::arch::asm!("dsb sy", options(nomem, nostack));
-            core::arch::asm!("isb sy", options(nomem, nostack));
+            core::arch::asm!("dsb sy", options(nostack));
+            core::arch::asm!("isb sy", options(nostack));
         }
 
         portENABLE_INTERRUPTS();
@@ -303,8 +309,8 @@ fn portCLEAR_INTERRUPT_MASK() {
         let iccpmr = get_iccpmr_address();
         core::ptr::write_volatile(iccpmr, portUNMASK_VALUE);
 
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
         portENABLE_INTERRUPTS();
     }
 }
@@ -363,8 +369,8 @@ pub fn portEND_SWITCHING_ISR(xSwitchRequired: BaseType_t) {
 /// - ... X29, X28
 /// - XZR, X30 (LR)
 /// - SPSR, ELR (return address)
-/// - FPU flag, Critical nesting
-/// - [Optional FPU registers Q0-Q31 if FPU context]
+/// - [Optional Q0-Q31, then FPCR/FPSR if FPU context]
+/// - Critical nesting, FPU flag
 ///
 /// # Safety
 ///
@@ -505,7 +511,7 @@ fn prvTaskExitError() -> ! {
     portDISABLE_INTERRUPTS();
     loop {
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 }
@@ -543,7 +549,7 @@ pub fn vPortEndScheduler() {
     configASSERT(false);
     loop {
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 }
@@ -559,7 +565,7 @@ pub extern "C" fn FreeRTOS_Tick_Handler() {
         // Mask interrupts
         let iccpmr = get_iccpmr_address();
         core::ptr::write_volatile(iccpmr, get_max_api_priority_mask());
-        core::arch::asm!("dsb sy", "isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", "isb sy", options(nostack));
     }
 
     // Increment tick
@@ -711,8 +717,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
         // Disable interrupts via DAIF
         core::arch::asm!("msr daifset, #2", options(nostack));
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
 
         // Check if sleep should be aborted
         // Safety: the idle task suspended the scheduler and IRQs are masked
@@ -745,12 +751,12 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
         // Set new compare value
         core::arch::asm!("msr cntp_cval_el0, {}", in(reg) ulNewCompare);
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
 
         // Sleep until interrupt (WFI = Wait For Interrupt)
-        core::arch::asm!("wfi", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("wfi", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
 
         /* Snapshot elapsed time before servicing the wake interrupt.  The
          * timer ISR reloads the compare register and can take an unbounded
@@ -761,13 +767,13 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
         // Re-enable interrupts briefly to let the wake interrupt execute
         core::arch::asm!("msr daifclr, #2", options(nostack));
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
 
         // Disable interrupts again for tick compensation
         core::arch::asm!("msr daifset, #2", options(nostack));
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
 
         // Calculate how many complete ticks elapsed
         let ulElapsedCounts = if ulTimerCountAtWake > ulCurrentCount {
@@ -800,8 +806,8 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         // Set compare value for next tick
         let ulNextCompare = ulTimerCountAtWake + ulRemainingCounts;
         core::arch::asm!("msr cntp_cval_el0, {}", in(reg) ulNextCompare);
-        core::arch::asm!("dsb sy", options(nomem, nostack));
-        core::arch::asm!("isb sy", options(nomem, nostack));
+        core::arch::asm!("dsb sy", options(nostack));
+        core::arch::asm!("isb sy", options(nostack));
 
         // Re-enable interrupts
         core::arch::asm!("msr daifclr, #2", options(nostack));
@@ -824,6 +830,50 @@ extern "C" {
 
 global_asm!(
     ".align 8",
+    // [AMENDMENT] Match ARM_AARCH64_SRE's complete FP context, including status.
+    // Shared by task switches and IRQ entry. Scratch x9/x10 are already saved.
+    ".macro portSAVE_FPU_CONTEXT",
+    "stp q0, q1, [sp, #-0x20]!",
+    "stp q2, q3, [sp, #-0x20]!",
+    "stp q4, q5, [sp, #-0x20]!",
+    "stp q6, q7, [sp, #-0x20]!",
+    "stp q8, q9, [sp, #-0x20]!",
+    "stp q10, q11, [sp, #-0x20]!",
+    "stp q12, q13, [sp, #-0x20]!",
+    "stp q14, q15, [sp, #-0x20]!",
+    "stp q16, q17, [sp, #-0x20]!",
+    "stp q18, q19, [sp, #-0x20]!",
+    "stp q20, q21, [sp, #-0x20]!",
+    "stp q22, q23, [sp, #-0x20]!",
+    "stp q24, q25, [sp, #-0x20]!",
+    "stp q26, q27, [sp, #-0x20]!",
+    "stp q28, q29, [sp, #-0x20]!",
+    "stp q30, q31, [sp, #-0x20]!",
+    "mrs x9, fpsr",
+    "mrs x10, fpcr",
+    "stp x9, x10, [sp, #-0x10]!",
+    ".endm",
+    ".macro portRESTORE_FPU_CONTEXT",
+    "ldp x9, x10, [sp], #0x10",
+    "ldp q30, q31, [sp], #0x20",
+    "ldp q28, q29, [sp], #0x20",
+    "ldp q26, q27, [sp], #0x20",
+    "ldp q24, q25, [sp], #0x20",
+    "ldp q22, q23, [sp], #0x20",
+    "ldp q20, q21, [sp], #0x20",
+    "ldp q18, q19, [sp], #0x20",
+    "ldp q16, q17, [sp], #0x20",
+    "ldp q14, q15, [sp], #0x20",
+    "ldp q12, q13, [sp], #0x20",
+    "ldp q10, q11, [sp], #0x20",
+    "ldp q8, q9, [sp], #0x20",
+    "ldp q6, q7, [sp], #0x20",
+    "ldp q4, q5, [sp], #0x20",
+    "ldp q2, q3, [sp], #0x20",
+    "ldp q0, q1, [sp], #0x20",
+    "msr fpsr, x9",
+    "msr fpcr, x10",
+    ".endm",
     // ==========================================================================
     // portSAVE_CONTEXT macro
     // ==========================================================================
@@ -860,22 +910,7 @@ global_asm!(
     // Save FPU registers if needed
     "cmp x2, #0",
     "b.eq 1f",
-    "stp q0, q1, [sp, #-0x20]!",
-    "stp q2, q3, [sp, #-0x20]!",
-    "stp q4, q5, [sp, #-0x20]!",
-    "stp q6, q7, [sp, #-0x20]!",
-    "stp q8, q9, [sp, #-0x20]!",
-    "stp q10, q11, [sp, #-0x20]!",
-    "stp q12, q13, [sp, #-0x20]!",
-    "stp q14, q15, [sp, #-0x20]!",
-    "stp q16, q17, [sp, #-0x20]!",
-    "stp q18, q19, [sp, #-0x20]!",
-    "stp q20, q21, [sp, #-0x20]!",
-    "stp q22, q23, [sp, #-0x20]!",
-    "stp q24, q25, [sp, #-0x20]!",
-    "stp q26, q27, [sp, #-0x20]!",
-    "stp q28, q29, [sp, #-0x20]!",
-    "stp q30, q31, [sp, #-0x20]!",
+    "portSAVE_FPU_CONTEXT",
     "1:",
     // Store critical nesting and FPU flag
     "stp x2, x3, [sp, #-0x10]!",
@@ -920,22 +955,7 @@ global_asm!(
     // Restore FPU registers if needed
     "cmp x2, #0",
     "b.eq 3f",
-    "ldp q30, q31, [sp], #0x20",
-    "ldp q28, q29, [sp], #0x20",
-    "ldp q26, q27, [sp], #0x20",
-    "ldp q24, q25, [sp], #0x20",
-    "ldp q22, q23, [sp], #0x20",
-    "ldp q20, q21, [sp], #0x20",
-    "ldp q18, q19, [sp], #0x20",
-    "ldp q16, q17, [sp], #0x20",
-    "ldp q14, q15, [sp], #0x20",
-    "ldp q12, q13, [sp], #0x20",
-    "ldp q10, q11, [sp], #0x20",
-    "ldp q8, q9, [sp], #0x20",
-    "ldp q6, q7, [sp], #0x20",
-    "ldp q4, q5, [sp], #0x20",
-    "ldp q2, q3, [sp], #0x20",
-    "ldp q0, q1, [sp], #0x20",
+    "portRESTORE_FPU_CONTEXT",
     "3:",
     // Restore SPSR and ELR
     "ldp x2, x3, [sp], #0x10",
@@ -1025,11 +1045,25 @@ global_asm!(
     "ldr w0, [x3]",
     "stp x0, x1, [sp, #-0x10]!",
     // Call IRQ handler
+    // [AMENDMENT] An ordinary C-ABI Rust callback may clobber SIMD registers.
+    // Save even when the interrupted task has not registered FP use: a nested
+    // handler can have FP state of its own. Skip FP instructions when CPACR
+    // disables EL1 FP/SIMD (FPEN bit 0 clear). The handler must not change CPACR.
+    "mrs x11, cpacr_el1",
+    "tbz x11, #20, 5f",
+    "portSAVE_FPU_CONTEXT",
+    "5:",
+    "stp x11, xzr, [sp, #-0x10]!",
     "bl vApplicationIRQHandler",
     // Disable interrupts
     "msr daifset, #2",
     "dsb sy",
     "isb sy",
+    // Restore interrupted FP state before any task-switch context is saved.
+    "ldp x11, xzr, [sp], #0x10",
+    "tbz x11, #20, 6f",
+    "portRESTORE_FPU_CONTEXT",
+    "6:",
     // Restore ICCIAR and write to ICCEOIR
     "ldp x0, x1, [sp], #0x10",
     "ldr x4, =ullICCEOIR",
@@ -1092,6 +1126,8 @@ global_asm!(
 // NOTE: User must provide vApplicationIRQHandler(ulICCIAR: u32)
 // This is called from the IRQ handler assembly with the ICCIAR value.
 // The user should check the IRQ ID and handle the interrupt appropriately.
+// FP/SIMD state is preserved whenever EL1 access is enabled in CPACR_EL1.
+// The callback must not change CPACR_EL1 or enable FP if it was disabled.
 extern "C" {
     fn vApplicationIRQHandler(ulICCIAR: u32);
 }

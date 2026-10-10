@@ -86,6 +86,9 @@ const SYST_CSR_CLKSOURCE: u32 = 1 << 2;
 // Critical Section Management
 // =============================================================================
 
+// [AMENDMENT] Interrupt masks, yields, and barriers must also fence the compiler.
+// Do not use `nomem` on their assembly: an ISR/task can change ordinary memory.
+
 /// Critical section nesting counter.
 /// This is safe to use as a static mut because:
 /// 1. Interrupts are disabled before any access (via PRIMASK)
@@ -98,8 +101,8 @@ pub fn portENTER_CRITICAL() {
     portDISABLE_INTERRUPTS();
     unsafe {
         CRITICAL_NESTING += 1;
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
     }
 }
 
@@ -121,7 +124,7 @@ pub fn portEXIT_CRITICAL() {
 #[inline(always)]
 pub fn portDISABLE_INTERRUPTS() {
     unsafe {
-        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
     }
 }
 
@@ -129,7 +132,7 @@ pub fn portDISABLE_INTERRUPTS() {
 #[inline(always)]
 pub fn portENABLE_INTERRUPTS() {
     unsafe {
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 }
 
@@ -139,7 +142,7 @@ pub fn portSET_INTERRUPT_MASK_FROM_ISR() -> UBaseType_t {
     let primask: u32;
     unsafe {
         core::arch::asm!("mrs {}, PRIMASK", out(reg) primask, options(nomem, nostack));
-        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
     }
     primask as UBaseType_t
 }
@@ -148,7 +151,7 @@ pub fn portSET_INTERRUPT_MASK_FROM_ISR() -> UBaseType_t {
 #[inline(always)]
 pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus: UBaseType_t) {
     unsafe {
-        core::arch::asm!("msr PRIMASK, {}", in(reg) uxSavedInterruptStatus as u32, options(nomem, nostack));
+        core::arch::asm!("msr PRIMASK, {}", in(reg) uxSavedInterruptStatus as u32, options(nostack));
     }
 }
 
@@ -161,8 +164,8 @@ pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus: UBaseType_t) {
 pub fn portYIELD() {
     unsafe {
         core::ptr::write_volatile(NVIC_ICSR, NVIC_PENDSVSET_BIT);
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
     }
 }
 
@@ -257,7 +260,7 @@ fn prvTaskExitError() -> ! {
     portDISABLE_INTERRUPTS();
     loop {
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 }
@@ -561,7 +564,7 @@ pub fn xPortStartScheduler() -> BaseType_t {
 pub fn vPortEndScheduler() {
     loop {
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 }
@@ -596,7 +599,7 @@ pub fn portNOP() {
 #[inline(always)]
 pub fn portMEMORY_BARRIER() {
     unsafe {
-        core::arch::asm!("dmb", options(nomem, nostack));
+        core::arch::asm!("dmb", options(nostack));
     }
 }
 
@@ -687,12 +690,12 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         }
 
         // Disable interrupts (using PRIMASK, not BASEPRI)
-        core::arch::asm!("cpsid i", options(nomem, nostack));
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
-            core::arch::asm!("cpsie i", options(nomem, nostack));
+            core::arch::asm!("cpsie i", options(nostack));
         } else {
             // Stop SysTick
             let systick_ctrl = core::ptr::read_volatile(SYST_CSR);
@@ -723,17 +726,17 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
             );
 
             // Sleep
-            core::arch::asm!("dsb", options(nomem, nostack));
-            core::arch::asm!("wfi", options(nomem, nostack));
-            core::arch::asm!("isb", options(nomem, nostack));
+            core::arch::asm!("dsb", options(nostack));
+            core::arch::asm!("wfi", options(nostack));
+            core::arch::asm!("isb", options(nostack));
 
             // Re-enable then disable interrupts
-            core::arch::asm!("cpsie i", options(nomem, nostack));
-            core::arch::asm!("dsb", options(nomem, nostack));
-            core::arch::asm!("isb", options(nomem, nostack));
-            core::arch::asm!("cpsid i", options(nomem, nostack));
-            core::arch::asm!("dsb", options(nomem, nostack));
-            core::arch::asm!("isb", options(nomem, nostack));
+            core::arch::asm!("cpsie i", options(nostack));
+            core::arch::asm!("dsb", options(nostack));
+            core::arch::asm!("isb", options(nostack));
+            core::arch::asm!("cpsid i", options(nostack));
+            core::arch::asm!("dsb", options(nostack));
+            core::arch::asm!("isb", options(nostack));
 
             // Disable SysTick without clearing COUNT flag
             core::ptr::write_volatile(SYST_CSR, SYST_CSR_TICKINT | SYST_CSR_CLKSOURCE);
@@ -775,7 +778,7 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
 
             crate::kernel::tasks::vTaskStepTick(ulCompleteTickPeriods as TickType_t);
 
-            core::arch::asm!("cpsie i", options(nomem, nostack));
+            core::arch::asm!("cpsie i", options(nostack));
         }
     }
 }

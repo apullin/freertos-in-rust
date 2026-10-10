@@ -8,13 +8,42 @@ publish = false
 name = "smoke"
 path = "src/bin/smoke.rs"
 
+[[bin]]
+name = "smp"
+path = "src/bin/smp.rs"
+required-features = ["smp-affinity"]
+
+[[bin]]
+name = "smp-kernel"
+path = "src/bin/smp-kernel.rs"
+required-features = ["smp-affinity"]
+
+[[bin]]
+name = "smp-port"
+path = "src/bin/smp-port.rs"
+required-features = ["smp-affinity"]
+
 [features]
+default = ["tickless"]
+tickless = ["freertos-in-rust/tickless-idle"]
 smp = ["freertos-in-rust/smp"]
+smp-heap = ["smp", "freertos-in-rust/heap-4", "freertos-in-rust/task-delete", "freertos-in-rust/task-suspend", "freertos-in-rust/use-mutexes", "freertos-in-rust/task-priority-set"]
+smp-affinity = ["smp-heap", "freertos-in-rust/core-affinity", "freertos-in-rust/trace-facility", "freertos-in-rust/stack-high-water-mark"]
+smp-ipc = ["smp-affinity", "freertos-in-rust/timers", "freertos-in-rust/pend-function-call", "freertos-in-rust/stream-buffers"]
+
+[[bin]]
+name = "smp-ipc"
+path = "src/bin/smp-ipc.rs"
+required-features = ["smp-ipc"]
+
+[[bin]]
+name = "smp-shared"
+path = "src/bin/smp-shared.rs"
+required-features = ["smp"]
 
 [dependencies]
 freertos-in-rust = { path = "../../..", default-features = false, features = [
     "port-cortex-a9",
-    "tickless-idle",
     "generate-run-time-stats",
 ] }
 freertos-qemu-test-common = { path = "../common" }

@@ -460,7 +460,10 @@ Known task/scheduler limitations:
 - **D:** SMP-only state and algorithms are intentionally absent from mainline:
   per-core current TCBs/yield counts, run state, core affinity, passive idle
   tasks, task locks, cross-core eviction, and SMP scheduler selection remain on
-  the separate SMP line of work.
+  the separate SMP line of work. This `smp` branch now implements those paths
+  for two Cortex-A9 cores; its five multithreaded QEMU suites and deliberate
+  configuration limits are documented in the README. The tables above remain
+  the single-core translation audit, not a claim of exhaustive SMP parity.
 - **D:** MPU/restricted task creation and privilege-bit handling are not
   translated because no current port enables `portUSING_MPU_WRAPPERS`.
 - **D:** Cooperative scheduling, time-slicing-off, port-optimized ready

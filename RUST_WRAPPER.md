@@ -134,13 +134,18 @@ let mut reference = handle.borrow();
 reference.resume(&context);
 drop(reference);
 
-handle.delete(&context); // consumes the unique owner
+// SAFETY: an application shutdown handshake has confirmed that the target
+// has released all resources and parked without outstanding kernel references.
+unsafe { handle.delete(&context) }; // consumes the unique owner
 ```
 
-`TaskHandle::delete` rejects a handle for the currently executing task. Use
+`TaskHandle::delete` is unsafe: unique handle ownership does not prove the
+target has released its mutexes or other resources. Deletion skips the target's
+stack destructors; merely suspending it is not a safe shutdown handshake.
+It also rejects a handle for the currently executing task. Use
 `unsafe delete_self` for that case: the caller must prove that no owning
-`TaskHandle` survives and accept that Rust destructors on the task stack do not
-run. Owning deletion also requires a running task context; pre-scheduler task
+`TaskHandle` survives and release all resources that need cleanup before
+deletion. Owning deletion also requires a running task context; pre-scheduler task
 retirement remains a raw, unsafe operation.
 
 ## Queues

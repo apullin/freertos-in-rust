@@ -16,6 +16,42 @@ use freertos_qemu_test_common::Tap;
 
 global_asm!(include_str!("startup.S"));
 
+#[cfg(feature = "smp-heap")]
+#[global_allocator]
+static ALLOCATOR: freertos_in_rust::memory::FreeRtosAllocator =
+    freertos_in_rust::memory::FreeRtosAllocator;
+
+/// Release QEMU vexpress's secondary boot stub through SYS_FLAGS and SEV.
+#[cfg(feature = "smp")]
+pub fn start_secondary() {
+    extern "C" {
+        fn secondary_start();
+    }
+    unsafe {
+        // SCU coherency and the Cortex-A9 SMP bit. This test leaves caches/MMU off.
+        ptr::write_volatile(0x1e00_0000 as *mut u32, 1);
+        core::arch::asm!(
+            "mrc p15, 0, r0, c1, c0, 1", "orr r0, r0, #(1 << 6)",
+            "mcr p15, 0, r0, c1, c0, 1", "isb", out("r0") _, options(nostack)
+        );
+        ptr::write_volatile(0x1000_0034 as *mut u32, u32::MAX);
+        ptr::write_volatile(0x1000_0030 as *mut u32, secondary_start as *const () as u32);
+        core::arch::asm!("dsb", "sev", options(nostack));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn secondary_main() -> ! {
+    #[cfg(feature = "smp")]
+    unsafe {
+        freertos_in_rust::port::vPortStartSecondaryCore()
+    }
+    #[cfg(not(feature = "smp"))]
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 pub const TIMER_BASE: usize = 0x1001_1000;
 pub const TIMER_LOAD: usize = TIMER_BASE;
 pub const TIMER_VALUE: usize = TIMER_BASE + 0x04;
@@ -49,6 +85,12 @@ const TIMER_IRQ: u32 = 34;
 const AUX_TIMER_IRQ: u32 = 35;
 static TIMER_INTERRUPTS: AtomicU32 = AtomicU32::new(0);
 static AUX_TIMER_INTERRUPTS: AtomicU32 = AtomicU32::new(0);
+static AUXILIARY_HOOK: AtomicU32 = AtomicU32::new(0);
+
+/// Install a test callback to be invoked in the auxiliary timer ISR.
+pub fn set_auxiliary_hook(hook: extern "C" fn()) {
+    AUXILIARY_HOOK.store(hook as *const () as u32, Ordering::Release);
+}
 
 #[repr(C, align(8))]
 pub struct AlignedTaskBuffer {
@@ -177,6 +219,7 @@ pub fn init() {
         ptr::write_volatile(TIMER_CONTROL as *mut u32, 0xe2);
     }
 
+    #[cfg(feature = "tickless")]
     freertos_in_rust::port::vPortConfigureTimerForTickless(
         TIMER_BASE,
         TIMER_COUNTS_PER_TICK,
@@ -201,6 +244,11 @@ pub extern "C" fn vApplicationFPUSafeIRQHandler(interrupt_acknowledge: u32) {
     } else if interrupt_id == AUX_TIMER_IRQ {
         unsafe { ptr::write_volatile(AUX_TIMER_INTCLR as *mut u32, 1) };
         AUX_TIMER_INTERRUPTS.fetch_add(1, Ordering::Relaxed);
+        let hook = AUXILIARY_HOOK.load(Ordering::Acquire);
+        if hook != 0 {
+            let callback: extern "C" fn() = unsafe { core::mem::transmute(hook) };
+            callback();
+        }
     }
 }
 

@@ -69,6 +69,16 @@ SECTIONS
         __und_stack_top = .;
         . = . + __sys_stack_size;
         __sys_stack_top = .;
+        . = . + __irq_stack_size;
+        __irq_stack_top_1 = .;
+        . = . + __svc_stack_size;
+        __svc_stack_top_1 = .;
+        . = . + __abt_stack_size;
+        __abt_stack_top_1 = .;
+        . = . + __und_stack_size;
+        __und_stack_top_1 = .;
+        . = . + __sys_stack_size;
+        __sys_stack_top_1 = .;
     } > RAM
 
     /DISCARD/ :

@@ -78,6 +78,33 @@ unsafe fn check_global_allocator_contract<A: GlobalAlloc>(allocator: &A) {
         assert_eq!(*original.add(offset), 0x5a);
     }
     allocator.dealloc(original, failure_layout);
+
+    // FreeRTOS heaps suspend tasks, not interrupts. The GlobalAlloc adapter
+    // must never enter the heap from an ISR, even via safe Box/Vec operations.
+    let initial_free = xPortGetFreeHeapSize();
+    let allocation = allocator.alloc(failure_layout);
+    assert!(!allocation.is_null());
+    ptr::write_bytes(allocation, 0x6b, failure_layout.size());
+    let allocated_free = xPortGetFreeHeapSize();
+    freertos_in_rust::port::test_port_set_inside_interrupt(true);
+    let isr_allocation = allocator.alloc(failure_layout);
+    freertos_in_rust::port::test_port_set_inside_interrupt(false);
+    assert!(isr_allocation.is_null());
+    freertos_in_rust::port::test_port_set_inside_interrupt(true);
+    let isr_reallocation = allocator.realloc(allocation, failure_layout, 32);
+    freertos_in_rust::port::test_port_set_inside_interrupt(false);
+    assert!(isr_reallocation.is_null());
+    freertos_in_rust::port::test_port_set_inside_interrupt(true);
+    allocator.dealloc(allocation, failure_layout);
+    freertos_in_rust::port::test_port_set_inside_interrupt(false);
+    assert_eq!(xPortGetFreeHeapSize(), allocated_free);
+    for offset in 0..failure_layout.size() {
+        assert_eq!(*allocation.add(offset), 0x6b);
+    }
+    // The ISR deallocation is deliberately a no-op. This test retained the
+    // pointer and may release it now that task context has been restored.
+    allocator.dealloc(allocation, failure_layout);
+    assert_eq!(xPortGetFreeHeapSize(), initial_free);
 }
 
 #[cfg(any(feature = "heap-4", feature = "heap-5"))]

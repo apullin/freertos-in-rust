@@ -206,6 +206,11 @@ Create a fresh `TaskContext` at each task entry. It is neither `Send` nor
 `Sync`. ISR APIs remain a separate, mostly `unsafe` boundary because Rust types
 cannot prove interrupt priority, wake flags, or platform dispatch contracts.
 
+Task deletion is also `unsafe`, even with a unique `TaskHandle`: the caller
+must arrange shutdown and resource release before deletion, which skips stack
+destructors. Suspending a task does not prove that it holds no mutexes or other
+resources. See [the task veneer contract](RUST_WRAPPER.md#tasks).
+
 ## Allocation policy
 
 Select at most one allocator feature:
@@ -224,6 +229,12 @@ For `heap-4` or `heap-5`, the provided adapter can back Rust allocation:
 static ALLOCATOR: freertos_in_rust::memory::FreeRtosAllocator =
     freertos_in_rust::memory::FreeRtosAllocator;
 ```
+
+These heaps are task-only. The `GlobalAlloc` adapter returns null for ISR
+allocation/reallocation and deliberately leaves ISR-deallocated blocks allocated
+to avoid corrupting an interrupted heap operation. Transfer owned allocations
+back to a task for disposal; the raw heap functions retain their unsafe
+task-context contract.
 
 Static veneer constructors borrow their stack, data, and control storage for
 the complete object lifetime. Do not form references to uninitialized control
@@ -245,7 +256,7 @@ particular board, clock tree, interrupt controller, and compiler profile.
 | Cortex-M7 / `thumbv7em-none-eabihf` | Target check and Clippy with `heap-4` plus all capabilities; **QEMU-tested** | `mps2-an500`: smoke 3/3, kernel-core 5/5, ISR 4/4, allocator 4/4, stream/event/timer 6/6, port/FPU context 8/8, tickless 3/3 | ARM erratum 837070 handling for affected early M7 revisions is not implemented. |
 | RV32IMAC / `riscv32imac-unknown-none-elf` | Minimal and maximal target checks; **QEMU-tested** | `sifive_e` composite smoke: 10/10, covering traps/ISR yield, PLIC dispatch, MTIME rollover/fractional cadence, and tickless accounting | Single-hart, machine mode, and SiFive E only. The application callback must claim and complete external interrupt-controller sources. |
 | Cortex-A9 / `armv7a-none-eabi` | Focused target check with tickless/stats; **QEMU-tested** | `vexpress-a9` smoke: 7/7, including a non-tick early wake, repeated suppressed sleeps, periodic reload restoration, and WFI runtime accounting | The port assumes the vexpress-style MPCore private-peripheral/GIC mapping and SP804 integration. Validate addresses and clocks on real hardware. |
-| Cortex-A53 / `aarch64-unknown-none` | Focused target check with tickless/stats; **QEMU-tested** | `virt`: smoke 3/3, port/context 10/10, tickless 4/4, event/timer 3/3 | Runtime stats read `CNTPCT_EL0`; platform firmware or a higher exception level must permit EL1 access. |
+| Cortex-A53 / `aarch64-unknown-none` | Focused target check with tickless/stats; **QEMU-tested** | `virt`: smoke 3/3, port/context 14/14 (including FPCR/FPSR and IRQ SIMD preservation), tickless 4/4, event/timer 3/3 | Runtime stats read `CNTPCT_EL0`; platform firmware or a higher exception level must permit EL1 access. |
 
 The recovered LP-MSPM0G5187 application is preserved under
 [`hardware-tests/mspm0g5187`](hardware-tests/mspm0g5187/README.md) and is
@@ -266,7 +277,7 @@ Use the repository test driver instead of assembling ad-hoc QEMU command lines:
 # Deterministic host tests in debug and release modes.
 cargo run --manifest-path xtask/Cargo.toml -- test host
 
-# Required feature/allocator/port matrix, docs, and expected-failure checks.
+# Feature/allocator/port matrix, optimized compiler barriers, docs, and rejections.
 cargo run --manifest-path xtask/Cargo.toml -- check-features
 
 # One bounded guest.
@@ -315,6 +326,7 @@ src/
 ├── types.rs    # Port-selected FreeRTOS scalar and handle types
 └── lib.rs
 tests/qemu/     # Bounded bare-metal QEMU firmware suites
+tests/codegen/  # Optimized port synchronization regressions
 xtask/          # Host, feature-matrix, and QEMU test driver
 ```
 

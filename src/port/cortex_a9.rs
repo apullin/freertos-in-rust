@@ -198,6 +198,9 @@ pub static ulMaxAPIPriorityMaskConst: u32 = ulMaxAPIPriorityMask;
 // Critical Section Management
 // =============================================================================
 
+// [AMENDMENT] Mask changes, yields, and barriers synchronize ordinary memory
+// with tasks/ISRs as well as the CPU; their assembly must not promise `nomem`.
+
 /// Enter a critical section by masking interrupts via GIC priority register
 #[inline(always)]
 pub fn portENTER_CRITICAL() {
@@ -261,7 +264,7 @@ pub extern "C" fn ulPortSetInterruptMask() -> u32 {
 
     unsafe {
         // Disable CPU IRQ while modifying ICCPMR
-        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
 
         let iccpmr = ICCPMR_ADDRESS as *mut u32;
         let current = core::ptr::read_volatile(iccpmr);
@@ -272,11 +275,11 @@ pub extern "C" fn ulPortSetInterruptMask() -> u32 {
         } else {
             ulReturn = pdFALSE as u32;
             core::ptr::write_volatile(iccpmr, ulMaxAPIPriorityMask);
-            core::arch::asm!("dsb", "isb", options(nomem, nostack));
+            core::arch::asm!("dsb", "isb", options(nostack));
         }
 
         // Re-enable CPU IRQ
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 
     ulReturn
@@ -294,13 +297,13 @@ pub extern "C" fn vPortClearInterruptMask(ulNewMaskValue: u32) {
 #[inline(always)]
 fn portCLEAR_INTERRUPT_MASK() {
     unsafe {
-        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
 
         let iccpmr = ICCPMR_ADDRESS as *mut u32;
         core::ptr::write_volatile(iccpmr, portUNMASK_VALUE);
 
-        core::arch::asm!("dsb", "isb", options(nomem, nostack));
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("dsb", "isb", options(nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 }
 
@@ -324,7 +327,7 @@ pub fn portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus: UBaseType_t) {
 #[inline(always)]
 pub fn portYIELD() {
     unsafe {
-        core::arch::asm!("svc 0", options(nomem, nostack));
+        core::arch::asm!("svc 0", options(nostack));
     }
 }
 
@@ -468,7 +471,7 @@ fn prvTaskExitError() -> ! {
     portDISABLE_INTERRUPTS();
     loop {
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 }
@@ -501,7 +504,7 @@ pub extern "C" fn xPortStartScheduler() -> BaseType_t {
         if (bpr & 0x03) <= portMAX_BINARY_POINT_VALUE {
             // Disable CPU IRQ before starting
             unsafe {
-                core::arch::asm!("cpsid i", options(nomem, nostack));
+                core::arch::asm!("cpsid i", options(nostack));
             }
 
             // User must call vPortSetupTimerInterrupt or equivalent
@@ -523,7 +526,7 @@ pub fn vPortEndScheduler() {
     configASSERT(false);
     loop {
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 }
@@ -541,13 +544,13 @@ pub fn vPortEndScheduler() {
 pub extern "C" fn FreeRTOS_Tick_Handler() {
     // Mask interrupts up to max syscall priority
     unsafe {
-        core::arch::asm!("cpsid i", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
 
         let iccpmr = ICCPMR_ADDRESS as *mut u32;
         core::ptr::write_volatile(iccpmr, ulMaxAPIPriorityMask);
 
-        core::arch::asm!("dsb", "isb", options(nomem, nostack));
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("dsb", "isb", options(nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 
     // Increment tick count
@@ -612,7 +615,7 @@ pub fn portNOP() {
 #[inline(always)]
 pub fn portMEMORY_BARRIER() {
     unsafe {
-        core::arch::asm!("dmb", options(nomem, nostack));
+        core::arch::asm!("dmb", options(nostack));
     }
 }
 
@@ -658,7 +661,7 @@ pub fn portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() {
         let control = A9_GLOBAL_TIMER_CONTROL as *mut u32;
         let current = core::ptr::read_volatile(control);
         core::ptr::write_volatile(control, current | A9_GLOBAL_TIMER_ENABLE);
-        core::arch::asm!("dsb", "isb", options(nomem, nostack));
+        core::arch::asm!("dsb", "isb", options(nostack));
         ullRunTimeCounterStart = prvReadRunTimeCounter();
     }
 }
@@ -761,15 +764,15 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         }
 
         // Disable interrupts (but not via GIC - use CPU flag)
-        core::arch::asm!("cpsid i", options(nomem, nostack));
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         // Check if sleep should be aborted
         // Safety: the idle task has suspended the scheduler and this port has
         // masked IRQs for the tickless confirmation protocol.
         if crate::kernel::tasks::eTaskConfirmSleepModeStatus() == eSleepModeStatus::eAbortSleep {
-            core::arch::asm!("cpsie i", options(nomem, nostack));
+            core::arch::asm!("cpsie i", options(nostack));
             return;
         }
 
@@ -812,9 +815,9 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::ptr::write_volatile(timer_bgload, ulPeriodicReloadValue);
 
         // Sleep until interrupt (WFI = Wait For Interrupt)
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("wfi", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("wfi", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         /* Snapshot and stop the timer before servicing the wake source.  A
          * periodic SP804 has already reloaded by the time WFI returns on its
@@ -826,14 +829,14 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::ptr::write_volatile(timer_control, ctrl & !SP804_CTRL_ENABLE);
 
         // Re-enable interrupts briefly to let the wake interrupt execute
-        core::arch::asm!("cpsie i", options(nomem, nostack));
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("cpsie i", options(nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         // Disable interrupts again for tick compensation
-        core::arch::asm!("cpsid i", options(nomem, nostack));
-        core::arch::asm!("dsb", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        core::arch::asm!("cpsid i", options(nostack));
+        core::arch::asm!("dsb", options(nostack));
+        core::arch::asm!("isb", options(nostack));
 
         // Calculate counter clocks elapsed before the wake interrupt ran.
         let ullCurrentCounts = ulTimerValueAtWake as u64 + 1;
@@ -886,7 +889,7 @@ pub fn vPortSuppressTicksAndSleep(xExpectedIdleTime: TickType_t) {
         core::ptr::write_volatile(timer_bgload, ulPeriodicReloadValue);
 
         // Re-enable interrupts
-        core::arch::asm!("cpsie i", options(nomem, nostack));
+        core::arch::asm!("cpsie i", options(nostack));
     }
 }
 

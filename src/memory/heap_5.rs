@@ -650,6 +650,11 @@ use core::alloc::{GlobalAlloc, Layout};
 /// static ALLOCATOR: freertos_in_rust::memory::FreeRtosAllocator =
 ///     freertos_in_rust::memory::FreeRtosAllocator;
 /// ```
+///
+/// This is a task-context allocator, not an ISR allocator. ISR allocation or
+/// reallocation returns null; ISR deallocation deliberately leaks the block
+/// without accessing the heap. Move owned allocations back to a task to free
+/// them. These checks must not panic: GlobalAlloc may not unwind.
 pub struct FreeRtosAllocator;
 
 const GLOBAL_ALLOC_HEADER_SIZE: usize = core::mem::size_of::<*mut u8>();
@@ -661,6 +666,10 @@ const GLOBAL_ALLOC_HEADER_SIZE: usize = core::mem::size_of::<*mut u8>();
 /// `GlobalAlloc` contract permits callers to request a larger alignment, so an
 /// over-allocation and an unaligned metadata write are required here.
 unsafe fn prv_alloc_layout(layout: Layout) -> *mut u8 {
+    // [AMENDMENT] Scheduler suspension does not protect the heap from an ISR.
+    if crate::port::xPortIsInsideInterrupt() != crate::types::pdFALSE {
+        return ptr::null_mut();
+    }
     let alignment = layout.align().max(portBYTE_ALIGNMENT);
     let allocation_size = match layout
         .size()
@@ -691,6 +700,9 @@ unsafe fn prv_alloc_layout(layout: Layout) -> *mut u8 {
 }
 
 unsafe fn prv_free_layout(ptr: *mut u8) {
+    if crate::port::xPortIsInsideInterrupt() != crate::types::pdFALSE {
+        return;
+    }
     if !ptr.is_null() {
         let raw = ptr::read_unaligned(ptr.sub(GLOBAL_ALLOC_HEADER_SIZE) as *const *mut u8);
         vPortFree(raw as *mut c_void);

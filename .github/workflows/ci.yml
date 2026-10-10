@@ -30,6 +30,7 @@ jobs:
           set -euo pipefail
           cargo fmt --all --check
           cargo fmt --manifest-path xtask/Cargo.toml --all --check
+          cargo fmt --manifest-path tests/codegen/Cargo.toml --all --check
           for manifest in demo/*/Cargo.toml hardware-tests/*/Cargo.toml tests/qemu/*/Cargo.toml; do
             cargo fmt --manifest-path "$manifest" --all --check
           done
@@ -67,6 +68,19 @@ jobs:
           --no-default-features
           --features std,port-test,alloc,all-kernel-features
           -- --test-threads=1
+
+      - name: Check native heap provenance under Miri
+        shell: bash
+        env:
+          MIRIFLAGS: -Zmiri-ignore-leaks
+        run: |
+          set -euo pipefail
+          for allocator in heap-4 heap-5; do
+            cargo +nightly miri test --test allocator \
+              --no-default-features \
+              --features "std,port-test,${allocator},all-kernel-features" \
+              -- --test-threads=1
+          done
 
   address-sanitizer:
     name: AddressSanitizer (host allocator matrix)

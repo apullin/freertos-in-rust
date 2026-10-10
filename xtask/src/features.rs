@@ -126,6 +126,9 @@ pub fn check(repository: &Path) -> Result<(), String> {
             run_positive(&format!("{} + {name}", port.feature), &mut command)?;
             checks += 1;
         }
+        if port.target.is_some() {
+            check_codegen(repository, port)?;
+        }
     }
 
     for capability in CAPABILITIES
@@ -174,19 +177,36 @@ pub fn check(repository: &Path) -> Result<(), String> {
     run_positive("canonical docs configuration", &mut docs)?;
     checks += 1;
 
-    let negative_cases: [(&str, &[&str]); 5] = [
-        ("no port", &[]),
-        ("multiple ports", &["port-dummy", "port-test", "std"]),
-        ("multiple allocators", &["port-dummy", "heap-4", "heap-5"]),
+    let negative_cases: [(&str, &[&str], &str); 5] = [
+        (
+            "no port",
+            &[],
+            "select exactly one FreeRTOS-in-Rust port feature",
+        ),
+        (
+            "multiple ports",
+            &["port-dummy", "port-test", "std"],
+            "port features are mutually exclusive",
+        ),
+        (
+            "multiple allocators",
+            &["port-dummy", "heap-4", "heap-5"],
+            "allocator features are mutually exclusive",
+        ),
         (
             "multiple architecture widths",
             &["port-dummy", "arch-64bit"],
+            "Cannot enable both arch-32bit and arch-64bit",
         ),
-        ("multiple tick widths", &["port-dummy", "tick-64bit"]),
+        (
+            "multiple tick widths",
+            &["port-dummy", "tick-64bit"],
+            "Cannot enable multiple tick width features",
+        ),
     ];
-    for (description, features) in negative_cases {
+    for (description, features, diagnostic) in negative_cases {
         let mut command = check_command(repository, features, None);
-        run_expected_failure(description, &mut command)?;
+        run_expected_failure(description, diagnostic, &mut command)?;
         checks += 1;
     }
 
@@ -199,6 +219,53 @@ fn defined_features(repository: &Path) -> Result<BTreeSet<String>, String> {
     let contents = fs::read_to_string(&manifest)
         .map_err(|error| format!("could not read {}: {error}", manifest.display()))?;
     Ok(parse_features(&contents))
+}
+
+fn check_codegen(repository: &Path, port: &Port) -> Result<(), String> {
+    let directory = repository.join("target/xtask/codegen");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let ir_path = directory.join(format!("{}.ll", port.feature));
+    let mut command = cargo(repository);
+    command
+        .args([
+            "rustc",
+            "--manifest-path",
+            "tests/codegen/Cargo.toml",
+            "--release",
+        ])
+        .arg("--target-dir")
+        .arg(&directory)
+        .arg("--target")
+        .arg(port.target.unwrap())
+        .arg("--features")
+        .arg(format!("freertos-in-rust/{}", port.feature))
+        .arg("--")
+        .arg(format!("--emit=llvm-ir={}", ir_path.display()));
+    run_positive(
+        &format!("{} optimized compiler barriers", port.feature),
+        &mut command,
+    )?;
+
+    let ir = fs::read_to_string(&ir_path).map_err(|error| error.to_string())?;
+    for probe in [
+        "read_across_yield",
+        "read_in_separate_masked_regions",
+        "read_across_memory_barrier",
+    ] {
+        let function = ir
+            .split(&format!("@{probe}("))
+            .nth(1)
+            .and_then(|tail| tail.split("\n}").next())
+            .ok_or_else(|| format!("missing optimized probe {probe} in {}", ir_path.display()))?;
+        let reads = function
+            .lines()
+            .filter(|line| line.contains("load i32, ptr %value,"))
+            .count();
+        if reads != 2 {
+            return Err(format!("{} / {probe}: expected two ordinary loads across synchronization, found {reads}; inspect {}", port.feature, ir_path.display()));
+        }
+    }
+    Ok(())
 }
 
 fn parse_features(manifest: &str) -> BTreeSet<String> {
@@ -257,7 +324,11 @@ fn run_positive(description: &str, command: &mut Command) -> Result<(), String> 
     }
 }
 
-fn run_expected_failure(description: &str, command: &mut Command) -> Result<(), String> {
+fn run_expected_failure(
+    description: &str,
+    diagnostic: &str,
+    command: &mut Command,
+) -> Result<(), String> {
     println!("CHECK expected rejection: {description}");
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = command
@@ -267,8 +338,13 @@ fn run_expected_failure(description: &str, command: &mut Command) -> Result<(), 
         Err(format!(
             "invalid configuration `{description}` unexpectedly compiled successfully"
         ))
-    } else {
+    } else if String::from_utf8_lossy(&output.stderr).contains(diagnostic) {
         Ok(())
+    } else {
+        Err(format!(
+            "`{description}` failed without expected diagnostic `{diagnostic}`:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 

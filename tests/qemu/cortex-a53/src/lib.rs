@@ -104,7 +104,7 @@ static TICK_ISR_HOOK: AtomicUsize = AtomicUsize::new(0);
 /// Optional test-firmware hook called from the physical timer ISR.
 pub type TickIsrHook = extern "C" fn();
 
-/// Install a hook before starting the scheduler.
+/// Install or replace a hook atomically. The callback must remain valid forever.
 pub fn set_tick_isr_hook(hook: TickIsrHook) {
     TICK_ISR_HOOK.store(hook as usize, Ordering::Release);
 }
@@ -236,8 +236,7 @@ pub extern "C" fn vApplicationIRQHandler(interrupt_acknowledge: u32) {
         TIMER_INTERRUPTS.fetch_add(1, Ordering::Relaxed);
         let hook = TICK_ISR_HOOK.load(Ordering::Acquire);
         if hook != 0 {
-            // The setter accepts only function pointers and is called before
-            // interrupts are enabled; the stored address remains immutable.
+            // The setter atomically publishes only static function pointers.
             let hook: TickIsrHook = unsafe { core::mem::transmute(hook) };
             hook();
         }

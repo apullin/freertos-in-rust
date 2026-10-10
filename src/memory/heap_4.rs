@@ -143,14 +143,15 @@ fn heap_get_block_size(block: &BlockLink) -> usize {
 ///
 /// Sets up the free list with a single block spanning the entire heap.
 unsafe fn prv_heap_init() {
-    let mut ux_start_address = UC_HEAP.as_ptr() as usize;
+    // [AMENDMENT] Keep writable provenance; as_ptr() would borrow the heap shared.
+    let mut ux_start_address = ptr::addr_of_mut!(UC_HEAP).cast::<u8>() as usize;
     let mut x_total_heap_size = configTOTAL_HEAP_SIZE;
 
     // Ensure the heap starts on a correctly aligned boundary
     if (ux_start_address & PORT_BYTE_ALIGNMENT_MASK) != 0 {
         ux_start_address += PORT_BYTE_ALIGNMENT_MASK;
         ux_start_address &= !PORT_BYTE_ALIGNMENT_MASK;
-        x_total_heap_size -= ux_start_address - (UC_HEAP.as_ptr() as usize);
+        x_total_heap_size -= ux_start_address - (ptr::addr_of_mut!(UC_HEAP).cast::<u8>() as usize);
     }
 
     // Calculate end address (leaving room for end marker)
@@ -512,6 +513,11 @@ use core::alloc::{GlobalAlloc, Layout};
 /// static ALLOCATOR: freertos_in_rust::memory::FreeRtosAllocator =
 ///     freertos_in_rust::memory::FreeRtosAllocator;
 /// ```
+///
+/// This is a task-context allocator, not an ISR allocator. ISR allocation or
+/// reallocation returns null; ISR deallocation deliberately leaks the block
+/// without accessing the heap. Move owned allocations back to a task to free
+/// them. These checks must not panic: GlobalAlloc may not unwind.
 pub struct FreeRtosAllocator;
 
 const GLOBAL_ALLOC_HEADER_SIZE: usize = core::mem::size_of::<*mut u8>();
@@ -523,6 +529,10 @@ const GLOBAL_ALLOC_HEADER_SIZE: usize = core::mem::size_of::<*mut u8>();
 /// `GlobalAlloc` contract permits callers to request a larger alignment, so an
 /// over-allocation and an unaligned metadata write are required here.
 unsafe fn prv_alloc_layout(layout: Layout) -> *mut u8 {
+    // [AMENDMENT] Scheduler suspension does not protect the heap from an ISR.
+    if crate::port::xPortIsInsideInterrupt() != crate::types::pdFALSE {
+        return ptr::null_mut();
+    }
     let alignment = layout.align().max(portBYTE_ALIGNMENT);
     let allocation_size = match layout
         .size()
@@ -553,6 +563,9 @@ unsafe fn prv_alloc_layout(layout: Layout) -> *mut u8 {
 }
 
 unsafe fn prv_free_layout(ptr: *mut u8) {
+    if crate::port::xPortIsInsideInterrupt() != crate::types::pdFALSE {
+        return;
+    }
     if !ptr.is_null() {
         let raw = ptr::read_unaligned(ptr.sub(GLOBAL_ALLOC_HEADER_SIZE) as *const *mut u8);
         vPortFree(raw as *mut c_void);

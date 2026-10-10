@@ -1606,6 +1606,16 @@ unsafe fn prvReadMessageFromBuffer(
 #[inline(always)]
 unsafe fn sbSEND_COMPLETED(pxStreamBuffer: *mut StreamBuffer_t) {
     vTaskSuspendAll();
+    // [AMENDMENT] The consumer may drain the data and register its next wait
+    // between the producer's trigger check and this lock. Recheck under the
+    // same exclusion as waiter registration; an old completion must not wake
+    // a new receive with zero bytes before its timeout.
+    if prvBytesInBuffer(pxStreamBuffer)
+        < (*pxStreamBuffer).xTriggerLevelBytes.load(Ordering::Relaxed)
+    {
+        xTaskResumeAll();
+        return;
+    }
     let xTaskWaitingToReceive = prvTakeWaitingTask(&(*pxStreamBuffer).xTaskWaitingToReceive);
     if !xTaskWaitingToReceive.is_null() {
         xTaskNotifyIndexed(
@@ -1641,6 +1651,13 @@ unsafe fn sbSEND_COMPLETE_FROM_ISR(
     pxHigherPriorityTaskWoken: *mut BaseType_t,
 ) {
     let uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+    // [AMENDMENT] Pair the trigger recheck with waiter registration on all CPUs.
+    if prvBytesInBuffer(pxStreamBuffer)
+        < (*pxStreamBuffer).xTriggerLevelBytes.load(Ordering::Relaxed)
+    {
+        portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+        return;
+    }
     let xTaskWaitingToReceive = prvTakeWaitingTask(&(*pxStreamBuffer).xTaskWaitingToReceive);
     if !xTaskWaitingToReceive.is_null() {
         xTaskNotifyIndexedFromISR(
@@ -2328,6 +2345,60 @@ mod tests {
             assert_eq!(xMessageBufferIsFull(message), pdFALSE);
             vMessageBufferDelete(message);
         }
+    }
+
+    #[cfg(feature = "port-test")]
+    #[test]
+    fn delayed_send_completion_does_not_wake_a_new_waiter_on_an_empty_buffer() {
+        crate::port::test_port_reset();
+        let mut storage = [0u8; 16];
+        let mut control = StaticStreamBuffer_t::new();
+        let mut waiter = TCB_t::new();
+        let waiter_ptr = ptr::addr_of_mut!(waiter);
+        unsafe {
+            // No scheduler runs in this serial fixture. Model a consumer
+            // which drained the published data, then registered its next wait
+            // before the producer's delayed completion acquired exclusion.
+            vTaskResetState();
+            let handle =
+                xStreamBufferCreateStatic(storage.len(), 1, storage.as_mut_ptr(), &mut control);
+            let buffer = handle as *mut StreamBuffer_t;
+            (*buffer)
+                .xTaskWaitingToReceive
+                .store(waiter_ptr.cast(), Ordering::Release);
+            sbSEND_COMPLETED(buffer);
+            assert_eq!(
+                (*buffer).xTaskWaitingToReceive.load(Ordering::Acquire),
+                waiter_ptr.cast()
+            );
+            assert_eq!((*waiter_ptr).ucNotifyState[0], 0);
+
+            crate::port::test_port_set_inside_interrupt(true);
+            let mut woken = pdFALSE;
+            sbSEND_COMPLETE_FROM_ISR(buffer, &mut woken);
+            crate::port::test_port_set_inside_interrupt(false);
+            assert_eq!(
+                (*buffer).xTaskWaitingToReceive.load(Ordering::Acquire),
+                waiter_ptr.cast()
+            );
+            assert_eq!((*waiter_ptr).ucNotifyState[0], 0);
+            assert_eq!(woken, pdFALSE);
+
+            let byte = 42u8;
+            assert_eq!(
+                prvWriteMessageToBuffer(buffer, ptr::addr_of!(byte).cast(), 1, 15, 1),
+                1
+            );
+            sbSEND_COMPLETED(buffer);
+            assert!((*buffer)
+                .xTaskWaitingToReceive
+                .load(Ordering::Acquire)
+                .is_null());
+            assert_ne!((*waiter_ptr).ucNotifyState[0], 0);
+            vStreamBufferDelete(handle);
+            vTaskResetState();
+        }
+        crate::port::test_port_reset();
     }
 
     #[cfg(feature = "port-test")]
